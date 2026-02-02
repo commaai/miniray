@@ -15,7 +15,7 @@ from tritonclient.http import InferenceServerClient
 
 TRITON_REDIS_HOST = os.getenv('TRITON_REDIS_HOST', '127.0.0.1')
 TRITON_SERVER_ADDRESS = os.getenv('TRITON_SERVER_ADDRESS', '127.0.0.1:8000')
-TRITON_MODEL_REPOSITORY = Path(os.getenv('TRITON_MODEL_REPOSITORY', '/tmp/comma-model-repository'))
+TRITON_MODEL_REPOSITORY = Path(os.getenv('TRITON_MODEL_REPOSITORY', '/dev/shm/model-repository'))
 
 NOT_READY_MSG = "Triton server is not yet ready! If this persists for more than a few seconds, try restarting the triton server"
 CONNECTION_ERR_MSG = f"""

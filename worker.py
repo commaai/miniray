@@ -279,6 +279,7 @@ def start_worker_task(task: MinirayTask, limits: Limits, i, rm, r_master, r_resu
       'TASK_UID': str(TASK_UID),
       'TASK_UUID': task_uuid,
       'TASK_CGROUP': cgroup_task,
+      'TMPDIR': tmp_dir,
       'CACHE_ROOT':  os.path.join(tmp_dir, "index_cache"),
       'PARAMS_ROOT': os.path.join(tmp_dir, "params"),
       'LOG_ROOT': os.path.join(tmp_dir, "media/0/realdata"),
