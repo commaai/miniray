@@ -286,6 +286,7 @@ def start_worker_task(task: MinirayTask, limits: Limits, i, rm, r_master, r_resu
       'GNSS_CACHE_DIR': os.path.join(tmp_dir, "gnss_cache"),
       'CDDIS_BASE_URL': "http://gnss-cache.comma.internal:8082/gnss-data",
       'CDDIS_HOURLY_BASE_URL': "http://gnss-cache.comma.internal:8082/gnss-data-hourly",
+      'ENABLE_MODEL_CACHE': str(int(not TRITON_SERVER_ENABLED)),
       'RESULT_FILE': result_file,
     }
     python3_exe = os.path.join(venv_dir, "bin/python3")
