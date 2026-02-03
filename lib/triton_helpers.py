@@ -4,6 +4,7 @@ import glob
 import json
 import time
 import shutil
+import signal
 import subprocess
 from functools import wraps
 from pathlib import Path
@@ -86,7 +87,7 @@ def kill_triton_backend_stubs(gpu_bus_ids: Optional[list[str]] = None):
   for line in nvidia_smi_output.strip().split('\n'):
     gpu_bus_id, pid, process_name = line.split(', ')
     if (not gpu_bus_ids or gpu_bus_id in gpu_bus_ids) and 'triton_python_backend_stub' in process_name:
-      try: os.kill(int(pid), 15)
+      try: os.kill(int(pid), signal.SIGKILL)
       except ProcessLookupError: pass
 
 def get_triton_container_id() -> str:
