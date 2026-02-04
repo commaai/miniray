@@ -34,7 +34,7 @@ from miniray.lib.worker_helpers import ExponentialBackoff
 from miniray.lib.triton_helpers import TRITON_SERVER_ADDRESS
 from miniray.lib.system_helpers import get_cgroup_cpu_usage, get_cgroup_mem_usage, get_gpu_stats, get_gpu_mem_usage, get_gpu_utilization
 from miniray.lib.statsd_helpers import statsd
-from miniray.lib.helpers import Limits, desc, GB_TO_BYTES, TASK_TIMEOUT_GRACE_SECONDS, MEMORY_LIMIT_HEADROOM, JOB_CACHE_SIZE, JOB_BLOCK_SECONDS
+from miniray.lib.helpers import Limits, desc, GB_TO_BYTES, TASK_TIMEOUT_GRACE_SECONDS, MEMORY_LIMIT_HEADROOM, JOB_CACHE_SIZE
 from miniray.lib.uv import sync_venv_cache, cleanup_venvs
 from miniray import MinirayResultHeader, MinirayTask, JobMetadata, get_metadata_key
 
@@ -60,8 +60,6 @@ WORKER_ID = HOST_NAME
 ACTIVE_KEY = f"active:{PIPELINE_QUEUE}:{WORKER_ID}"
 MINIRAY_TARGET_NAME = "<remote-function>"
 MEM_LIMIT = 0.85
-
-BLOCK_JOB_KEY_PREFIX = "block:"
 
 TMP_DIR_ROOT = os.path.join("/dev/shm/tmp" if not DOCKER_CONTAINER else "/tmp", CGROUP_NODE)
 # you need a really good reason to use a global directory shared across all tasks
@@ -190,9 +188,6 @@ def update_job_metadatas(r_master:redis.StrictRedis, jobs:list[str], job_metadat
 
 def get_task(resource_manager: ResourceManager, r_master: redis.StrictRedis, r_tasks: redis.StrictRedis,
              r_results: redis.StrictRedis, job: str, job_metadatas: dict[str, JobMetadata], venvs: LRU) -> Optional[MinirayTask]:
-  if r_master.exists(BLOCK_JOB_KEY_PREFIX + job):
-    return None
-
   limits = Limits(**job_metadatas[job].limits)
   temp_key = f"{job}-pending"
   try:
@@ -342,10 +337,6 @@ def check_task_completion(pt, r_master, r_results, rm, exiting=False) -> bool:
 
   statsd.event("pipeline.worker.task_done", runtime=task_run_time, cpu=task_cpu_time, gpu=task_gpu_time, memory=task_memory_gb, gpu_memory=task_gpu_memory_gb, tags={'task_id': pt.job})
   print(f"[worker] finished miniray task from job {pt.job} stats: elapsed={task_run_time:0.2f}s cpu={task_cpu_time:0.2f}s gpu={task_gpu_time:0.2f}s mem={task_memory_gb:0.2f}GB gpumem={task_gpu_memory_gb:0.2f}GB")
-
-  # returncode 9 means something really bad happened, usually an OOM exception, so block the job for a while
-  if pt.proc.returncode in (9, -9):
-    r_master.set(BLOCK_JOB_KEY_PREFIX + pt.job, 1, ex=JOB_BLOCK_SECONDS)
 
   if timed_out:
     push_error(r_master, r_results, pt.job, pt.task_uuid, HOST_NAME, "TimeoutError", f"TimeoutError: task timed out after {pt.limits.timeout_seconds} seconds")
