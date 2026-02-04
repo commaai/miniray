@@ -66,12 +66,10 @@ MEM_LIMIT = 0.85
 
 BLOCK_JOB_KEY_PREFIX = "block:"
 
-# Protocol V2 constants
-PROTOCOL_VERSION = 0x02
-MSG_TYPE_TASK = 0x01
-MSG_TYPE_RESULT_INLINE = 0x02
-MSG_TYPE_RESULT_INDIRECT = 0x03
-MSG_TYPE_RESULT_ERROR = 0x04
+from protocol import (
+    PROTOCOL_VERSION, MSG_TYPE_TASK, MSG_TYPE_RESULT_INLINE,
+    MSG_TYPE_RESULT_INDIRECT, MSG_TYPE_RESULT_ERROR,
+)
 
 TMP_DIR_ROOT = os.path.join("/dev/shm/tmp" if not DOCKER_CONTAINER else "/tmp", CGROUP_NODE)
 # you need a really good reason to use a global directory shared across all tasks

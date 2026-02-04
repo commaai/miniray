@@ -36,14 +36,11 @@ USE_MAIN_RESULT_REDIS = bool(int(os.getenv("USE_MAIN_RESULT_REDIS", "0")))
 CACHE_ROOT = Path("/code.nfs/branches/caches")
 REMOTE_QUEUE = 'remote_v2'
 
-# Protocol V2 constants
-PROTOCOL_VERSION = 0x02
-MSG_TYPE_TASK = 0x01
-MSG_TYPE_RESULT_INLINE = 0x02
-MSG_TYPE_RESULT_INDIRECT = 0x03
-MSG_TYPE_RESULT_ERROR = 0x04
-INLINE_RESULT_THRESHOLD = 1024 * 1024  # 1MB - results smaller than this go inline
-BLPOP_TIMEOUT = 5  # seconds - timeout for blocking Redis read
+from protocol import (
+    PROTOCOL_VERSION, MSG_TYPE_TASK, MSG_TYPE_RESULT_INLINE,
+    MSG_TYPE_RESULT_INDIRECT, MSG_TYPE_RESULT_ERROR,
+    INLINE_RESULT_THRESHOLD, BLPOP_TIMEOUT,
+)
 
 #TODO xx should be referenced here
 XX_BASEDIR = os.path.abspath(os.path.join(os.path.dirname(os.path.realpath(__file__)), "../"))

@@ -17,12 +17,10 @@ import msgpack
 import pytest
 import redis
 
-# Protocol constants
-PROTOCOL_VERSION = 0x02
-MSG_TYPE_TASK = 0x01
-MSG_TYPE_RESULT_INLINE = 0x02
-MSG_TYPE_RESULT_INDIRECT = 0x03
-MSG_TYPE_RESULT_ERROR = 0x04
+from protocol import (
+    PROTOCOL_VERSION, MSG_TYPE_TASK, MSG_TYPE_RESULT_INLINE,
+    MSG_TYPE_RESULT_INDIRECT, MSG_TYPE_RESULT_ERROR,
+)
 
 
 def is_redis_available(host="localhost", port=6379):
@@ -373,6 +371,396 @@ class TestProtocolVersioning:
         assert v1_msg[4] == 0x01
         assert v2_msg[4] == 0x02
         assert v1_msg[4] != v2_msg[4]
+
+
+class TestEndToEnd:
+    """End-to-end tests simulating full executor -> worker -> executor flow."""
+
+    def test_executor_to_worker_to_executor_inline(self, redis_client):
+        """Simulate complete task flow with inline result."""
+        from miniray.executor import Executor, MiniraySubTaskResult, _execute_batch
+        from concurrent.futures import Future
+        from unittest.mock import patch, Mock
+        from functools import partial
+
+        task_queue = "e2e-task-queue"
+        result_queue = f"fq-{task_queue}"
+
+        # === EXECUTOR SIDE: Submit task ===
+        with patch('miniray.executor.redis.StrictRedis'):
+            executor = object.__new__(Executor)
+            executor.submit_queue_id = task_queue
+            executor._futures = {}
+            executor._submit_redis_master = Mock()
+
+        # Create and pack task
+        task_uuid = "e2e-uuid-001"
+        fn = lambda x: x * 2
+        pickled_fn = cloudpickle.dumps(partial(_execute_batch, fn))
+        packed_task = executor._pack_task("", pickled_fn, [(21,)], {}, task_uuid)
+
+        # Push to Redis (simulating executor._submit_task)
+        redis_client.lpush(task_queue, packed_task)
+
+        # === WORKER SIDE: Process task ===
+        # Pop task from queue
+        raw_task = redis_client.rpop(task_queue)
+        assert raw_task is not None
+
+        # Parse task (simulating worker.parse_task)
+        _, version, msg_type = struct.unpack(">IBB", raw_task[:6])
+        assert version == PROTOCOL_VERSION
+        assert msg_type == MSG_TYPE_TASK
+
+        task_payload = msgpack.unpackb(raw_task[6:], raw=False)
+        assert task_payload["uuid"] == task_uuid
+
+        # Execute task (simulating worker_task.py)
+        func = cloudpickle.loads(task_payload["fn"])
+        args, kwargs = cloudpickle.loads(task_payload["args"])
+        result = func(*args, **kwargs)  # Returns ("__inline__", bytes) or (host, key)
+
+        # Pack result (simulating worker.check_task_completion)
+        result_type, result_data = result
+        assert result_type == "__inline__"  # Small result should be inline
+
+        result_msg = msgpack.packb({
+            "job": task_queue,
+            "worker": "test-worker",
+            "task_uuid": task_uuid,
+            "result": result_data,
+        }, use_bin_type=True)
+        header = struct.pack(">IBB", len(result_msg) + 2, PROTOCOL_VERSION, MSG_TYPE_RESULT_INLINE)
+        redis_client.lpush(result_queue, header + result_msg)
+
+        # === EXECUTOR SIDE: Receive result ===
+        future = Future()
+        executor._futures[task_uuid] = [future]
+
+        # Pop result (simulating executor._reader_loop with BLPOP)
+        raw_result = redis_client.rpop(result_queue)
+        assert raw_result is not None
+
+        executor._unpack_result(raw_result)
+
+        # Verify result
+        assert future.done()
+        assert future.result() == 42  # 21 * 2
+
+    def test_executor_to_worker_to_executor_with_error(self, redis_client):
+        """Simulate complete task flow where task raises an exception."""
+        from miniray.executor import Executor, MiniraySubTaskResult, MinirayError, _execute_batch
+        from concurrent.futures import Future
+        from unittest.mock import patch, Mock
+        from functools import partial
+
+        task_queue = "e2e-error-queue"
+        result_queue = f"fq-{task_queue}"
+
+        # === EXECUTOR SIDE: Submit task ===
+        with patch('miniray.executor.redis.StrictRedis'):
+            executor = object.__new__(Executor)
+            executor.submit_queue_id = task_queue
+            executor._futures = {}
+            executor._submit_redis_master = Mock()
+
+        # Create task that will fail
+        task_uuid = "e2e-error-uuid"
+        def failing_fn(x):
+            raise ValueError(f"intentional failure: {x}")
+
+        pickled_fn = cloudpickle.dumps(partial(_execute_batch, failing_fn))
+        packed_task = executor._pack_task("", pickled_fn, [(42,)], {}, task_uuid)
+        redis_client.lpush(task_queue, packed_task)
+
+        # === WORKER SIDE: Process task ===
+        raw_task = redis_client.rpop(task_queue)
+        task_payload = msgpack.unpackb(raw_task[6:], raw=False)
+
+        func = cloudpickle.loads(task_payload["fn"])
+        args, kwargs = cloudpickle.loads(task_payload["args"])
+        result_type, result_data = func(*args, **kwargs)
+
+        # Result should still be inline (contains error info)
+        assert result_type == "__inline__"
+        subtasks = cloudpickle.loads(result_data)
+        assert len(subtasks) == 1
+        assert subtasks[0].succeeded is False
+        assert "intentional failure" in subtasks[0].exception_desc
+
+        # Pack and send result
+        result_msg = msgpack.packb({
+            "job": task_queue,
+            "worker": "test-worker",
+            "task_uuid": task_uuid,
+            "result": result_data,
+        }, use_bin_type=True)
+        header = struct.pack(">IBB", len(result_msg) + 2, PROTOCOL_VERSION, MSG_TYPE_RESULT_INLINE)
+        redis_client.lpush(result_queue, header + result_msg)
+
+        # === EXECUTOR SIDE: Receive error ===
+        future = Future()
+        executor._futures[task_uuid] = [future]
+
+        raw_result = redis_client.rpop(result_queue)
+        executor._unpack_result(raw_result)
+
+        assert future.done()
+        with pytest.raises(MinirayError) as exc_info:
+            future.result()
+        assert "intentional failure" in str(exc_info.value)
+
+    def test_executor_to_worker_to_executor_indirect(self, redis_client):
+        """Simulate complete task flow with indirect (large) result."""
+        from miniray.executor import Executor, MiniraySubTaskResult, INLINE_RESULT_THRESHOLD
+        from concurrent.futures import Future
+        from unittest.mock import patch, Mock
+
+        task_queue = "e2e-indirect-queue"
+        result_queue = f"fq-{task_queue}"
+        payload_db = 10  # Worker stores payloads in db 10
+
+        # Create a payload Redis client (simulating worker's local Redis)
+        payload_client = redis.StrictRedis(
+            host="localhost",
+            port=redis_client.connection_pool.connection_kwargs['port'],
+            db=payload_db
+        )
+        payload_client.flushdb()
+
+        try:
+            with patch('miniray.executor.redis.StrictRedis'):
+                executor = object.__new__(Executor)
+                executor.submit_queue_id = task_queue
+                executor._futures = {}
+                executor._submit_redis_master = Mock()
+
+            # === Simulate worker creating indirect result ===
+            task_uuid = "e2e-indirect-uuid"
+            large_result = MiniraySubTaskResult(True, "", "", "x" * 1000)
+            result_bytes = cloudpickle.dumps([large_result])
+
+            # Store in "worker Redis" (db 10)
+            payload_key = f"miniray-{task_uuid}"
+            payload_client.lpush(payload_key, result_bytes)
+
+            # Send indirect pointer through result queue
+            result_msg = msgpack.packb({
+                "job": task_queue,
+                "worker": "test-worker",
+                "task_uuid": task_uuid,
+                "host": "localhost",
+                "key": payload_key,
+            }, use_bin_type=True)
+            header = struct.pack(">IBB", len(result_msg) + 2, PROTOCOL_VERSION, MSG_TYPE_RESULT_INDIRECT)
+            redis_client.lpush(result_queue, header + result_msg)
+
+            # === EXECUTOR SIDE: Receive indirect result ===
+            future = Future()
+            executor._futures[task_uuid] = [future]
+
+            raw_result = redis_client.rpop(result_queue)
+
+            # Patch Redis to return our payload client for the indirect fetch
+            with patch('miniray.executor.redis.StrictRedis', return_value=payload_client):
+                executor._unpack_result(raw_result)
+
+            assert future.done()
+            assert future.result() == "x" * 1000
+        finally:
+            payload_client.flushdb()
+            payload_client.close()
+
+
+class TestInlineThresholdBoundary:
+    """Test behavior at the inline/indirect threshold boundary."""
+
+    def test_result_just_under_threshold_is_inline(self):
+        """Result just under 1MB should be inline."""
+        from miniray.executor import _execute_batch, INLINE_RESULT_THRESHOLD
+
+        # Create data that will be just under threshold after serialization
+        # Account for MiniraySubTaskResult overhead (~100 bytes)
+        target_size = INLINE_RESULT_THRESHOLD - 1000
+        data = "x" * target_size
+
+        def return_data():
+            return data
+
+        result_type, result_data = _execute_batch(return_data, ((),))
+
+        assert result_type == "__inline__", f"Expected inline, got {result_type}"
+        assert len(result_data) < INLINE_RESULT_THRESHOLD
+
+    def test_result_just_over_threshold_is_indirect(self):
+        """Result just over 1MB should be indirect."""
+        from miniray.executor import _execute_batch, INLINE_RESULT_THRESHOLD
+        from unittest.mock import patch
+
+        # Create data that will exceed threshold after serialization
+        target_size = INLINE_RESULT_THRESHOLD + 10000
+        data = "x" * target_size
+
+        def return_data():
+            return data
+
+        with patch('miniray.executor._wrap_result_local_redis') as mock_wrap:
+            mock_wrap.return_value = ("worker-host", "result-key")
+            result_type, result_data = _execute_batch(return_data, ((),))
+
+        assert mock_wrap.called, "Expected _wrap_result_local_redis to be called for large result"
+        assert result_type == "worker-host"
+        assert result_data == "result-key"
+
+    def test_threshold_constant_is_1mb(self):
+        """Verify threshold constant is exactly 1MB."""
+        from miniray.executor import INLINE_RESULT_THRESHOLD
+        assert INLINE_RESULT_THRESHOLD == 1024 * 1024
+
+
+class TestFailureInjection:
+    """Test error handling and recovery scenarios."""
+
+    def test_corrupt_message_header_handled(self):
+        """Corrupt message header should be logged, not crash."""
+        from miniray.executor import Executor
+        from unittest.mock import patch, Mock
+        import sys
+        from io import StringIO
+
+        with patch('miniray.executor.redis.StrictRedis'):
+            executor = object.__new__(Executor)
+            executor._futures = {}
+            executor._submit_redis_master = Mock()
+
+        # Various corrupt messages
+        corrupt_messages = [
+            b"",                    # Empty
+            b"x",                   # Too short
+            b"xxxxx",              # Still too short (need 6 bytes)
+            b"\x00\x00\x00\x10\x99\x01" + b"x" * 10,  # Wrong version
+        ]
+
+        for msg in corrupt_messages:
+            # Should not raise, just log
+            executor._unpack_result(msg)
+
+    def test_missing_payload_key_in_indirect_result(self, redis_client):
+        """Missing payload in worker Redis should set exception on future."""
+        from miniray.executor import Executor, MinirayError
+        from concurrent.futures import Future
+        from unittest.mock import patch, Mock
+
+        with patch('miniray.executor.redis.StrictRedis'):
+            executor = object.__new__(Executor)
+            executor._futures = {}
+            executor._submit_redis_master = Mock()
+
+        task_uuid = "missing-payload-uuid"
+        future = Future()
+        executor._futures[task_uuid] = [future]
+
+        # Create indirect result pointing to non-existent key
+        result_msg = msgpack.packb({
+            "job": "test",
+            "worker": "worker-1",
+            "task_uuid": task_uuid,
+            "host": "localhost",
+            "key": "nonexistent-key",
+        }, use_bin_type=True)
+        header = struct.pack(">IBB", len(result_msg) + 2, PROTOCOL_VERSION, MSG_TYPE_RESULT_INDIRECT)
+        message = header + result_msg
+
+        # Create a Redis client that returns None for lpop (missing key)
+        mock_redis = Mock()
+        mock_redis.lpop.return_value = None
+
+        with patch('miniray.executor.redis.StrictRedis', return_value=mock_redis):
+            executor._unpack_result(message)
+
+        assert future.done()
+        with pytest.raises(MinirayError) as exc_info:
+            future.result()
+        assert "Did not find payload" in str(exc_info.value)
+
+    def test_redis_connection_error_in_reader_loop(self):
+        """Redis connection error should be caught and retried."""
+        from miniray.executor import Executor
+        from unittest.mock import patch, Mock, call
+        import sys
+        from io import StringIO
+
+        with patch('miniray.executor.redis.StrictRedis'):
+            executor = object.__new__(Executor)
+            executor._futures = {}
+            executor._result_redis = Mock()
+            executor.result_queue_id = "test-queue"
+            executor.expiry_check_timer = time.time() + 100  # Skip expiry check
+            executor._shutdown_reader_thread = False
+
+        # Make blpop raise ConnectionError first, then return None and shutdown
+        call_count = [0]
+        def blpop_side_effect(*args, **kwargs):
+            call_count[0] += 1
+            if call_count[0] == 1:
+                raise redis.ConnectionError("Connection lost")
+            executor._shutdown_reader_thread = True
+            return None
+
+        executor._result_redis.blpop.side_effect = blpop_side_effect
+
+        # Capture stderr
+        old_stderr = sys.stderr
+        sys.stderr = StringIO()
+
+        try:
+            # Run with patched sleep to avoid 10s wait
+            with patch('miniray.executor.time.sleep') as mock_sleep:
+                executor._reader_loop()
+
+            # Should have logged error and called sleep(10)
+            mock_sleep.assert_called_with(10)
+            stderr_output = sys.stderr.getvalue()
+            assert "Redis connection error" in stderr_output
+        finally:
+            sys.stderr = old_stderr
+
+    def test_blpop_timeout_triggers_expiry_check(self):
+        """BLPOP timeout should allow expiry check to run."""
+        from miniray.executor import Executor
+        from unittest.mock import patch, Mock
+
+        with patch('miniray.executor.redis.StrictRedis'):
+            executor = object.__new__(Executor)
+            executor._futures = {"old-task": []}
+            executor._result_redis = Mock()
+            executor._submit_redis_master = Mock()
+            executor._submit_redis_tasks = Mock()
+            executor.result_queue_id = "test-queue"
+            executor.submit_queue_id = "task-queue"
+            executor.expiry_check_timer = 0  # Force expiry check
+            executor.no_work_found_cnt = 0
+            executor._shutdown_reader_thread = False
+
+        # Mock Redis responses
+        executor._result_redis.blpop.side_effect = [None, None]  # Two timeouts
+        executor._submit_redis_master.get.return_value = None  # No start data
+        executor._submit_redis_tasks.llen.return_value = 0  # Empty queue
+
+        call_count = [0]
+        original_blpop = executor._result_redis.blpop.side_effect
+        def counting_blpop(*args, **kwargs):
+            call_count[0] += 1
+            if call_count[0] >= 2:
+                executor._shutdown_reader_thread = True
+            return None
+
+        executor._result_redis.blpop.side_effect = counting_blpop
+
+        executor._reader_loop()
+
+        # Expiry check should have been called (it checks _submit_redis_master.get)
+        assert executor._submit_redis_master.get.called or executor.no_work_found_cnt > 0
 
 
 if __name__ == "__main__":

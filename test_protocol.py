@@ -12,13 +12,10 @@ import pytest
 from unittest.mock import Mock, patch
 from concurrent.futures import Future
 
-# Protocol constants
-PROTOCOL_VERSION = 0x02
-MSG_TYPE_TASK = 0x01
-MSG_TYPE_RESULT_INLINE = 0x02
-MSG_TYPE_RESULT_INDIRECT = 0x03
-MSG_TYPE_RESULT_ERROR = 0x04
-INLINE_RESULT_THRESHOLD = 1024 * 1024
+from protocol import (
+    PROTOCOL_VERSION, MSG_TYPE_TASK, MSG_TYPE_RESULT_INLINE,
+    MSG_TYPE_RESULT_INDIRECT, MSG_TYPE_RESULT_ERROR, INLINE_RESULT_THRESHOLD,
+)
 
 
 def pack_task(submit_queue_id: str, function_ptr: str, pickled_fn: bytes,
