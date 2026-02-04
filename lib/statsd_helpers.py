@@ -1,4 +1,5 @@
 import statsd
+import atexit
 
 global_tags: dict[str, str] = {}
 
@@ -36,3 +37,4 @@ class StatsClient(statsd.StatsClient):
 
 
 statsd = StatsClient('localhost', 8125)
+atexit.register(lambda: statsd.close())
