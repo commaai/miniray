@@ -58,7 +58,6 @@ CGROUP_NODE = "worker"
 CGROUP_CONTROLLERS = ["cpu", "cpuset", "memory"]
 WORKER_ID = HOST_NAME
 ACTIVE_KEY = f"active:{PIPELINE_QUEUE}:{WORKER_ID}"
-SUSPEND_KEY = f"suspend:{WORKER_ID}"
 MINIRAY_TARGET_NAME = "<remote-function>"
 MEM_LIMIT = 0.85
 
@@ -194,18 +193,16 @@ def get_task(resource_manager: ResourceManager, r_master: redis.StrictRedis, r_t
   if r_master.exists(BLOCK_JOB_KEY_PREFIX + job):
     return None
 
-  # check resources before popping task
   limits = Limits(**job_metadatas[job].limits)
   temp_key = f"{job}-pending"
   try:
     resource_manager.consume(limits, job, task_uuid=temp_key)
   except ResourceLimitError as e:
-    r_master.set(SUSPEND_KEY, desc(e), ex=SLEEP_TIME_MAX+1)
     print(f"[worker] {MINIRAY_TARGET_NAME} resource limit: {desc(e)}")
     return None
 
   raw_task = r_tasks.rpop(job)
-  if not raw_task:
+  if not raw_task:  # something else grabbed the last task
     resource_manager.release(temp_key)
     return None
 
@@ -384,7 +381,6 @@ def cleanup_task(cgroup_task, alloc_id, task_gid, r_master, triton_client, ignor
         cgroup_delete(cgroup_task, recursive=True)
       break
     except Exception as e:
-      r_master.set(SUSPEND_KEY, desc(e), ex=SLEEP_TIME_MAX)
       print(f"[worker] {cgroup_task} cgroup cleanup failed: {desc(e)}")
       if ignore_errors:
         break
@@ -395,7 +391,6 @@ def cleanup_task(cgroup_task, alloc_id, task_gid, r_master, triton_client, ignor
       cleanup_shm_by_gid(alloc_id, triton_client, task_gid)
       break
     except Exception as e:
-      r_master.set(SUSPEND_KEY, desc(e), ex=SLEEP_TIME_MAX)
       print(f"[worker] {cgroup_task} /dev/shm cleanup failed: {desc(e)}")
       if ignore_errors:
         break
@@ -449,7 +444,6 @@ def main():
 
   os.nice(1)
 
-  r_master.delete(SUSPEND_KEY)
   while not sigterm_handler.raised:
     r_master.set(ACTIVE_KEY, 1, ex=SLEEP_TIME_MAX+1)
     backoff.sleep()
