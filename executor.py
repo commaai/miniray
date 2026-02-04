@@ -358,6 +358,10 @@ class Executor(BaseExecutor):
       return
 
     length, version, msg_type = struct.unpack(">IBB", res[:6])
+    expected_len = length + 4  # length field doesn't include itself
+    if len(res) != expected_len:
+      print(f"[ERROR] Message length mismatch: header says {expected_len} bytes, got {len(res)}", file=sys.stderr)
+      return
     if version != PROTOCOL_VERSION:
       print(f"[ERROR] Unknown protocol version: {version}", file=sys.stderr)
       return

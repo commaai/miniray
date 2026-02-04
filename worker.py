@@ -145,6 +145,9 @@ def parse_task(raw_task: bytes) -> MinirayTask:
     raise ValueError(f"Task too short: {len(raw_task)} bytes")
 
   length, version, msg_type = struct.unpack(">IBB", raw_task[:6])
+  expected_len = length + 4  # length field doesn't include itself
+  if len(raw_task) != expected_len:
+    raise ValueError(f"Message length mismatch: header says {expected_len} bytes, got {len(raw_task)}")
   if version != PROTOCOL_VERSION:
     raise ValueError(f"Unknown protocol version: {version}")
   if msg_type != MSG_TYPE_TASK:
