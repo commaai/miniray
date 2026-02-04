@@ -634,17 +634,30 @@ class TestFailureInjection:
             executor._futures = {}
             executor._submit_redis_master = Mock()
 
-        # Various corrupt messages
+        # Various corrupt messages - each should log an error containing the expected substring
+        # Build a valid-length but wrong-version message
+        wrong_version_payload = msgpack.packb({'test': 'data'})
+        wrong_version_header = struct.pack('>IBB', len(wrong_version_payload) + 2, 0x99, 0x02)
+        wrong_version_msg = wrong_version_header + wrong_version_payload
+
         corrupt_messages = [
-            b"",                    # Empty
-            b"x",                   # Too short
-            b"xxxxx",              # Still too short (need 6 bytes)
-            b"\x00\x00\x00\x10\x99\x01" + b"x" * 10,  # Wrong version
+            (b"", "too short"),                    # Empty
+            (b"x", "too short"),                   # Too short
+            (b"xxxxx", "too short"),               # Still too short (need 6 bytes)
+            (b"\x00\x00\x00\x10\x99\x01" + b"x" * 10, "mismatch"),  # Length mismatch
+            (wrong_version_msg, "unknown protocol version"),  # Wrong protocol version
         ]
 
-        for msg in corrupt_messages:
-            # Should not raise, just log
-            executor._unpack_result(msg)
+        old_stderr = sys.stderr
+        for msg, expected_error in corrupt_messages:
+            sys.stderr = StringIO()
+            try:
+                # Should not raise, just log
+                executor._unpack_result(msg)
+                stderr_output = sys.stderr.getvalue().lower()
+                assert expected_error in stderr_output, f"Expected '{expected_error}' in stderr for {msg!r}, got: {stderr_output}"
+            finally:
+                sys.stderr = old_stderr
 
     def test_missing_payload_key_in_indirect_result(self, redis_client):
         """Missing payload in worker Redis should set exception on future."""
