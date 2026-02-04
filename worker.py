@@ -40,14 +40,11 @@ class Task:
   def __init__(self, task: MinirayTask, limits: Limits, proc_index: int,
                resource_manager: ResourceManager, r_master: redis.StrictRedis, r_results: redis.StrictRedis,
                job_metadata: JobMetadata, venv_cache: LRU, triton_client):
-    self.r_master = r_master
-    self.r_master.set(f'{self.task_uuid}-start',
-                  json.dumps([self.job, WORKER_ID, time.time() + self.limits.timeout_seconds + TASK_TIMEOUT_GRACE_SECONDS]),
-                  ex=7*24*3600)
     self.task = task
     self.limits = limits
     self.proc_index = proc_index
     self.rm = resource_manager
+    self.r_master = r_master
     self.r_results = r_results
     self.job_metadata = job_metadata
     self.venv_cache = venv_cache
@@ -91,6 +88,11 @@ class Task:
         self._done = True
         self._error = ("VenvError", f"{type(e).__name__}:{e}")
         return False
+
+      # Set start time tracking in Redis
+      self.r_master.set(f'{self.task_uuid}-start',
+                        json.dumps([self.job, WORKER_ID, time.time() + self.limits.timeout_seconds + TASK_TIMEOUT_GRACE_SECONDS]),
+                        ex=7*24*3600)
 
       # Fetch function if needed
       if self.task.function_ptr:
