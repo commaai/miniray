@@ -5,12 +5,13 @@ import time
 import uuid
 import redis
 import socket
-import base64
+import struct
 import logging
 import subprocess
 import threading
 import traceback
 import cloudpickle
+import msgpack
 import multiprocessing as mp
 from tqdm import tqdm
 
@@ -35,6 +36,12 @@ USE_MAIN_RESULT_REDIS = bool(int(os.getenv("USE_MAIN_RESULT_REDIS", "0")))
 CACHE_ROOT = Path("/code.nfs/branches/caches")
 REMOTE_QUEUE = 'remote_v2'
 
+# Protocol V2 constants
+PROTOCOL_VERSION = 0x02
+MSG_TYPE_TASK = 0x01
+MSG_TYPE_RESULT_SUCCESS = 0x02
+MSG_TYPE_RESULT_ERROR = 0x03
+
 #TODO xx should be referenced here
 XX_BASEDIR = os.path.abspath(os.path.join(os.path.dirname(os.path.realpath(__file__)), "../"))
 XX_BASEPATH = Path(XX_BASEDIR)
@@ -52,8 +59,8 @@ class MinirayTask(NamedTuple):
   uuid: str
   job: str
   function_ptr: str
-  pickled_fn: str
-  pickled_args: str
+  pickled_fn: bytes  # raw cloudpickle bytes (V2 protocol)
+  pickled_args: bytes  # raw cloudpickle bytes (V2 protocol)
 
 class JobMetadata(NamedTuple):
   valid: bool
@@ -314,43 +321,63 @@ class Executor(BaseExecutor):
     pickled_args = cloudpickle.dumps((args, kwargs))
     if len(pickled_fn) + len(pickled_args) > MAX_ARG_STRLEN:
       raise RuntimeError(f"Can't send target, size ({len(pickled_fn) + len(pickled_args)}) exceeds max allowed length ({MAX_ARG_STRLEN})")
-    task = MinirayTask(
-      task_uuid,
-      self.submit_queue_id,
-      function_ptr,
-      base64.b64encode(pickled_fn).decode('ascii'),
-      base64.b64encode(pickled_args).decode('ascii'),
-    )
-    return json.dumps(task, ensure_ascii=False).encode('utf-8')
+
+    # V2 protocol: msgpack with length-prefixed framing
+    payload = msgpack.packb({
+      "uuid": task_uuid,
+      "job": self.submit_queue_id,
+      "function_ptr": function_ptr,
+      "fn": pickled_fn,
+      "args": pickled_args,
+    }, use_bin_type=True)
+
+    # Frame: [4-byte length][1-byte version][1-byte type][payload]
+    header = struct.pack(">IBB", len(payload) + 2, PROTOCOL_VERSION, MSG_TYPE_TASK)
+    return header + payload
 
   def _unpack_result(self, res: bytes) -> None:
-    dat = res.split(b"\x00", 1)
-    header = MinirayResultHeader(*json.loads(dat[0]))
-    if header.task_uuid not in self._futures:
-      print(f"[ERROR] finished unstarted task: {header.task_uuid} [{header.worker}]", file=sys.stderr)
+    # V2 protocol: length-prefixed msgpack
+    if len(res) < 6:
+      print(f"[ERROR] Malformed result: too short ({len(res)} bytes)", file=sys.stderr)
       return
-    self._submit_redis_master.delete(f"{header.task_uuid}-start")
-    futures = self._futures.pop(header.task_uuid)
 
-    if header.succeeded:
-      hostname, key = cloudpickle.loads(dat[1])
-      r = redis.StrictRedis(hostname, db=10)
-      result_payload = r.lpop(key)
+    length, version, msg_type = struct.unpack(">IBB", res[:6])
+    if version != PROTOCOL_VERSION:
+      print(f"[ERROR] Unknown protocol version: {version}", file=sys.stderr)
+      return
+
+    payload = msgpack.unpackb(res[6:], raw=False)
+    task_uuid = payload["task_uuid"]
+    job = payload["job"]
+    worker = payload["worker"]
+
+    if task_uuid not in self._futures:
+      print(f"[ERROR] finished unstarted task: {task_uuid} [{worker}]", file=sys.stderr)
+      return
+
+    self._submit_redis_master.delete(f"{task_uuid}-start")
+    futures = self._futures.pop(task_uuid)
+
+    if msg_type == MSG_TYPE_RESULT_SUCCESS:
+      # Fetch result from worker's Redis
+      r = redis.StrictRedis(payload["host"], db=10)
+      result_payload = r.lpop(payload["key"])
       if result_payload is None:
         for future in futures:
           future.set_exception(MinirayError("MinirayError", "Did not find payload on worker redis. Results may be piling up and reader has fallen more than " +
                                                             f'{DEFAULT_RESULT_PAYLOAD_TIMEOUT_SECONDS/60:.1f} minutes behind. If your results are small, consider a larger chunksize'
-                                                            '. If your results are big, consider multiple miniray executors.', header.job, header.worker))
+                                                            '. If your results are big, consider multiple miniray executors.', job, worker))
       else:
         subtasks = cloudpickle.loads(result_payload)
         for future, subtask in zip(futures, subtasks, strict=True):
           if subtask.succeeded:
             future.set_result(subtask.result)
           else:
-            future.set_exception(MinirayError(subtask.exception_type, subtask.exception_desc, header.job, header.worker))
-    else:
+            future.set_exception(MinirayError(subtask.exception_type, subtask.exception_desc, job, worker))
+
+    elif msg_type == MSG_TYPE_RESULT_ERROR:
       for future in futures:
-        future.set_exception(MinirayError(header.exception_type, header.exception_desc, header.job, header.worker))
+        future.set_exception(MinirayError(payload["exception_type"], payload["exception_desc"], job, worker))
 
   def _submit_task(self, batch: list[bytes]) -> None:
     self._submit_redis_tasks.lpush(f'{self.submit_queue_id}', *batch)

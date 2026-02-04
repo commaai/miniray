@@ -10,7 +10,7 @@ os.environ['OPENBLAS_NUM_THREADS'] = '1'
 import random
 import json
 import time
-import base64
+import struct
 import redis
 import signal
 import socket
@@ -22,6 +22,8 @@ import collections
 import grp
 import stat
 import shutil
+import msgpack
+import cloudpickle
 import numpy as np
 from typing import Optional
 from tritonclient.http import InferenceServerClient
@@ -63,6 +65,12 @@ MINIRAY_TARGET_NAME = "<remote-function>"
 MEM_LIMIT = 0.85
 
 BLOCK_JOB_KEY_PREFIX = "block:"
+
+# Protocol V2 constants
+PROTOCOL_VERSION = 0x02
+MSG_TYPE_TASK = 0x01
+MSG_TYPE_RESULT_SUCCESS = 0x02
+MSG_TYPE_RESULT_ERROR = 0x03
 
 TMP_DIR_ROOT = os.path.join("/dev/shm/tmp" if not DOCKER_CONTAINER else "/tmp", CGROUP_NODE)
 # you need a really good reason to use a global directory shared across all tasks
@@ -130,9 +138,38 @@ def reap_process(proc):
   except (ChildProcessError, ProcessLookupError):
     return True  # all processes have exited
 
+def parse_task(raw_task: bytes) -> MinirayTask:
+  """Parse V2 protocol task from msgpack format."""
+  if len(raw_task) < 6:
+    raise ValueError(f"Task too short: {len(raw_task)} bytes")
+
+  length, version, msg_type = struct.unpack(">IBB", raw_task[:6])
+  if version != PROTOCOL_VERSION:
+    raise ValueError(f"Unknown protocol version: {version}")
+  if msg_type != MSG_TYPE_TASK:
+    raise ValueError(f"Expected task message type, got: {msg_type}")
+
+  payload = msgpack.unpackb(raw_task[6:], raw=False)
+  return MinirayTask(
+    uuid=payload["uuid"],
+    job=payload["job"],
+    function_ptr=payload["function_ptr"],
+    pickled_fn=payload["fn"],      # raw bytes in V2
+    pickled_args=payload["args"],  # raw bytes in V2
+  )
+
 def push_error(r_master, r_result, job, task_uuid, host, error_type, error_msg):
-  result_header = MinirayResultHeader(job, False, host, error_type, error_msg, task_uuid)
-  r_result.lpush(f'fq-{job}', json.dumps(result_header))
+  # V2 protocol: msgpack with length-prefixed framing
+  result_msg = msgpack.packb({
+    "job": job,
+    "worker": host,
+    "task_uuid": task_uuid,
+    "exception_type": error_type,
+    "exception_desc": error_msg,
+  }, use_bin_type=True)
+  header = struct.pack(">IBB", len(result_msg) + 2, PROTOCOL_VERSION, MSG_TYPE_RESULT_ERROR)
+  r_result.lpush(f'fq-{job}', header + result_msg)
+  r_result.expire(f'fq-{job}', 86400)
   r_master.delete(f'{task_uuid}-start')
   statsd.event('pipeline.worker.task_error', tags={'task_id': job, 'type': error_type})
 
@@ -196,7 +233,7 @@ def get_task(resource_manager: ResourceManager, r_master: redis.StrictRedis, r_t
   if not raw_task:
     return None  # something else grabbed the last task
 
-  task = MinirayTask(*json.loads(raw_task))
+  task = parse_task(raw_task)
 
   if not job_metadatas[job].valid:
     push_error(r_master, r_results, task.job, task.uuid, HOST_NAME, "InvalidJobError", "No valid JobMetadata, key was probably missing")
@@ -235,13 +272,14 @@ def start_worker_task(task: MinirayTask, limits: Limits, i, rm, r_master, r_resu
   job = task.job
   task_uuid = task.uuid
 
+  # V2 protocol: pickled_fn and pickled_args are already raw bytes
   if task.function_ptr:
     pickled_fn = r_master.get(task.function_ptr)
     #TODO this should raise a task error
     assert pickled_fn is not None, f"Cached function {task.function_ptr} not found in redis"
   else:
-    pickled_fn = base64.b64decode(task.pickled_fn)
-  pickled_args = base64.b64decode(task.pickled_args)
+    pickled_fn = task.pickled_fn
+  pickled_args = task.pickled_args
 
   try:
     alloc_id = f"proc{i:0>3}"
@@ -362,16 +400,24 @@ def check_task_completion(pt, r_master, r_results, rm, exiting=False) -> bool:
     payload = task_result[1:]
 
     if success_marker == b'\x00':
-      result_header = MinirayResultHeader(pt.job, True, HOST_NAME, "", "", pt.task_uuid)
-      r_results.lpush(f'fq-{pt.job}', json.dumps(result_header).encode() + b'\x00' + payload)
+      # V2 protocol: success result with pointer to worker Redis
+      hostname, key = cloudpickle.loads(payload)
+      result_msg = msgpack.packb({
+        "job": pt.job,
+        "worker": HOST_NAME,
+        "task_uuid": pt.task_uuid,
+        "host": hostname,
+        "key": key,
+      }, use_bin_type=True)
+      header = struct.pack(">IBB", len(result_msg) + 2, PROTOCOL_VERSION, MSG_TYPE_RESULT_SUCCESS)
+      r_results.lpush(f'fq-{pt.job}', header + result_msg)
+      r_results.expire(f'fq-{pt.job}', 86400)
+      r_master.delete(f'{pt.task_uuid}-start')
     else:
+      # Error from task execution
       error_type, error_desc = json.loads(payload)
       statsd.event('pipeline.worker.task_error', tags={'task_id': pt.job, 'type': error_type})
-      result_header = MinirayResultHeader(pt.job, False, HOST_NAME, error_type, error_desc, pt.task_uuid)
-      r_results.lpush(f'fq-{pt.job}', json.dumps(result_header))
-
-    r_results.expire(f'fq-{pt.job}', 86400)  # extend availability for 24 hours
-    r_master.delete(f'{pt.task_uuid}-start')
+      push_error(r_master, r_results, pt.job, pt.task_uuid, HOST_NAME, error_type, error_desc)
   elif pt.proc.returncode == 0:
     # Process exited cleanly but no result data - unexpected
     push_error(r_master, r_results, pt.job, pt.task_uuid, HOST_NAME, "NoResultError", "Task completed but produced no result")
