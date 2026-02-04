@@ -47,20 +47,6 @@ class TaskAllocation:
 
 class ResourceLimitError(Exception):
   pass
-class ProcessorLimitError(ResourceLimitError):
-  pass
-class MemoryLimitError(ResourceLimitError):
-  pass
-class SmallGPUMemoryLimitError(ResourceLimitError):
-  pass
-class BigGPUMemoryLimitError(ResourceLimitError):
-  pass
-class GPUStatusError(ResourceLimitError):
-  pass
-class GPULockedError(ResourceLimitError):
-  pass
-class NoTritonClientError(ResourceLimitError):
-  pass
 
 class ResourceManager():
   def __init__(self, mem_limit_multiplier=0.9, triton_client=None):
@@ -131,14 +117,14 @@ class ResourceManager():
         elif not self.gpu_status.valid:
           raise Exception("unable to read gpu status")
       except Exception as e:
-        raise GPUStatusError(str(e)) from e
+        raise Exception(str(e)) from e
 
     mem_bytes = limits.memory * GB_TO_BYTES
     small_gpu_mem_bytes = limits.small_gpu_memory * GB_TO_BYTES
     big_gpu_mem_bytes = limits.big_gpu_memory * GB_TO_BYTES
 
     if limits.requires_gpu() and self._has_active_gpu_job() and self.gpu_locked_job != job:
-      raise GPULockedError(f"GPU is locked to job {self.gpu_locked_job}")
+      raise Exception(f"GPU is locked to job {self.gpu_locked_job} cannot accept {job}")
 
     cpu_usages = self._get_cpu_usage_by_node()
     mem_usages = self._get_mem_usage_by_node()
@@ -151,19 +137,19 @@ class ResourceManager():
       small_gpu = min(self.small_gpus or self.big_gpus, key=lambda gpu: gpu_mem_usages[gpu.index])  # Fall back to big GPUs if no small ones are available
 
     if limits.triton and self._triton_client is None:
-      raise NoTritonClientError("Triton client is not available for this ResourceManager")
+      raise Exception("Triton client is not available for this ResourceManager")
     candidate_nodes = [node for node in self.cpu_totals if limits.cpu_threads <= self.cpu_totals[node] - cpu_usages[node]]
     if not candidate_nodes:
-      raise ProcessorLimitError(f"CPU request of {limits.cpu_threads} will exceed limit of {sum(self.cpu_totals.values())}")
+      raise Exception(f"CPU request of {limits.cpu_threads} will exceed limit of {sum(self.cpu_totals.values())}")
     candidate_nodes = [node for node in candidate_nodes if (mem_bytes) <= self.mem_totals[node] - mem_usages[node]]
     if not candidate_nodes:
-      raise MemoryLimitError(f"memory request of {mem_bytes} will exceed limit of {sum(self.mem_totals.values())}")
+      raise Exception(f"memory request of {mem_bytes} will exceed limit of {sum(self.mem_totals.values())}")
     numa_node = min(candidate_nodes, key=lambda node: cpu_usages[node] / self.cpu_totals[node])  # Pick the candidate node with the lowest CPU usage
 
     if small_gpu_mem_bytes and (not small_gpu or gpu_mem_usages[small_gpu.index] + small_gpu_mem_bytes > small_gpu.memory):
-      raise SmallGPUMemoryLimitError("small gpu memory request of {} will exceed limit of {}".format(small_gpu_mem_bytes, small_gpu.memory if small_gpu else 0.0))
+      raise Exception("small gpu memory request of {} will exceed limit of {}".format(small_gpu_mem_bytes, small_gpu.memory if small_gpu else 0.0))
     if big_gpu_mem_bytes and (not big_gpu or gpu_mem_usages[big_gpu.index] + big_gpu_mem_bytes > big_gpu.memory):
-      raise BigGPUMemoryLimitError("big gpu memory request of {} will exceed limit of {}".format(big_gpu_mem_bytes, big_gpu.memory if big_gpu else 0.0))
+      raise Exception("big gpu memory request of {} will exceed limit of {}".format(big_gpu_mem_bytes, big_gpu.memory if big_gpu else 0.0))
 
     # Store allocation (no exceptions should be raised below this line)
     if self.gpu_locked_job != job and limits.requires_gpu():
