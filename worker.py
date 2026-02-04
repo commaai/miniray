@@ -29,7 +29,7 @@ from lru import LRU
 
 from miniray.lib.cgroup import cgroup_create, cgroup_set_subcontrollers, cgroup_set_memory_limit, cgroup_set_numa_nodes, cgroup_kill, cgroup_delete, cgroup_clear_all_children
 from miniray.lib.sig_term_handler import SigTermHandler
-from miniray.lib.resource_manager import ResourceManager
+from miniray.lib.resource_manager import ResourceManager, ResourceLimitError
 from miniray.lib.worker_helpers import ExponentialBackoff
 from miniray.lib.triton_helpers import TRITON_SERVER_ADDRESS
 from miniray.lib.system_helpers import get_cgroup_cpu_usage, get_cgroup_mem_usage, get_gpu_stats, get_gpu_mem_usage, get_gpu_utilization
@@ -190,25 +190,21 @@ def update_job_metadatas(r_master:redis.StrictRedis, jobs:list[str], job_metadat
         job_metadatas[job] = JobMetadata(False, 1, "", "", Limits().asdict())
 
 def get_task(resource_manager: ResourceManager, r_master: redis.StrictRedis, r_tasks: redis.StrictRedis,
-             job: str, job_metadatas: dict[str, JobMetadata], venvs: LRU) -> Optional[MinirayTask]:
+             r_results: redis.StrictRedis, job: str, job_metadatas: dict[str, JobMetadata], venvs: LRU) -> Optional[MinirayTask]:
   if not job_metadatas[job].valid:
-    return None
-
-  try:
-    ensure_venv(job, job_metadatas[job].codedir, venvs)
-  except (ValueError, AssertionError) as e:
-    push_error(r_master, r_results, task.job, task.uuid, HOST_NAME, f"VenvError", f"{type(e).__name__}:{e}")
     return None
 
   if r_master.exists(BLOCK_JOB_KEY_PREFIX + job):
     return None
 
+  # check resources before popping task
   limits = Limits(**job_metadatas[job].limits)
   temp_key = f"{job}-pending"
-  err = resource_manager.consume(limits, job, task_uuid=temp_key)
-  if err is not None:
-    r_master.set(SUSPEND_KEY, err, ex=SLEEP_TIME_MAX+1)
-    print(f"[worker] {MINIRAY_TARGET_NAME} resource limit: {err}")
+  try:
+    resource_manager.consume(limits, job, task_uuid=temp_key)
+  except ResourceLimitError as e:
+    r_master.set(SUSPEND_KEY, desc(e), ex=SLEEP_TIME_MAX+1)
+    print(f"[worker] {MINIRAY_TARGET_NAME} resource limit: {desc(e)}")
     return None
 
   raw_task = r_tasks.rpop(job)
@@ -218,6 +214,14 @@ def get_task(resource_manager: ResourceManager, r_master: redis.StrictRedis, r_t
 
   task = MinirayTask(*json.loads(raw_task))
   resource_manager.rekey(temp_key, task.uuid)
+
+  try:
+    ensure_venv(job, job_metadatas[job].codedir, venvs)
+  except (ValueError, AssertionError) as e:
+    push_error(r_master, r_results, task.job, task.uuid, HOST_NAME, f"VenvError", f"{type(e).__name__}:{e}")
+    resource_manager.release(task.uuid)
+    return None
+
   r_master.set(f'{task.uuid}-start',
                json.dumps([task.job, WORKER_ID, time.time() + limits.timeout_seconds + TASK_TIMEOUT_GRACE_SECONDS]),
                ex=7*24*3600)
@@ -465,11 +469,11 @@ def main():
       # schedule new task if slot is free
       task = None
       if current_gpu_job is not None:
-        task = get_task(rm, r_master, r_tasks, current_gpu_job, job_metadatas, venvs)
+        task = get_task(rm, r_master, r_tasks, r_results, current_gpu_job, job_metadatas, venvs)
       if task is None:
         job = get_randomly_scheduled_job(r_master, jobs, job_metadatas)
         if job is not None:
-          task = get_task(rm, r_master, r_tasks, job, job_metadatas, venvs)
+          task = get_task(rm, r_master, r_tasks, r_results, job, job_metadatas, venvs)
       if task is None:
         continue
 
