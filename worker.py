@@ -191,9 +191,6 @@ def update_job_metadatas(r_master:redis.StrictRedis, jobs:list[str], job_metadat
 
 def get_task(resource_manager: ResourceManager, r_master: redis.StrictRedis, r_tasks: redis.StrictRedis,
              r_results: redis.StrictRedis, job: str, job_metadatas: dict[str, JobMetadata], venvs: LRU) -> Optional[MinirayTask]:
-  if not job_metadatas[job].valid:
-    return None
-
   if r_master.exists(BLOCK_JOB_KEY_PREFIX + job):
     return None
 
@@ -214,6 +211,11 @@ def get_task(resource_manager: ResourceManager, r_master: redis.StrictRedis, r_t
 
   task = MinirayTask(*json.loads(raw_task))
   resource_manager.rekey(temp_key, task.uuid)
+
+  if not job_metadatas[job].valid:
+    push_error(r_master, r_results, task.job, task.uuid, HOST_NAME, "InvalidJobError", "No valid JobMetadata, key was probably missing")
+    resource_manager.release(task.uuid)
+    return None
 
   try:
     ensure_venv(job, job_metadatas[job].codedir, venvs)
