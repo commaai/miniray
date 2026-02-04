@@ -39,6 +39,10 @@ from miniray.lib.statsd_helpers import statsd
 from miniray.lib.helpers import Limits, desc, GB_TO_BYTES, TASK_TIMEOUT_GRACE_SECONDS, MEMORY_LIMIT_HEADROOM, JOB_CACHE_SIZE, JOB_BLOCK_SECONDS
 from miniray.lib.uv import sync_venv_cache, cleanup_venvs
 from miniray import MinirayResultHeader, MinirayTask, JobMetadata, get_metadata_key
+from protocol import (
+    PROTOCOL_VERSION, MSG_TYPE_TASK, MSG_TYPE_RESULT_INLINE,
+    MSG_TYPE_RESULT_INDIRECT, MSG_TYPE_RESULT_ERROR,
+)
 
 ProcTask = collections.namedtuple("ProcTask", ["proc", "job", "alloc_id", 'task_gid', "cgroup_name", "limits",
                                                "task_uuid", "start_time", "result_file"])
@@ -65,11 +69,6 @@ MINIRAY_TARGET_NAME = "<remote-function>"
 MEM_LIMIT = 0.85
 
 BLOCK_JOB_KEY_PREFIX = "block:"
-
-from protocol import (
-    PROTOCOL_VERSION, MSG_TYPE_TASK, MSG_TYPE_RESULT_INLINE,
-    MSG_TYPE_RESULT_INDIRECT, MSG_TYPE_RESULT_ERROR,
-)
 
 TMP_DIR_ROOT = os.path.join("/dev/shm/tmp" if not DOCKER_CONTAINER else "/tmp", CGROUP_NODE)
 # you need a really good reason to use a global directory shared across all tasks

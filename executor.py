@@ -26,6 +26,11 @@ from typing import Any, Callable, Iterable, Iterator, NamedTuple, Optional, Sequ
 from dataclasses import dataclass, asdict, field, replace
 
 from miniray.lib.helpers import Limits, extract_error, StreamLogger
+from protocol import (
+    PROTOCOL_VERSION, MSG_TYPE_TASK, MSG_TYPE_RESULT_INLINE,
+    MSG_TYPE_RESULT_INDIRECT, MSG_TYPE_RESULT_ERROR,
+    INLINE_RESULT_THRESHOLD, BLPOP_TIMEOUT,
+)
 
 MAX_ARG_STRLEN = 131071  # max length for unix string arguments, see https://stackoverflow.com/a/29802900
 REDIS_HOST = os.getenv('REDIS_HOST', 'redis.comma.internal')
@@ -35,12 +40,6 @@ DEFAULT_RESULT_PAYLOAD_TIMEOUT_SECONDS = 20 * 60
 USE_MAIN_RESULT_REDIS = bool(int(os.getenv("USE_MAIN_RESULT_REDIS", "0")))
 CACHE_ROOT = Path("/code.nfs/branches/caches")
 REMOTE_QUEUE = 'remote_v2'
-
-from protocol import (
-    PROTOCOL_VERSION, MSG_TYPE_TASK, MSG_TYPE_RESULT_INLINE,
-    MSG_TYPE_RESULT_INDIRECT, MSG_TYPE_RESULT_ERROR,
-    INLINE_RESULT_THRESHOLD, BLPOP_TIMEOUT,
-)
 
 #TODO xx should be referenced here
 XX_BASEDIR = os.path.abspath(os.path.join(os.path.dirname(os.path.realpath(__file__)), "../"))
