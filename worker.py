@@ -202,9 +202,10 @@ def get_task(resource_manager: ResourceManager, r_master: redis.StrictRedis, r_t
     push_error(r_master, r_results, task.job, task.uuid, HOST_NAME, "InvalidJobError", "No valid JobMetadata, key was probably missing")
     return None
 
-  ensure_venv(job, job_metadatas[job].codedir, venvs)
-  if job not in venvs:
-    push_error(r_master, r_results, task.job, task.uuid, HOST_NAME, "VenvError", "Failed to setup venv for job")
+  try:
+    ensure_venv(job, job_metadatas[job].codedir, venvs)
+  except (ValueError, AssertionError) as e:
+    push_error(r_master, r_results, task.job, task.uuid, HOST_NAME, f"VenvError", f"{type(e).__name__}:{e}")
     return None
 
   limits = Limits(**job_metadatas[job].limits)
@@ -410,6 +411,7 @@ def ensure_venv(job: str, codedir: str, venv_cache: LRU):
     venv_dir = str(sync_venv_cache(codedir, TASK_UID, job))
     venv_cache[job] = venv_dir
     cleanup_venvs(TASK_UID, keep_venvs=list(venv_cache.keys()))
+  assert job in venv_cache, "Failed to find venv in cache"
 
 
 def main():
