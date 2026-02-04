@@ -34,7 +34,7 @@ from miniray.lib.worker_helpers import ExponentialBackoff
 from miniray.lib.triton_helpers import TRITON_SERVER_ADDRESS
 from miniray.lib.system_helpers import get_cgroup_cpu_usage, get_cgroup_mem_usage, get_gpu_stats, get_gpu_mem_usage, get_gpu_utilization
 from miniray.lib.statsd_helpers import statsd
-from miniray.lib.helpers import Limits, desc, GB_TO_BYTES, TASK_TIMEOUT_GRACE_SECONDS, MEMORY_LIMIT_HEADROOM, JOB_CACHE_SIZE, JOB_BLOCK_SECONDS
+from miniray.lib.helpers import Limits, desc, GB_TO_BYTES, TASK_TIMEOUT_GRACE_SECONDS, JOB_CACHE_SIZE
 from miniray.lib.uv import sync_venv_cache, cleanup_venvs
 from miniray import MinirayResultHeader, MinirayTask, JobMetadata, get_metadata_key
 
@@ -58,11 +58,7 @@ CGROUP_NODE = "worker"
 CGROUP_CONTROLLERS = ["cpu", "cpuset", "memory"]
 WORKER_ID = HOST_NAME
 ACTIVE_KEY = f"active:{PIPELINE_QUEUE}:{WORKER_ID}"
-SUSPEND_KEY = f"suspend:{WORKER_ID}"
 MINIRAY_TARGET_NAME = "<remote-function>"
-MEM_LIMIT = 0.85
-
-BLOCK_JOB_KEY_PREFIX = "block:"
 
 TMP_DIR_ROOT = os.path.join("/dev/shm/tmp" if not DOCKER_CONTAINER else "/tmp", CGROUP_NODE)
 # you need a really good reason to use a global directory shared across all tasks
@@ -191,45 +187,38 @@ def update_job_metadatas(r_master:redis.StrictRedis, jobs:list[str], job_metadat
 
 def get_task(resource_manager: ResourceManager, r_master: redis.StrictRedis, r_tasks: redis.StrictRedis,
              r_results: redis.StrictRedis, job: str, job_metadatas: dict[str, JobMetadata], venvs: LRU) -> Optional[MinirayTask]:
-  job_blocked_key = BLOCK_JOB_KEY_PREFIX + job
+  limits = Limits(**job_metadatas[job].limits)
+  temp_key = f"{job}-pending"
+  try:
+    resource_manager.consume(limits, job, task_uuid=temp_key)
+  except ResourceLimitError as e:
+    print(f"[worker] {MINIRAY_TARGET_NAME} resource limit: {desc(e)}")
+    return None
+
   raw_task = r_tasks.rpop(job)
-  if not raw_task:
-    return None  # something else grabbed the last task
+  if not raw_task:  # something else grabbed the last task
+    resource_manager.release(temp_key)
+    return None
 
   task = MinirayTask(*json.loads(raw_task))
+  resource_manager.rekey(temp_key, task.uuid)
 
   if not job_metadatas[job].valid:
     push_error(r_master, r_results, task.job, task.uuid, HOST_NAME, "InvalidJobError", "No valid JobMetadata, key was probably missing")
+    resource_manager.release(task.uuid)
     return None
 
   try:
     ensure_venv(job, job_metadatas[job].codedir, venvs)
   except (ValueError, AssertionError) as e:
     push_error(r_master, r_results, task.job, task.uuid, HOST_NAME, f"VenvError", f"{type(e).__name__}:{e}")
+    resource_manager.release(task.uuid)
     return None
 
-  limits = Limits(**job_metadatas[job].limits)
   r_master.set(f'{task.uuid}-start',
                json.dumps([task.job, WORKER_ID, time.time() + limits.timeout_seconds + TASK_TIMEOUT_GRACE_SECONDS]),
                ex=7*24*3600)
-
-  # job has experienced recent unexpected failure, extend block time and immediately return error
-  job_blocked_key = BLOCK_JOB_KEY_PREFIX + job
-  if r_master.exists(job_blocked_key):
-    r_master.set(job_blocked_key, 1, ex=JOB_BLOCK_SECONDS)
-    push_error(r_master, r_results, task.job, task.uuid, HOST_NAME, "RecentSigKill", "Not run due to recent SIGKILL (likely OOM exception)")
-    return None
-
-  # return task if enough resources are available, otherwise return task to queue
-  try:
-    resource_manager.consume(limits, job, task.uuid)
-    return task
-  except ResourceLimitError as e:
-    r_tasks.rpush(job, raw_task)
-    r_master.delete(f'{task.uuid}-start')
-    r_master.set(SUSPEND_KEY, desc(e), ex=SLEEP_TIME_MAX+1)
-    print(f"[worker] {MINIRAY_TARGET_NAME} resource limit: {desc(e)}")
-    return None
+  return task
 
 def start_worker_task(task: MinirayTask, limits: Limits, i, rm, r_master, r_results, venv_dir):
   job = task.job
@@ -248,7 +237,7 @@ def start_worker_task(task: MinirayTask, limits: Limits, i, rm, r_master, r_resu
     task_gid = grp.getgrnam(alloc_id).gr_gid if not DOCKER_CONTAINER else TASK_UID
     task_extra_groups = ["video"] + ["docker"] if not DOCKER_CONTAINER else []
     cgroup_task = os.path.join(CGROUP_NODE, alloc_id) if not DOCKER_CONTAINER else ""
-    mem_limit_bytes = int((limits.memory or 1) * MEMORY_LIMIT_HEADROOM * GB_TO_BYTES)
+    mem_limit_bytes = int((limits.memory or 1) * GB_TO_BYTES)
     tmp_dir = get_tmp_dir_for_task(alloc_id)
 
     # Get allocation info from resource limiter
@@ -348,10 +337,6 @@ def check_task_completion(pt, r_master, r_results, rm, exiting=False) -> bool:
   statsd.event("pipeline.worker.task_done", runtime=task_run_time, cpu=task_cpu_time, gpu=task_gpu_time, memory=task_memory_gb, gpu_memory=task_gpu_memory_gb, tags={'task_id': pt.job})
   print(f"[worker] finished miniray task from job {pt.job} stats: elapsed={task_run_time:0.2f}s cpu={task_cpu_time:0.2f}s gpu={task_gpu_time:0.2f}s mem={task_memory_gb:0.2f}GB gpumem={task_gpu_memory_gb:0.2f}GB")
 
-  # returncode 9 means something really bad happened, usually an OOM exception, so block the job for a while
-  if pt.proc.returncode in (9, -9):
-    r_master.set(BLOCK_JOB_KEY_PREFIX + pt.job, 1, ex=JOB_BLOCK_SECONDS)
-
   if timed_out:
     push_error(r_master, r_results, pt.job, pt.task_uuid, HOST_NAME, "TimeoutError", f"TimeoutError: task timed out after {pt.limits.timeout_seconds} seconds")
   elif pt.proc.returncode != 0 and not exiting:
@@ -386,7 +371,6 @@ def cleanup_task(cgroup_task, alloc_id, task_gid, r_master, triton_client, ignor
         cgroup_delete(cgroup_task, recursive=True)
       break
     except Exception as e:
-      r_master.set(SUSPEND_KEY, desc(e), ex=SLEEP_TIME_MAX)
       print(f"[worker] {cgroup_task} cgroup cleanup failed: {desc(e)}")
       if ignore_errors:
         break
@@ -397,7 +381,6 @@ def cleanup_task(cgroup_task, alloc_id, task_gid, r_master, triton_client, ignor
       cleanup_shm_by_gid(alloc_id, triton_client, task_gid)
       break
     except Exception as e:
-      r_master.set(SUSPEND_KEY, desc(e), ex=SLEEP_TIME_MAX)
       print(f"[worker] {cgroup_task} /dev/shm cleanup failed: {desc(e)}")
       if ignore_errors:
         break
@@ -419,7 +402,7 @@ def main():
 
   # NOTE: This won't attempt to connect to triton until a request is made
   triton_client = InferenceServerClient(TRITON_SERVER_ADDRESS, verbose=False) if TRITON_SERVER_ENABLED else None
-  rm = ResourceManager(mem_limit_multiplier=MEM_LIMIT, triton_client=triton_client)
+  rm = ResourceManager(triton_client=triton_client)
 
   venvs: LRU[str, str] = LRU(JOB_CACHE_SIZE)
   job_metadatas: LRU[str, JobMetadata] = LRU(JOB_CACHE_SIZE)
@@ -451,7 +434,6 @@ def main():
 
   os.nice(1)
 
-  r_master.delete(SUSPEND_KEY)
   while not sigterm_handler.raised:
     r_master.set(ACTIVE_KEY, 1, ex=SLEEP_TIME_MAX+1)
     backoff.sleep()
