@@ -347,6 +347,19 @@ class Executor(BaseExecutor):
     header = struct.pack(">IBB", len(payload) + 2, PROTOCOL_VERSION, MSG_TYPE_TASK)
     return header + payload
 
+  def _resolve_futures(self, futures: list[Future], subtasks: list, task_uuid: str, job: str, worker: str) -> None:
+    """Resolve futures from subtask results, handling count mismatches."""
+    if len(futures) != len(subtasks):
+      print(f"[ERROR] Result count mismatch for {task_uuid}: expected {len(futures)}, got {len(subtasks)}", file=sys.stderr)
+      for future in futures:
+        future.set_exception(MinirayError("MinirayError", f"Result count mismatch: expected {len(futures)}, got {len(subtasks)}", job, worker))
+    else:
+      for future, subtask in zip(futures, subtasks):
+        if subtask.succeeded:
+          future.set_result(subtask.result)
+        else:
+          future.set_exception(MinirayError(subtask.exception_type, subtask.exception_desc, job, worker))
+
   def _unpack_result(self, res: bytes) -> None:
     # V2 protocol: length-prefixed msgpack
     if len(res) < 6:
@@ -377,16 +390,7 @@ class Executor(BaseExecutor):
     if msg_type == MSG_TYPE_RESULT_INLINE:
       # Result payload is inline in the message
       subtasks = cloudpickle.loads(payload["result"])
-      if len(futures) != len(subtasks):
-        print(f"[ERROR] Result count mismatch for {task_uuid}: expected {len(futures)}, got {len(subtasks)}", file=sys.stderr)
-        for future in futures:
-          future.set_exception(MinirayError("MinirayError", f"Result count mismatch: expected {len(futures)}, got {len(subtasks)}", job, worker))
-      else:
-        for future, subtask in zip(futures, subtasks):
-          if subtask.succeeded:
-            future.set_result(subtask.result)
-          else:
-            future.set_exception(MinirayError(subtask.exception_type, subtask.exception_desc, job, worker))
+      self._resolve_futures(futures, subtasks, task_uuid, job, worker)
 
     elif msg_type == MSG_TYPE_RESULT_INDIRECT:
       # Fetch result from worker's Redis
@@ -399,16 +403,7 @@ class Executor(BaseExecutor):
                                                             '. If your results are big, consider multiple miniray executors.', job, worker))
       else:
         subtasks = cloudpickle.loads(result_payload)
-        if len(futures) != len(subtasks):
-          print(f"[ERROR] Result count mismatch for {task_uuid}: expected {len(futures)}, got {len(subtasks)}", file=sys.stderr)
-          for future in futures:
-            future.set_exception(MinirayError("MinirayError", f"Result count mismatch: expected {len(futures)}, got {len(subtasks)}", job, worker))
-        else:
-          for future, subtask in zip(futures, subtasks):
-            if subtask.succeeded:
-              future.set_result(subtask.result)
-            else:
-              future.set_exception(MinirayError(subtask.exception_type, subtask.exception_desc, job, worker))
+        self._resolve_futures(futures, subtasks, task_uuid, job, worker)
 
     elif msg_type == MSG_TYPE_RESULT_ERROR:
       for future in futures:
