@@ -8,16 +8,9 @@ dependencies = [
     "cloudpickle>=2.0.0",
     "tqdm>=4.60.0",
     "lru-dict>=1.1.0",
-]
-
-[project.optional-dependencies]
-test = [
-    "pytest>=7.0.0",
-    "numpy>=1.20.0",
-]
-worker = [
     "numpy>=1.20.0",
     "tritonclient[http]>=2.30.0",
+    "pytest>=7.0.0",
 ]
 
 [tool.pytest.ini_options]

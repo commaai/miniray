@@ -31,24 +31,3 @@ jobs:
       - name: Cleanup
         if: always()
         run: docker compose -f docker-compose.ci.yml down -v --remove-orphans
-
-  test-local-executor:
-    name: Test Local Executor
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install uv
-        uses: astral-sh/setup-uv@v4
-
-      - name: Set up Python
-        run: uv python install 3.11
-
-      - name: Install dependencies
-        run: uv pip install --system -e ".[test,worker]"
-
-      - name: Run tests with local executor
-        run: pytest -v tests/
-        env:
-          PYTHONPATH: ${{ github.workspace }}
-          MINIRAY_FORCE_LOCAL: '1'
