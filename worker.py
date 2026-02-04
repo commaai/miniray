@@ -15,7 +15,6 @@ import redis
 import signal
 import socket
 import hashlib
-import platform
 import traceback
 import subprocess
 import grp
@@ -38,16 +37,17 @@ from miniray.lib.uv import sync_venv_cache, cleanup_venvs
 from miniray import MinirayResultHeader, MinirayTask, JobMetadata, get_metadata_key
 
 class Task:
-  """Encapsulates a worker task lifecycle with init, run, check_done, and finish methods."""
-
   def __init__(self, task: MinirayTask, limits: Limits, proc_index: int,
                resource_manager: ResourceManager, r_master: redis.StrictRedis, r_results: redis.StrictRedis,
                job_metadata: JobMetadata, venv_cache: LRU, triton_client):
+    self.r_master = r_master
+    self.r_master.set(f'{self.task_uuid}-start',
+                  json.dumps([self.job, WORKER_ID, time.time() + self.limits.timeout_seconds + TASK_TIMEOUT_GRACE_SECONDS]),
+                  ex=7*24*3600)
     self.task = task
     self.limits = limits
     self.proc_index = proc_index
     self.rm = resource_manager
-    self.r_master = r_master
     self.r_results = r_results
     self.job_metadata = job_metadata
     self.venv_cache = venv_cache
@@ -67,7 +67,6 @@ class Task:
     self._done = False
     self._timed_out = False
     self._task_result = b''
-    self._task_stats = None
     self._error = None
 
   @property
@@ -79,16 +78,12 @@ class Task:
     return self.task.uuid
 
   def init(self) -> bool:
-    """Initialize task: validate job metadata, ensure venv, fetch pickled function, set up cgroups and temp dirs.
-    Returns True on success, False on failure (error will be recorded for finish)."""
     try:
-      # Validate job metadata
       if not self.job_metadata.valid:
         self._done = True
         self._error = ("InvalidJobError", "No valid JobMetadata, key was probably missing")
         return False
 
-      # Ensure venv exists
       try:
         ensure_venv(self.job, self.job_metadata.codedir, self.venv_cache)
         self.venv_dir = self.venv_cache[self.job]
@@ -97,12 +92,7 @@ class Task:
         self._error = ("VenvError", f"{type(e).__name__}:{e}")
         return False
 
-      # Set start time tracking in Redis
-      self.r_master.set(f'{self.task_uuid}-start',
-                        json.dumps([self.job, WORKER_ID, time.time() + self.limits.timeout_seconds + TASK_TIMEOUT_GRACE_SECONDS]),
-                        ex=7*24*3600)
-
-      # Fetch pickled function
+      # Fetch function if needed
       if self.task.function_ptr:
         self.pickled_fn = self.r_master.get(self.task.function_ptr)
         if self.pickled_fn is None:
@@ -138,7 +128,6 @@ class Task:
       return False
 
   def start(self) -> bool:
-    """Start the subprocess. Returns True on success, False on failure."""
     try:
       task_extra_groups = ["video"] + ["docker"] if not DOCKER_CONTAINER else []
 
@@ -157,7 +146,6 @@ class Task:
         'USER': 'batman',
         'HOME': '/home/batman',
         'TASK_UID': str(TASK_UID),
-        'TASK_UUID': self.task_uuid,
         'TASK_CGROUP': self.cgroup_name,
         'TMPDIR': self.tmp_dir,
         'CACHE_ROOT': os.path.join(self.tmp_dir, "index_cache"),
@@ -191,8 +179,6 @@ class Task:
       return False
 
   def check_done(self, exiting=False) -> bool:
-    """Check if task is done. Returns True if finished, False if still running.
-    Does NOT push anything to Redis - that happens in finish()."""
     if self._done:
       return True
 
@@ -224,15 +210,6 @@ class Task:
     except FileNotFoundError:
       self._task_result = b''
 
-    # Collect stats
-    task_gpu_stats = get_gpu_stats(self.proc.pid, [gpu.handle for gpu in self.rm.gpus])
-    task_run_time = time.time() - self.start_time
-    task_cpu_time = get_cgroup_cpu_usage(self.cgroup_name)
-    task_gpu_time = get_gpu_utilization(task_gpu_stats) * task_run_time
-    task_memory_gb = get_cgroup_mem_usage(self.cgroup_name) * 1e-9
-    task_gpu_memory_gb = get_gpu_mem_usage(task_gpu_stats) * 1e-9
-    self._task_stats = (task_run_time, task_cpu_time, task_gpu_time, task_memory_gb, task_gpu_memory_gb)
-
     # Determine result/error state
     if self._timed_out:
       self._error = ("TimeoutError", f"TimeoutError: task timed out after {self.limits.timeout_seconds} seconds")
@@ -251,8 +228,14 @@ class Task:
 
   def finish(self, ignore_errors=False):
     """Push results to Redis and cleanup. This is the ONLY place that pushes to Redis."""
-    if self._task_stats:
-      task_run_time, task_cpu_time, task_gpu_time, task_memory_gb, task_gpu_memory_gb = self._task_stats
+    # Collect stats (must happen before cgroup cleanup)
+    if self.start_time is not None:
+      task_gpu_stats = get_gpu_stats(self.proc.pid, [gpu.handle for gpu in self.rm.gpus])
+      task_run_time = time.time() - self.start_time
+      task_cpu_time = get_cgroup_cpu_usage(self.cgroup_name)
+      task_gpu_time = get_gpu_utilization(task_gpu_stats) * task_run_time
+      task_memory_gb = get_cgroup_mem_usage(self.cgroup_name) * 1e-9
+      task_gpu_memory_gb = get_gpu_mem_usage(task_gpu_stats) * 1e-9
       statsd.event("pipeline.worker.task_done", runtime=task_run_time, cpu=task_cpu_time, gpu=task_gpu_time, memory=task_memory_gb, gpu_memory=task_gpu_memory_gb, tags={'task_id': self.job})
       print(f"[worker] finished miniray task from job {self.job} stats: elapsed={task_run_time:0.2f}s cpu={task_cpu_time:0.2f}s gpu={task_gpu_time:0.2f}s mem={task_memory_gb:0.2f}GB gpumem={task_gpu_memory_gb:0.2f}GB")
 
@@ -305,9 +288,6 @@ class Task:
     self.rm.release(self.task_uuid)
 
 DOCKER_CONTAINER = os.path.exists("/.dockerenv")
-
-# note that /sys/devices/virtual/dmi/id/sys_vendor is empty on some of our dell servers
-HOST = platform.node()
 HOST_NAME = socket.gethostname()
 TASK_UID = int(os.getenv("TASK_UID", "1000")) if not DOCKER_CONTAINER else os.getuid()
 DEBUG = os.getenv("DEBUG_WORKER", None)
@@ -558,8 +538,7 @@ def main():
   while any(procs.values()):
     for i in procs.keys():
       if procs[i] and procs[i].check_done(exiting=True):
-        procs[i].finish()
-        procs[i].cleanup(ignore_errors=True)
+        procs[i].finish(ignore_errors=True)
         procs[i] = None
     time.sleep(1)
 
