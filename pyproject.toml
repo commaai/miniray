@@ -11,6 +11,10 @@ dependencies = [
     "numpy>=1.20.0",
     "tritonclient[http]>=2.30.0",
     "pytest>=7.0.0",
+    "nvidia-ml-py",
+    "tenacity",
+    "statsd",
+    "wrapt",
 ]
 
 [tool.pytest.ini_options]
