@@ -1,0 +1,39 @@
+services:
+  redis:
+    image: redis:latest
+    command: redis-server --save "" --appendonly no
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile.ci
+    depends_on:
+      redis:
+        condition: service_healthy
+    privileged: true
+    environment:
+      - REDIS_HOST=redis
+      - PIPELINE_QUEUE=miniray-test
+      - TRITON_SERVER_ENABLED=0
+      - USE_MAIN_RESULT_REDIS=1
+    command: python3 /app/miniray/worker.py
+
+  test:
+    build:
+      context: .
+      dockerfile: Dockerfile.ci
+    depends_on:
+      redis:
+        condition: service_healthy
+      worker:
+        condition: service_started
+    environment:
+      - REDIS_HOST=redis
+      - MINIRAY_QUEUE=miniray-test
+    command: >
+      bash -c "sleep 5 && python3 -m pytest -v /app/miniray/tests/"

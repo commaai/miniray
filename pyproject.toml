@@ -1,0 +1,21 @@
+[project]
+name = "miniray"
+version = "0.1.0"
+description = "Distributed task execution framework"
+requires-python = ">=3.10"
+dependencies = [
+    "redis>=4.0.0",
+    "cloudpickle>=2.0.0",
+    "tqdm>=4.60.0",
+    "lru-dict>=1.1.0",
+    "numpy>=1.20.0",
+    "tritonclient[http]>=2.30.0",
+    "pytest>=7.0.0",
+    "nvidia-ml-py",
+    "tenacity",
+    "statsd",
+    "wrapt",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

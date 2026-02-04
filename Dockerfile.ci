@@ -1,0 +1,16 @@
+FROM python:3.11-slim
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    cgroup-tools \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
+
+COPY . /app/miniray
+COPY pyproject.toml /app/pyproject.toml
+
+RUN uv lock && uv pip install --system -r pyproject.toml
+
+ENV PYTHONPATH=/app
