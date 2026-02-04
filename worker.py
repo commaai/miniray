@@ -513,7 +513,7 @@ def main():
 
   os.nice(1)
 
-  tasks: dict[int, Optional[Task]] = dict.fromkeys(range(sum(rm.cpu_totals.values())))
+  procs: dict[int, Optional[Task]] = dict.fromkeys(range(sum(rm.cpu_totals.values())))
 
   while not sigterm_handler.raised:
     r_master.set(ACTIVE_KEY, 1, ex=SLEEP_TIME_MAX+1)
@@ -522,15 +522,15 @@ def main():
     jobs = sorted(key.decode() for key in r_tasks.keys(f"*{PIPELINE_QUEUE}"))
     update_job_metadatas(r_master, jobs, job_metadatas)
     current_gpu_job = get_globally_scheduled_job(r_master, jobs, job_metadatas)
-    for i in tasks.keys():
+    for i in procs.keys():
       # check if task is done and handle completion
-      if tasks[i] and tasks[i].check_done():
-        tasks[i].finish()
-        tasks[i].cleanup()
-        tasks[i] = None
+      if procs[i] and procs[i].check_done():
+        procs[i].finish()
+        procs[i].cleanup()
+        procs[i] = None
 
       # if still working skip
-      if tasks[i] is not None:
+      if procs[i] is not None:
         continue
 
       # schedule new task if slot is free
@@ -553,7 +553,7 @@ def main():
 
       # init and run the task
       if task.init() and task.run():
-        tasks[i] = task
+        procs[i] = task
         backoff.reset()
       else:
         # init or run failed - finish will push the error to Redis
@@ -561,17 +561,17 @@ def main():
         task.cleanup()
 
   # send sigterm to all remaining processes
-  for i in tasks.keys():
-    if tasks[i] and tasks[i].proc:
-      os.killpg(tasks[i].proc.pid, signal.SIGTERM)
+  for i in procs.keys():
+    if procs[i] and procs[i].proc:
+      os.killpg(procs[i].proc.pid, signal.SIGTERM)
 
   # wait for tasks to finish
-  while any(tasks.values()):
-    for i in tasks.keys():
-      if tasks[i] and tasks[i].check_done(exiting=True):
-        tasks[i].finish()
-        tasks[i].cleanup(ignore_errors=True)
-        tasks[i] = None
+  while any(procs.values()):
+    for i in procs.keys():
+      if procs[i] and procs[i].check_done(exiting=True):
+        procs[i].finish()
+        procs[i].cleanup(ignore_errors=True)
+        procs[i] = None
     time.sleep(1)
 
 
