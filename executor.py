@@ -43,6 +43,7 @@ MSG_TYPE_RESULT_INLINE = 0x02
 MSG_TYPE_RESULT_INDIRECT = 0x03
 MSG_TYPE_RESULT_ERROR = 0x04
 INLINE_RESULT_THRESHOLD = 1024 * 1024  # 1MB - results smaller than this go inline
+BLPOP_TIMEOUT = 5  # seconds - timeout for blocking Redis read
 
 #TODO xx should be referenced here
 XX_BASEDIR = os.path.abspath(os.path.join(os.path.dirname(os.path.realpath(__file__)), "../"))
@@ -294,11 +295,18 @@ class Executor(BaseExecutor):
       try:
         if time.time() - self.expiry_check_timer > 10:
           self._check_expired_tasks()
-        results = cast(list[bytes], self._result_redis.lpop(self.result_queue_id, count=1000) or [])
-        for result in results:
-          self._unpack_result(result)
+
+        # Use BLPOP for blocking read instead of polling with sleep
+        result = self._result_redis.blpop(self.result_queue_id, timeout=BLPOP_TIMEOUT)
+        if result is not None:
+          _, res = result  # blpop returns (key, value)
+          self._unpack_result(res)
           self.expiry_check_timer = time.time()
-        time.sleep(0.1)
+
+          # Drain any additional results that arrived
+          while additional := self._result_redis.lpop(self.result_queue_id, count=999):
+            for r in cast(list[bytes], additional):
+              self._unpack_result(r)
       except redis.ConnectionError:
         print("[ERROR] Redis connection error in miniray reader thread. Retrying in 10 seconds...", file=sys.stderr)
         print(traceback.format_exc(), file=sys.stderr)
