@@ -49,7 +49,7 @@ class ResourceLimitError(Exception):
   pass
 
 class ResourceManager():
-  def __init__(self, mem_limit_multiplier=0.9, triton_client=None):
+  def __init__(self, mem_limit_multiplier=0.8, triton_client=None):
     self._triton_client = triton_client
     self.gpu_status = types.SimpleNamespace(valid=True, last_reading=time.time())
 

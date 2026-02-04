@@ -8,7 +8,6 @@ GB_TO_BYTES = 1024 ** 3
 
 # Worker configuration constants
 TASK_TIMEOUT_GRACE_SECONDS = 10
-MEMORY_LIMIT_HEADROOM = 1.2  # 20% extra to account for overhead
 JOB_CACHE_SIZE = 1024
 JOB_BLOCK_SECONDS = 60 * 5  # 5 minutes
 

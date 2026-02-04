@@ -34,7 +34,7 @@ from miniray.lib.worker_helpers import ExponentialBackoff
 from miniray.lib.triton_helpers import TRITON_SERVER_ADDRESS
 from miniray.lib.system_helpers import get_cgroup_cpu_usage, get_cgroup_mem_usage, get_gpu_stats, get_gpu_mem_usage, get_gpu_utilization
 from miniray.lib.statsd_helpers import statsd
-from miniray.lib.helpers import Limits, desc, GB_TO_BYTES, TASK_TIMEOUT_GRACE_SECONDS, MEMORY_LIMIT_HEADROOM, JOB_CACHE_SIZE
+from miniray.lib.helpers import Limits, desc, GB_TO_BYTES, TASK_TIMEOUT_GRACE_SECONDS, JOB_CACHE_SIZE
 from miniray.lib.uv import sync_venv_cache, cleanup_venvs
 from miniray import MinirayResultHeader, MinirayTask, JobMetadata, get_metadata_key
 
@@ -59,7 +59,6 @@ CGROUP_CONTROLLERS = ["cpu", "cpuset", "memory"]
 WORKER_ID = HOST_NAME
 ACTIVE_KEY = f"active:{PIPELINE_QUEUE}:{WORKER_ID}"
 MINIRAY_TARGET_NAME = "<remote-function>"
-MEM_LIMIT = 0.85
 
 TMP_DIR_ROOT = os.path.join("/dev/shm/tmp" if not DOCKER_CONTAINER else "/tmp", CGROUP_NODE)
 # you need a really good reason to use a global directory shared across all tasks
@@ -238,7 +237,7 @@ def start_worker_task(task: MinirayTask, limits: Limits, i, rm, r_master, r_resu
     task_gid = grp.getgrnam(alloc_id).gr_gid if not DOCKER_CONTAINER else TASK_UID
     task_extra_groups = ["video"] + ["docker"] if not DOCKER_CONTAINER else []
     cgroup_task = os.path.join(CGROUP_NODE, alloc_id) if not DOCKER_CONTAINER else ""
-    mem_limit_bytes = int((limits.memory or 1) * MEMORY_LIMIT_HEADROOM * GB_TO_BYTES)
+    mem_limit_bytes = int((limits.memory or 1) * GB_TO_BYTES)
     tmp_dir = get_tmp_dir_for_task(alloc_id)
 
     # Get allocation info from resource limiter
@@ -403,7 +402,7 @@ def main():
 
   # NOTE: This won't attempt to connect to triton until a request is made
   triton_client = InferenceServerClient(TRITON_SERVER_ADDRESS, verbose=False) if TRITON_SERVER_ENABLED else None
-  rm = ResourceManager(mem_limit_multiplier=MEM_LIMIT, triton_client=triton_client)
+  rm = ResourceManager(triton_client=triton_client)
 
   venvs: LRU[str, str] = LRU(JOB_CACHE_SIZE)
   job_metadatas: LRU[str, JobMetadata] = LRU(JOB_CACHE_SIZE)
