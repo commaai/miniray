@@ -42,14 +42,15 @@ class Task:
 
   def __init__(self, task: MinirayTask, limits: Limits, proc_index: int,
                resource_manager: ResourceManager, r_master: redis.StrictRedis, r_results: redis.StrictRedis,
-               venv_dir: str, triton_client):
+               job_metadata: JobMetadata, venv_cache: LRU, triton_client):
     self.task = task
     self.limits = limits
     self.proc_index = proc_index
     self.rm = resource_manager
     self.r_master = r_master
     self.r_results = r_results
-    self.venv_dir = venv_dir
+    self.job_metadata = job_metadata
+    self.venv_cache = venv_cache
     self.triton_client = triton_client
 
     # Process state
@@ -60,12 +61,14 @@ class Task:
     self.result_file = None
     self.start_time = None
     self.tmp_dir = None
+    self.venv_dir = None
 
     # Result state (populated by check_done)
     self._done = False
     self._timed_out = False
     self._task_result = b''
     self._task_stats = None
+    self._error = None
 
   @property
   def job(self):
@@ -76,9 +79,30 @@ class Task:
     return self.task.uuid
 
   def init(self) -> bool:
-    """Initialize task: fetch pickled function, set up cgroups and temp dirs.
+    """Initialize task: validate job metadata, ensure venv, fetch pickled function, set up cgroups and temp dirs.
     Returns True on success, False on failure (error will be recorded for finish)."""
     try:
+      # Validate job metadata
+      if not self.job_metadata.valid:
+        self._done = True
+        self._error = ("InvalidJobError", "No valid JobMetadata, key was probably missing")
+        return False
+
+      # Ensure venv exists
+      try:
+        ensure_venv(self.job, self.job_metadata.codedir, self.venv_cache)
+        self.venv_dir = self.venv_cache[self.job]
+      except (ValueError, AssertionError) as e:
+        self._done = True
+        self._error = ("VenvError", f"{type(e).__name__}:{e}")
+        return False
+
+      # Set start time tracking in Redis
+      self.r_master.set(f'{self.task_uuid}-start',
+                        json.dumps([self.job, WORKER_ID, time.time() + self.limits.timeout_seconds + TASK_TIMEOUT_GRACE_SECONDS]),
+                        ex=7*24*3600)
+
+      # Fetch pickled function
       if self.task.function_ptr:
         self.pickled_fn = self.r_master.get(self.task.function_ptr)
         if self.pickled_fn is None:
@@ -106,7 +130,6 @@ class Task:
       create_tmp_dir(self.tmp_dir, TASK_UID, self.task_gid)
 
       self.result_file = os.path.join(self.tmp_dir, "task_result")
-      self._error = None
       return True
     except BaseException as e:
       traceback.print_exc()
@@ -114,7 +137,7 @@ class Task:
       self._error = (type(e).__name__, traceback.format_exc())
       return False
 
-  def run(self) -> bool:
+  def start(self) -> bool:
     """Start the subprocess. Returns True on success, False on failure."""
     try:
       task_extra_groups = ["video"] + ["docker"] if not DOCKER_CONTAINER else []
@@ -226,7 +249,7 @@ class Task:
     self._done = True
     return True
 
-  def finish(self):
+  def finish(self, ignore_errors=False):
     """Push results to Redis and cleanup. This is the ONLY place that pushes to Redis."""
     if self._task_stats:
       task_run_time, task_cpu_time, task_gpu_time, task_memory_gb, task_gpu_memory_gb = self._task_stats
@@ -255,10 +278,30 @@ class Task:
       self.r_results.expire(f'fq-{self.job}', 86400)  # extend availability for 24 hours
       self.r_master.delete(f'{self.task_uuid}-start')
 
-  def cleanup(self, ignore_errors=False):
-    """Cleanup cgroups, shared memory, and temp directories."""
+    # Cleanup cgroups, shared memory, and temp directories
     if self.alloc_id is not None:
-      cleanup_task(self.cgroup_name, self.alloc_id, self.task_gid, self.triton_client, ignore_errors=ignore_errors)
+      while True:
+        try:
+          if not DOCKER_CONTAINER:
+            cgroup_kill(self.cgroup_name, recursive=True)
+            cgroup_delete(self.cgroup_name, recursive=True)
+          break
+        except Exception as e:
+          print(f"[worker] {self.cgroup_name} cgroup cleanup failed: {desc(e)}")
+          if ignore_errors:
+            break
+          time.sleep(1)
+
+      while True:
+        try:
+          cleanup_shm_by_gid(self.alloc_id, self.triton_client, self.task_gid)
+          break
+        except Exception as e:
+          print(f"[worker] {self.cgroup_name} /dev/shm cleanup failed: {desc(e)}")
+          if ignore_errors:
+            break
+          time.sleep(1)
+
     self.rm.release(self.task_uuid)
 
 DOCKER_CONTAINER = os.path.exists("/.dockerenv")
@@ -403,7 +446,6 @@ def update_job_metadatas(r_master:redis.StrictRedis, jobs:list[str], job_metadat
 def get_task(resource_manager: ResourceManager, r_master: redis.StrictRedis, r_tasks: redis.StrictRedis,
              r_results: redis.StrictRedis, job: str, job_metadatas: dict[str, JobMetadata], venvs: LRU,
              proc_index: int, triton_client) -> Optional[Task]:
-  """Get a task from the queue and return a Task object, or None if no task available."""
   limits = Limits(**job_metadatas[job].limits)
   temp_key = f"{job}-pending"
   try:
@@ -420,51 +462,8 @@ def get_task(resource_manager: ResourceManager, r_master: redis.StrictRedis, r_t
   miniray_task = MinirayTask(*json.loads(raw_task))
   resource_manager.rekey(temp_key, miniray_task.uuid)
 
-  # Validate job metadata
-  if not job_metadatas[job].valid:
-    task = Task(miniray_task, limits, proc_index, resource_manager, r_master, r_results, "", triton_client)
-    task._done = True
-    task._error = ("InvalidJobError", "No valid JobMetadata, key was probably missing")
-    return task
+  return Task(miniray_task, limits, proc_index, resource_manager, r_master, r_results, job_metadatas[job], venvs, triton_client)
 
-  # Ensure venv exists
-  try:
-    ensure_venv(job, job_metadatas[job].codedir, venvs)
-  except (ValueError, AssertionError) as e:
-    task = Task(miniray_task, limits, proc_index, resource_manager, r_master, r_results, "", triton_client)
-    task._done = True
-    task._error = ("VenvError", f"{type(e).__name__}:{e}")
-    return task
-
-  r_master.set(f'{miniray_task.uuid}-start',
-               json.dumps([miniray_task.job, WORKER_ID, time.time() + limits.timeout_seconds + TASK_TIMEOUT_GRACE_SECONDS]),
-               ex=7*24*3600)
-
-  return Task(miniray_task, limits, proc_index, resource_manager, r_master, r_results, venvs[job], triton_client)
-
-
-def cleanup_task(cgroup_task, alloc_id, task_gid, triton_client, ignore_errors=False):
-  while True:
-    try:
-      if not DOCKER_CONTAINER: # cgroup fs mounted read-only inside docker
-        cgroup_kill(cgroup_task, recursive=True)
-        cgroup_delete(cgroup_task, recursive=True)
-      break
-    except Exception as e:
-      print(f"[worker] {cgroup_task} cgroup cleanup failed: {desc(e)}")
-      if ignore_errors:
-        break
-      time.sleep(1)
-
-  while True:
-    try:
-      cleanup_shm_by_gid(alloc_id, triton_client, task_gid)
-      break
-    except Exception as e:
-      print(f"[worker] {cgroup_task} /dev/shm cleanup failed: {desc(e)}")
-      if ignore_errors:
-        break
-      time.sleep(1)
 
 def sig_callback(signal):
   print(f"[worker] cleaning up on signal: {signal} ...")
@@ -526,7 +525,6 @@ def main():
       # check if task is done and handle completion
       if procs[i] and procs[i].check_done():
         procs[i].finish()
-        procs[i].cleanup()
         procs[i] = None
 
       # if still working skip
@@ -545,20 +543,11 @@ def main():
         continue
 
       print(f"[worker] starting miniray task from job {task.job} on proc{i}")
-      # If task was created with an error (validation/venv), it's already done
-      if task._done:
-        task.finish()
-        task.cleanup()
-        continue
-
-      # init and run the task
-      if task.init() and task.run():
+      if task.init() and task.start():
         procs[i] = task
         backoff.reset()
       else:
-        # init or run failed - finish will push the error to Redis
         task.finish()
-        task.cleanup()
 
   # send sigterm to all remaining processes
   for i in procs.keys():
