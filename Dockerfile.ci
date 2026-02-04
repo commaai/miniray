@@ -1,35 +1,16 @@
 FROM python:3.11-slim
 
-# Install system dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
     cgroup-tools \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
-# Install uv
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
 
-# Copy miniray code to /app/miniray/
 COPY . /app/miniray
-
-# Copy pyproject.toml to /app/ for uv sync (worker expects it here)
 COPY pyproject.toml /app/pyproject.toml
 
-# Generate uv.lock file (worker uses --frozen which requires it)
-RUN uv lock
-
-# Install dependencies
-RUN uv pip install --system \
-    redis>=4.0.0 \
-    cloudpickle>=2.0.0 \
-    tqdm>=4.60.0 \
-    lru-dict>=1.1.0 \
-    numpy>=1.20.0 \
-    "tritonclient[http]>=2.30.0" \
-    pytest>=7.0.0 \
-    nvidia-ml-py \
-    tenacity \
-    statsd
+RUN uv lock && uv pip install --system -r pyproject.toml
 
 ENV PYTHONPATH=/app
