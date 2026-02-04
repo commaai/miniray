@@ -39,8 +39,10 @@ REMOTE_QUEUE = 'remote_v2'
 # Protocol V2 constants
 PROTOCOL_VERSION = 0x02
 MSG_TYPE_TASK = 0x01
-MSG_TYPE_RESULT_SUCCESS = 0x02
-MSG_TYPE_RESULT_ERROR = 0x03
+MSG_TYPE_RESULT_INLINE = 0x02
+MSG_TYPE_RESULT_INDIRECT = 0x03
+MSG_TYPE_RESULT_ERROR = 0x04
+INLINE_RESULT_THRESHOLD = 1024 * 1024  # 1MB - results smaller than this go inline
 
 #TODO xx should be referenced here
 XX_BASEDIR = os.path.abspath(os.path.join(os.path.dirname(os.path.realpath(__file__)), "../"))
@@ -120,7 +122,13 @@ def _execute_batch(fn, *batch, **kwargs):
       results.append(MiniraySubTaskResult(True, "", "", fn(*args, **kwargs)))
     except BaseException as e:
       results.append(MiniraySubTaskResult(False, type(e).__name__, traceback.format_exc(), None))
-  return _wrap_result_local_redis(results, timeout_seconds=DEFAULT_RESULT_PAYLOAD_TIMEOUT_SECONDS)
+
+  # Serialize results and decide inline vs indirect
+  result_bytes = cloudpickle.dumps(results)
+  if len(result_bytes) < INLINE_RESULT_THRESHOLD:
+    return ("__inline__", result_bytes)
+  else:
+    return _wrap_result_local_redis(results, timeout_seconds=DEFAULT_RESULT_PAYLOAD_TIMEOUT_SECONDS)
 
 def _wrap_result_local_redis(data: Any, timeout_seconds: int) -> tuple[str, str]:
   key = f"miniray-{uuid.uuid4()}"
@@ -358,7 +366,16 @@ class Executor(BaseExecutor):
     self._submit_redis_master.delete(f"{task_uuid}-start")
     futures = self._futures.pop(task_uuid)
 
-    if msg_type == MSG_TYPE_RESULT_SUCCESS:
+    if msg_type == MSG_TYPE_RESULT_INLINE:
+      # Result payload is inline in the message
+      subtasks = cloudpickle.loads(payload["result"])
+      for future, subtask in zip(futures, subtasks, strict=True):
+        if subtask.succeeded:
+          future.set_result(subtask.result)
+        else:
+          future.set_exception(MinirayError(subtask.exception_type, subtask.exception_desc, job, worker))
+
+    elif msg_type == MSG_TYPE_RESULT_INDIRECT:
       # Fetch result from worker's Redis
       r = redis.StrictRedis(payload["host"], db=10)
       result_payload = r.lpop(payload["key"])

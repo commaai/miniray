@@ -69,8 +69,9 @@ BLOCK_JOB_KEY_PREFIX = "block:"
 # Protocol V2 constants
 PROTOCOL_VERSION = 0x02
 MSG_TYPE_TASK = 0x01
-MSG_TYPE_RESULT_SUCCESS = 0x02
-MSG_TYPE_RESULT_ERROR = 0x03
+MSG_TYPE_RESULT_INLINE = 0x02
+MSG_TYPE_RESULT_INDIRECT = 0x03
+MSG_TYPE_RESULT_ERROR = 0x04
 
 TMP_DIR_ROOT = os.path.join("/dev/shm/tmp" if not DOCKER_CONTAINER else "/tmp", CGROUP_NODE)
 # you need a really good reason to use a global directory shared across all tasks
@@ -400,17 +401,32 @@ def check_task_completion(pt, r_master, r_results, rm, exiting=False) -> bool:
     payload = task_result[1:]
 
     if success_marker == b'\x00':
-      # V2 protocol: success result with pointer to worker Redis
-      hostname, key = cloudpickle.loads(payload)
-      result_msg = msgpack.packb({
-        "job": pt.job,
-        "worker": HOST_NAME,
-        "task_uuid": pt.task_uuid,
-        "host": hostname,
-        "key": key,
-      }, use_bin_type=True)
-      header = struct.pack(">IBB", len(result_msg) + 2, PROTOCOL_VERSION, MSG_TYPE_RESULT_SUCCESS)
-      r_results.lpush(f'fq-{pt.job}', header + result_msg)
+      # V2 protocol: unpack the (type, data) tuple from _execute_batch
+      result_type, result_data = cloudpickle.loads(payload)
+
+      if result_type == "__inline__":
+        # Inline result - data is the serialized results bytes
+        result_msg = msgpack.packb({
+          "job": pt.job,
+          "worker": HOST_NAME,
+          "task_uuid": pt.task_uuid,
+          "result": result_data,
+        }, use_bin_type=True)
+        header = struct.pack(">IBB", len(result_msg) + 2, PROTOCOL_VERSION, MSG_TYPE_RESULT_INLINE)
+        r_results.lpush(f'fq-{pt.job}', header + result_msg)
+      else:
+        # Indirect result - (hostname, key) pointer to worker Redis
+        hostname, key = result_type, result_data
+        result_msg = msgpack.packb({
+          "job": pt.job,
+          "worker": HOST_NAME,
+          "task_uuid": pt.task_uuid,
+          "host": hostname,
+          "key": key,
+        }, use_bin_type=True)
+        header = struct.pack(">IBB", len(result_msg) + 2, PROTOCOL_VERSION, MSG_TYPE_RESULT_INDIRECT)
+        r_results.lpush(f'fq-{pt.job}', header + result_msg)
+
       r_results.expire(f'fq-{pt.job}', 86400)
       r_master.delete(f'{pt.task_uuid}-start')
     else:
