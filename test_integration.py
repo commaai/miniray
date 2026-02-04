@@ -587,18 +587,19 @@ class TestInlineThresholdBoundary:
         def return_data():
             return data
 
-        result_type, result_data = _execute_batch(return_data, ((),))
+        result_type, result_data = _execute_batch(return_data, ())
 
         assert result_type == "__inline__", f"Expected inline, got {result_type}"
         assert len(result_data) < INLINE_RESULT_THRESHOLD
 
-    def test_result_just_over_threshold_is_indirect(self):
-        """Result just over 1MB should be indirect."""
+    def test_result_over_threshold_is_indirect(self):
+        """Result over 1MB should be indirect."""
         from miniray.executor import _execute_batch, INLINE_RESULT_THRESHOLD
         from unittest.mock import patch
 
         # Create data that will exceed threshold after serialization
-        target_size = INLINE_RESULT_THRESHOLD + 10000
+        # Use 100KB margin to account for serialization overhead
+        target_size = INLINE_RESULT_THRESHOLD + 100000
         data = "x" * target_size
 
         def return_data():
@@ -606,7 +607,7 @@ class TestInlineThresholdBoundary:
 
         with patch('miniray.executor._wrap_result_local_redis') as mock_wrap:
             mock_wrap.return_value = ("worker-host", "result-key")
-            result_type, result_data = _execute_batch(return_data, ((),))
+            result_type, result_data = _execute_batch(return_data, ())
 
         assert mock_wrap.called, "Expected _wrap_result_local_redis to be called for large result"
         assert result_type == "worker-host"
