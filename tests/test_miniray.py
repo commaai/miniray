@@ -146,7 +146,7 @@ def test_memory_limit():
 
   # Allocate memory and return hash to avoid pickling overhead on return
   import hashlib
-  allocate_and_hash = lambda size: hashlib.md5(os.urandom(size)).hexdigest()
+  def allocate_and_hash(size): return hashlib.md5(os.urandom(size)).hexdigest()
 
   with miniray.Executor(job_name='miniray_test_memory_limit',
                         priority=MINIRAY_PRIORITY,

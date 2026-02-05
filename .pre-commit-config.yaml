@@ -11,3 +11,10 @@ repos:
     rev: v0.15.0
     hooks:
     -   id: ruff-check
+-   repo: local
+    hooks:
+      - id: ty
+        name: ty check
+        entry: ty check .
+        language: python
+        types: [python]

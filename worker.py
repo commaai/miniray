@@ -21,6 +21,7 @@ import grp
 import stat
 import shutil
 import numpy as np
+from collections.abc import Buffer
 from typing import Optional
 from tritonclient.http import InferenceServerClient
 from lru import LRU
@@ -122,6 +123,17 @@ def reap_process(proc):
 
 
 class Task:
+  proc: subprocess.Popen
+  alloc_id: str
+  task_gid: int
+  cgroup_name: str
+  result_file: str
+  start_time: float
+  tmp_dir: str
+  venv_dir: str
+  pickled_fn: Buffer
+  pickled_args: Buffer
+
   def __init__(self, task: MinirayTask, limits: Limits, proc_index: int,
                resource_manager: ResourceManager, r_master: redis.StrictRedis, r_results: redis.StrictRedis,
                job_metadata: JobMetadata, venv_cache: LRU, triton_client):
@@ -134,15 +146,6 @@ class Task:
     self.job_metadata = job_metadata
     self.venv_cache = venv_cache
     self.triton_client = triton_client
-
-    self.proc = None
-    self.alloc_id = None
-    self.task_gid = None
-    self.cgroup_name = None
-    self.result_file = None
-    self.start_time = None
-    self.tmp_dir = None
-    self.venv_dir = None
 
     self._done = False
     self._timed_out = False
@@ -252,6 +255,7 @@ class Task:
       return False
 
   def check_done(self, exiting=False) -> bool:
+    assert self.proc
     if self._done:
       return True
 
@@ -375,7 +379,7 @@ def get_job_intervals(raw_weights:list[int], N:int) -> list[float]:
 
   weights = np.maximum(1, all_weights / x)
   weights = np.cumsum(weights / weights.sum())
-  return weights.tolist()  # type: ignore[no-any-return]
+  return weights.tolist()
 
 # To decide which job to accept, we do the following:
 # - Find our position in the sorted list of N active workers, this will be a number in [0, N). Divide by N to get a point P in [0, 1).
@@ -489,14 +493,14 @@ def main():
     jobs = sorted(key.decode() for key in r_tasks.keys(f"*{PIPELINE_QUEUE}"))
     update_job_metadatas(r_master, jobs, job_metadatas)
     current_gpu_job = get_globally_scheduled_job(r_master, jobs, job_metadatas)
-    for i in procs.keys():
+    for i, proc in procs.items():
       # check if task is done and handle completion
-      if procs[i] and procs[i].check_done():
-        procs[i].finish()
+      if proc and proc.check_done():
+        proc.finish()
         procs[i] = None
 
       # if still working skip
-      if procs[i] is not None:
+      if proc is not None:
         continue
 
       # schedule new task if slot is free
@@ -518,15 +522,15 @@ def main():
         task.finish()
 
   # send sigterm to all remaining processes
-  for i in procs.keys():
-    if procs[i] and procs[i].proc:
-      os.killpg(procs[i].proc.pid, signal.SIGTERM)
+  for proc in procs.values():
+    if proc and proc.proc:
+      os.killpg(proc.proc.pid, signal.SIGTERM)
 
   # wait for tasks to finish
   while any(procs.values()):
-    for i in procs.keys():
-      if procs[i] and procs[i].check_done(exiting=True):
-        procs[i].finish(ignore_errors=True)
+    for i, proc in procs.items():
+      if proc and proc.check_done(exiting=True):
+        proc.finish(ignore_errors=True)
         procs[i] = None
     time.sleep(1)
 
