@@ -3,7 +3,6 @@ import sys
 import resource
 from time import process_time
 
-DOCKER_CONTAINER = os.path.exists("/.dockerenv")
 TASK_CGROUP = os.getenv("TASK_CGROUP", "")
 
 def get_cgroup_cpu_usage(cgroup):
@@ -18,12 +17,12 @@ def get_cgroup_mem_usage(cgroup):
   return max_bytes
 
 def get_cpu_usage():
-  if DOCKER_CONTAINER or TASK_CGROUP:
+  if TASK_CGROUP:
     return get_cgroup_cpu_usage(TASK_CGROUP)
   return process_time()
 
 def get_mem_usage():
-  if DOCKER_CONTAINER or TASK_CGROUP:
+  if TASK_CGROUP:
     return get_cgroup_mem_usage(TASK_CGROUP)
 
   maxrss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
