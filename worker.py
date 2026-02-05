@@ -356,7 +356,6 @@ class Task:
           if ignore_errors:
             break
           time.sleep(1)
-
     self.rm.release(self.task_uuid)
 
 
