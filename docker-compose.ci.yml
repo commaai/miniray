@@ -16,6 +16,9 @@ services:
       redis:
         condition: service_healthy
     privileged: true
+    cgroupns: host
+    volumes:
+      - /sys/fs/cgroup:/sys/fs/cgroup:rw
     environment:
       - REDIS_HOST=redis
       - PIPELINE_QUEUE=miniray-test
