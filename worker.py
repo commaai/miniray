@@ -179,7 +179,10 @@ class Task:
       self.pickled_args = base64.b64decode(self.task.pickled_args)
 
       self.alloc_id = f"proc{self.proc_index:0>3}"
-      self.task_gid = grp.getgrnam(self.alloc_id).gr_gid
+      try:
+        self.task_gid = grp.getgrnam(self.alloc_id).gr_gid
+      except KeyError:
+        self.task_gid = TASK_UID
       self.cgroup_name = os.path.join(CGROUP_NODE, self.alloc_id)
       mem_limit_bytes = int((self.limits.memory or 1) * GB_TO_BYTES)
       self.tmp_dir = get_tmp_dir_for_task(self.alloc_id)
@@ -200,10 +203,21 @@ class Task:
       self._error = (type(e).__name__, traceback.format_exc())
       return False
 
+  @staticmethod
+  def _get_existing_groups(groups):
+    result = []
+    for g in groups:
+      try:
+        grp.getgrnam(g)
+        result.append(g)
+      except KeyError:
+        pass
+    return result
+
   def start(self) -> bool:
     self.start_time = time.time()
     try:
-      task_extra_groups = ["video", "docker"]
+      task_extra_groups = self._get_existing_groups(["video", "docker"])
 
       # CPU tasks only get a GPU if they reserve GPU memory
       cuda_visible_devices = []
