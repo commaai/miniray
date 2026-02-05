@@ -14,14 +14,14 @@ dependencies = [
     "tenacity",
     "statsd",
     "wrapt",
+    "pytest>=7.0.0",
+    "pytest-xdist>=3.0.0",
 ]
 
 [project.optional-dependencies]
 testing = [
     "ruff",
     "ty",
-    "pytest>=7.0.0",
-    "pytest-xdist>=3.0.0",
 ]
 
 [tool.pytest.ini_options]

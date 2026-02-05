@@ -8,6 +8,6 @@ COPY . /app/miniray
 COPY pyproject.toml /app/pyproject.toml
 
 RUN bash /app/miniray/setup_isolation.sh
-RUN uv lock && uv pip install --system -r pyproject.toml
+RUN uv lock && uv pip install --system -r pyproject.toml --all-extras
 
 ENV PYTHONPATH=/app
