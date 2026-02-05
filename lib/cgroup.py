@@ -62,6 +62,8 @@ def cgroup_set_memory_limit(name: str, limit_in_bytes: int) -> None:
   cgroup_path = _get_cgroup_path(name)
   with open(os.path.join(cgroup_path, "memory.max"), "w") as f:
     f.write(str(limit_in_bytes or "max"))
+  with open(os.path.join(cgroup_path, "memory.swap.max"), "w") as f:
+    f.write("0")
 
 
 def cgroup_add_pid(name: str, pid: int) -> None:
