@@ -23,6 +23,7 @@ services:
       - PIPELINE_QUEUE=miniray-test
       - TRITON_SERVER_ENABLED=0
       - USE_MAIN_RESULT_REDIS=1
+      - TASK_UID=0
     command: python3 /app/miniray/worker.py
 
   test:
