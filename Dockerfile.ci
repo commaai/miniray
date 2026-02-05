@@ -2,7 +2,9 @@ FROM python:3.11-slim
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     cgroup-tools \
-    && rm -rf /var/lib/apt/lists/*
+    && rm -rf /var/lib/apt/lists/* \
+    && for i in $(seq -w 0 031); do groupadd proc$i; done \
+    && groupadd video && groupadd docker
 
 WORKDIR /app
 
