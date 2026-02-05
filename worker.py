@@ -25,8 +25,8 @@ from typing import Optional
 from tritonclient.http import InferenceServerClient
 from lru import LRU
 
-from miniray.lib.cgroup import (
-  cgroup_create, cgroup_set_subcontrollers, cgroup_set_memory_limit, cgroup_set_numa_nodes, cgroup_kill, cgroup_delete, cgroup_clear_all_children)
+from miniray.lib.cgroup import cgroup_create, cgroup_set_subcontrollers, cgroup_set_memory_limit, \
+                               cgroup_set_numa_nodes, cgroup_add_pid, cgroup_kill, cgroup_delete, cgroup_clear_all_children
 from miniray.lib.sig_term_handler import SigTermHandler
 from miniray.lib.resource_manager import ResourceManager, ResourceLimitError
 from miniray.lib.worker_helpers import ExponentialBackoff
@@ -233,12 +233,12 @@ class Task:
       }
       python3_exe = os.path.join(self.venv_dir, "bin/python3")
 
-      cgroup_controllers = ",".join(CGROUP_CONTROLLERS)
-      p_args = ["cgexec", "-g", f"{cgroup_controllers}:/{self.cgroup_name}", "--sticky", python3_exe, os.path.join(SCRIPT_DIR, "lib/worker_task.py")]
+      p_args = [python3_exe, os.path.join(SCRIPT_DIR, "lib/worker_task.py")]
       if DEBUG: print("[worker]", " ".join(p_args))
 
       self.proc = subprocess.Popen(p_args, user=0, group=self.task_gid, extra_groups=task_extra_groups, cwd=EMPTY_DIR, env=p_env,
                                    start_new_session=True, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+      cgroup_add_pid(self.cgroup_name, self.proc.pid)
       assert self.proc.stdin is not None
       self.proc.stdin.write(self.pickled_fn)
       self.proc.stdin.write(self.pickled_args)

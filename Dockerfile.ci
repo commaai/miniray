@@ -1,10 +1,4 @@
-FROM python:3.11-slim
-
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    cgroup-tools \
-    && rm -rf /var/lib/apt/lists/* \
-    && for i in $(seq -w 0 031); do groupadd proc$i; done \
-    && groupadd -f video && groupadd -f docker
+FROM python:3.12-slim
 
 WORKDIR /app
 
@@ -13,6 +7,7 @@ COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
 COPY . /app/miniray
 COPY pyproject.toml /app/pyproject.toml
 
+RUN /app/miniray/setup_isolation.sh && groupadd -f video && groupadd -f docker
 RUN uv lock && uv pip install --system -r pyproject.toml
 
 ENV PYTHONPATH=/app

@@ -64,6 +64,12 @@ def cgroup_set_memory_limit(name: str, limit_in_bytes: int) -> None:
     f.write(str(limit_in_bytes or "max"))
 
 
+def cgroup_add_pid(name: str, pid: int) -> None:
+  cgroup_path = _get_cgroup_path(name)
+  with open(os.path.join(cgroup_path, "cgroup.procs"), "w") as f:
+    f.write(str(pid))
+
+
 def cgroup_kill(name: str, recursive: bool=False) -> None:
   cgroup_path = _get_cgroup_path(name)
 
