@@ -14,13 +14,13 @@ dependencies = [
     "tenacity",
     "statsd",
     "wrapt",
+    "pre-commit",
     "pytest>=7.0.0",
     "pytest-xdist>=3.0.0",
 ]
 
 [project.optional-dependencies]
 testing = [
-    "pre-commit",
     "ruff",
     "ty",
 ]
