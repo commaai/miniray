@@ -50,7 +50,7 @@ def test_map_matches_local_and_threadpool():
                         limits={'memory': MINIRAY_MEMORY_GB}) as executor:
     results_miniray = list(executor.map(is_even, args))
 
-  for a, b, c in zip(results_loop, results_threadpool, results_miniray):
+  for a, b, c in zip(results_loop, results_threadpool, results_miniray, strict=True):
     assert a == b == c
 
 

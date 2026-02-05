@@ -69,11 +69,11 @@ def cgroup_kill(name: str, recursive: bool=False) -> None:
 
   pids = []
   with open(os.path.join(cgroup_path, "cgroup.procs"), "r") as f:
-    for l in f:
+    for line in f:
       try:
-        pids.append(int(l.strip()))
+        pids.append(int(line.strip()))
       except Exception:
-        print(f"FAILED TO PARSE PID: {l}")
+        print(f"FAILED TO PARSE PID: {line}")
         traceback.print_exc()
 
   for pid in pids:

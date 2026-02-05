@@ -8,7 +8,7 @@ TASK_CGROUP = os.getenv("TASK_CGROUP", "")
 
 def get_cgroup_cpu_usage(cgroup):
   with open(f'/sys/fs/cgroup/{cgroup}/cpu.stat') as f:
-    usage_usec = next(l for l in f if l.startswith("usage_usec")).split()[1]
+    usage_usec = next(line for line in f if line.startswith("usage_usec")).split()[1]
     cpu_seconds = int(usage_usec) / 1e6
   return cpu_seconds
 
