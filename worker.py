@@ -163,6 +163,7 @@ class Task:
   def init(self) -> bool:
     task_data = json.dumps([self.job, WORKER_ID, time.time() + self.limits.timeout_seconds + TASK_TIMEOUT_GRACE_SECONDS])
     self.r_master.set(f'{self.task_uuid}-start', task_data, ex=3600)
+    self.start_time = time.time()
     try:
       if not self.job_metadata.valid:
         raise ValueError("Invalid JobMetadata, key was probably missing")
@@ -204,7 +205,6 @@ class Task:
       return False
 
   def start(self) -> bool:
-    self.start_time = time.time()
     try:
       task_extra_groups = ["video", "docker"]
 
