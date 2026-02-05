@@ -7,7 +7,7 @@ COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
 COPY . /app/miniray
 COPY pyproject.toml /app/pyproject.toml
 
-RUN /app/miniray/setup_isolation.sh && groupadd -f video && groupadd -f docker
+RUN bash /app/miniray/setup_isolation.sh && groupadd -f video && groupadd -f docker
 RUN uv lock && uv pip install --system -r pyproject.toml
 
 ENV PYTHONPATH=/app

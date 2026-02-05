@@ -16,6 +16,7 @@ services:
       redis:
         condition: service_healthy
     privileged: true
+    cgroup: host
     volumes:
       - /sys/fs/cgroup:/sys/fs/cgroup:rw
     environment:
