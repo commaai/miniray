@@ -16,11 +16,15 @@ services:
       redis:
         condition: service_healthy
     privileged: true
+    cgroup: host
+    volumes:
+      - /sys/fs/cgroup:/sys/fs/cgroup:rw
     environment:
       - REDIS_HOST=redis
       - PIPELINE_QUEUE=miniray-test
       - TRITON_SERVER_ENABLED=0
       - USE_MAIN_RESULT_REDIS=1
+      - TASK_UID=0
     command: python3 /app/miniray/worker.py
 
   test:
@@ -36,4 +40,4 @@ services:
       - REDIS_HOST=redis
       - MINIRAY_QUEUE=miniray-test
     command: >
-      bash -c "sleep 5 && python3 -m pytest -v /app/miniray/tests/"
+      bash -c "sleep 5 && python3 -m pytest -n12 -v /app/miniray/tests/"

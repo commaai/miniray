@@ -137,16 +137,27 @@ def test_exception_propagation():
     assert 'RuntimeError: Ruh roh!' in str(excinfo.value)
 
 
-@pytest.mark.skip(reason="requires cgroup support")
 def test_memory_limit():
-  memory_limit_gb = 0.1
-  allocate_gb = 0.2
-  allocate_bytes = int(allocate_gb * 1024 * 1024 * 1024)
+  memory_limit_gb = 0.5
+  memory_limit_bytes = int(memory_limit_gb * 1024 * 1024 * 1024)
+
+  under_limit_bytes = int(memory_limit_bytes * 0.9)
+  over_limit_bytes = int(memory_limit_bytes * 1.1)
+
+  # Allocate memory and return hash to avoid pickling overhead on return
+  import hashlib
+  allocate_and_hash = lambda size: hashlib.md5(os.urandom(size)).hexdigest()
+
   with miniray.Executor(job_name='miniray_test_memory_limit',
                         priority=MINIRAY_PRIORITY,
                         queue_name=QUEUE_NAME,
                         limits={'memory': memory_limit_gb}) as executor:
-    future = executor.submit(make_random_payload, allocate_bytes)
+    # 10% under the limit should pass
+    future_under = executor.submit(allocate_and_hash, under_limit_bytes)
+    assert len(future_under.result()) == 32  # md5 hex digest length
+
+    # 10% over the limit should fail with OOM (SIGKILL)
+    future_over = executor.submit(allocate_and_hash, over_limit_bytes)
     with pytest.raises(miniray.MinirayError) as excinfo:
-      future.result()
+      future_over.result()
     assert excinfo.value.exception_type == "ChildProcessError<9>"

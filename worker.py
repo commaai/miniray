@@ -25,8 +25,8 @@ from typing import Optional
 from tritonclient.http import InferenceServerClient
 from lru import LRU
 
-from miniray.lib.cgroup import (
-  cgroup_create, cgroup_set_subcontrollers, cgroup_set_memory_limit, cgroup_set_numa_nodes, cgroup_kill, cgroup_delete, cgroup_clear_all_children)
+from miniray.lib.cgroup import cgroup_create, cgroup_set_subcontrollers, cgroup_set_memory_limit, \
+                               cgroup_set_numa_nodes, cgroup_add_pid, cgroup_kill, cgroup_delete, cgroup_clear_all_children
 from miniray.lib.sig_term_handler import SigTermHandler
 from miniray.lib.resource_manager import ResourceManager, ResourceLimitError
 from miniray.lib.worker_helpers import ExponentialBackoff
@@ -39,9 +39,8 @@ from miniray import MinirayResultHeader, MinirayTask, JobMetadata, get_metadata_
 
 
 
-DOCKER_CONTAINER = os.path.exists("/.dockerenv")
 HOST_NAME = socket.gethostname()
-TASK_UID = int(os.getenv("TASK_UID", "1000")) if not DOCKER_CONTAINER else os.getuid()
+TASK_UID = int(os.getenv("TASK_UID", "1000"))
 DEBUG = os.getenv("DEBUG_WORKER", None)
 REDIS_HOST = os.getenv('REDIS_HOST', 'redis.comma.internal')
 PIPELINE_QUEUE = os.getenv('PIPELINE_QUEUE', 'local'+"-"+HOST_NAME)   # override this in systemd
@@ -55,7 +54,7 @@ WORKER_ID = HOST_NAME
 ACTIVE_KEY = f"active:{PIPELINE_QUEUE}:{WORKER_ID}"
 MINIRAY_TARGET_NAME = "<remote-function>"
 
-TMP_DIR_ROOT = os.path.join("/dev/shm/tmp" if not DOCKER_CONTAINER else "/tmp", CGROUP_NODE)
+TMP_DIR_ROOT = os.path.join("/dev/shm/tmp", CGROUP_NODE)
 # you need a really good reason to use a global directory shared across all tasks
 # (normally you should use the tmp directory that is cleaned up after every task)
 CUPY_CACHE_DIR = os.path.join(TMP_DIR_ROOT, "cupy")
@@ -180,18 +179,17 @@ class Task:
       self.pickled_args = base64.b64decode(self.task.pickled_args)
 
       self.alloc_id = f"proc{self.proc_index:0>3}"
-      self.task_gid = grp.getgrnam(self.alloc_id).gr_gid if not DOCKER_CONTAINER else TASK_UID
-      self.cgroup_name = os.path.join(CGROUP_NODE, self.alloc_id) if not DOCKER_CONTAINER else ""
+      self.task_gid = grp.getgrnam(self.alloc_id).gr_gid
+      self.cgroup_name = os.path.join(CGROUP_NODE, self.alloc_id)
       mem_limit_bytes = int((self.limits.memory or 1) * GB_TO_BYTES)
       self.tmp_dir = get_tmp_dir_for_task(self.alloc_id)
 
       self.numa_node = self.rm.get_numa_node(self.task_uuid)
       self.big_gpu_id, self.small_gpu_id = self.rm.get_gpu_ids(self.task_uuid)
 
-      if not DOCKER_CONTAINER:
-        cgroup_create(self.cgroup_name)
-        cgroup_set_numa_nodes(self.cgroup_name, [self.numa_node])
-        cgroup_set_memory_limit(self.cgroup_name, mem_limit_bytes)
+      cgroup_create(self.cgroup_name)
+      cgroup_set_numa_nodes(self.cgroup_name, [self.numa_node])
+      cgroup_set_memory_limit(self.cgroup_name, mem_limit_bytes)
       create_tmp_dir(self.tmp_dir, TASK_UID, self.task_gid)
 
       self.result_file = os.path.join(self.tmp_dir, "task_result")
@@ -205,7 +203,7 @@ class Task:
   def start(self) -> bool:
     self.start_time = time.time()
     try:
-      task_extra_groups = ["video"] + ["docker"] if not DOCKER_CONTAINER else []
+      task_extra_groups = ["video", "docker"]
 
       # CPU tasks only get a GPU if they reserve GPU memory
       cuda_visible_devices = []
@@ -235,12 +233,12 @@ class Task:
       }
       python3_exe = os.path.join(self.venv_dir, "bin/python3")
 
-      cgroup_controllers = ",".join(CGROUP_CONTROLLERS)
-      p_args = ["cgexec", "-g", f"{cgroup_controllers}:/{self.cgroup_name}", "--sticky", python3_exe, os.path.join(SCRIPT_DIR, "lib/worker_task.py")]
+      p_args = [python3_exe, os.path.join(SCRIPT_DIR, "lib/worker_task.py")]
       if DEBUG: print("[worker]", " ".join(p_args))
 
       self.proc = subprocess.Popen(p_args, user=0, group=self.task_gid, extra_groups=task_extra_groups, cwd=EMPTY_DIR, env=p_env,
                                    start_new_session=True, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+      cgroup_add_pid(self.cgroup_name, self.proc.pid)
       assert self.proc.stdin is not None
       self.proc.stdin.write(self.pickled_fn)
       self.proc.stdin.write(self.pickled_args)
@@ -340,9 +338,8 @@ class Task:
     if self.alloc_id is not None:
       while True:
         try:
-          if not DOCKER_CONTAINER:
-            cgroup_kill(self.cgroup_name, recursive=True)
-            cgroup_delete(self.cgroup_name, recursive=True)
+          cgroup_kill(self.cgroup_name, recursive=True)
+          cgroup_delete(self.cgroup_name, recursive=True)
           break
         except Exception as e:
           print(f"[worker] {self.cgroup_name} cgroup cleanup failed: {desc(e)}")
@@ -468,12 +465,11 @@ def main():
   print(f"[worker] SMALL GPU RAM:         {sum(gpu.memory for gpu in rm.small_gpus)/1e9:.2f} GB")
   print(f"[worker] TRITON_SERVER_ENABLED: {TRITON_SERVER_ENABLED}")
 
-  if not DOCKER_CONTAINER: # cgroup fs mounted read-only inside docker
-    cgroup_create(CGROUP_NODE)
-    cgroup_set_subcontrollers(CGROUP_NODE, CGROUP_CONTROLLERS)
-    cgroup_set_memory_limit(CGROUP_NODE, sum(rm.mem_totals.values()))
-    cgroup_set_numa_nodes(CGROUP_NODE, rm.cpu_totals.keys())
-    cgroup_clear_all_children(CGROUP_NODE)
+  cgroup_create(CGROUP_NODE)
+  cgroup_set_subcontrollers(CGROUP_NODE, CGROUP_CONTROLLERS)
+  cgroup_set_memory_limit(CGROUP_NODE, sum(rm.mem_totals.values()))
+  cgroup_set_numa_nodes(CGROUP_NODE, rm.cpu_totals.keys())
+  cgroup_clear_all_children(CGROUP_NODE)
 
   sigterm_handler = SigTermHandler(callback=sig_callback)
   backoff = ExponentialBackoff(SLEEP_TIME_MAX, DEBUG)
