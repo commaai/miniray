@@ -36,258 +36,7 @@ from miniray.lib.helpers import Limits, desc, GB_TO_BYTES, TASK_TIMEOUT_GRACE_SE
 from miniray.lib.uv import sync_venv_cache, cleanup_venvs
 from miniray import MinirayResultHeader, MinirayTask, JobMetadata, get_metadata_key
 
-class Task:
-  def __init__(self, task: MinirayTask, limits: Limits, proc_index: int,
-               resource_manager: ResourceManager, r_master: redis.StrictRedis, r_results: redis.StrictRedis,
-               job_metadata: JobMetadata, venv_cache: LRU, triton_client):
-    self.task = task
-    self.limits = limits
-    self.proc_index = proc_index
-    self.rm = resource_manager
-    self.r_master = r_master
-    self.r_results = r_results
-    self.job_metadata = job_metadata
-    self.venv_cache = venv_cache
-    self.triton_client = triton_client
 
-    # Process state
-    self.proc = None
-    self.alloc_id = None
-    self.task_gid = None
-    self.cgroup_name = None
-    self.result_file = None
-    self.start_time = None
-    self.tmp_dir = None
-    self.venv_dir = None
-
-    # Result state (populated by check_done)
-    self._done = False
-    self._timed_out = False
-    self._task_result = b''
-    self._error = None
-
-  @property
-  def job(self):
-    return self.task.job
-
-  @property
-  def task_uuid(self):
-    return self.task.uuid
-
-  def init(self) -> bool:
-    try:
-      if not self.job_metadata.valid:
-        self._done = True
-        self._error = ("InvalidJobError", "No valid JobMetadata, key was probably missing")
-        return False
-
-      try:
-        ensure_venv(self.job, self.job_metadata.codedir, self.venv_cache)
-        self.venv_dir = self.venv_cache[self.job]
-      except (ValueError, AssertionError) as e:
-        self._done = True
-        self._error = ("VenvError", f"{type(e).__name__}:{e}")
-        return False
-
-      # Set start time tracking in Redis
-      self.r_master.set(f'{self.task_uuid}-start',
-                        json.dumps([self.job, WORKER_ID, time.time() + self.limits.timeout_seconds + TASK_TIMEOUT_GRACE_SECONDS]),
-                        ex=7*24*3600)
-
-      # Fetch function if needed
-      if self.task.function_ptr:
-        self.pickled_fn = self.r_master.get(self.task.function_ptr)
-        if self.pickled_fn is None:
-          self._done = True
-          self._error = ("CacheMissError", f"Cached function {self.task.function_ptr} not found in redis")
-          return False
-      else:
-        self.pickled_fn = base64.b64decode(self.task.pickled_fn)
-      self.pickled_args = base64.b64decode(self.task.pickled_args)
-
-      self.alloc_id = f"proc{self.proc_index:0>3}"
-      self.task_gid = grp.getgrnam(self.alloc_id).gr_gid if not DOCKER_CONTAINER else TASK_UID
-      self.cgroup_name = os.path.join(CGROUP_NODE, self.alloc_id) if not DOCKER_CONTAINER else ""
-      mem_limit_bytes = int((self.limits.memory or 1) * GB_TO_BYTES)
-      self.tmp_dir = get_tmp_dir_for_task(self.alloc_id)
-
-      # Get allocation info from resource manager
-      self.numa_node = self.rm.get_numa_node(self.task_uuid)
-      self.big_gpu_id, self.small_gpu_id = self.rm.get_gpu_ids(self.task_uuid)
-
-      if not DOCKER_CONTAINER:
-        cgroup_create(self.cgroup_name)
-        cgroup_set_numa_nodes(self.cgroup_name, [self.numa_node])
-        cgroup_set_memory_limit(self.cgroup_name, mem_limit_bytes)
-      create_tmp_dir(self.tmp_dir, TASK_UID, self.task_gid)
-
-      self.result_file = os.path.join(self.tmp_dir, "task_result")
-      return True
-    except BaseException as e:
-      traceback.print_exc()
-      self._done = True
-      self._error = (type(e).__name__, traceback.format_exc())
-      return False
-
-  def start(self) -> bool:
-    try:
-      task_extra_groups = ["video"] + ["docker"] if not DOCKER_CONTAINER else []
-
-      # CPU tasks only get a GPU if they reserve GPU memory
-      cuda_visible_devices = []
-      if self.big_gpu_id is not None:
-        cuda_visible_devices.append(str(self.big_gpu_id))
-      if self.small_gpu_id is not None:
-        cuda_visible_devices.append(str(self.small_gpu_id))
-
-      p_env = {
-        **os.environ,
-        'NO_PROGRESS': '1',
-        'CUPY_CACHE_DIR': CUPY_CACHE_DIR,
-        'CUDA_VISIBLE_DEVICES': ','.join(cuda_visible_devices),
-        'USER': 'batman',
-        'HOME': '/home/batman',
-        'TASK_UID': str(TASK_UID),
-        'TASK_CGROUP': self.cgroup_name,
-        'TMPDIR': self.tmp_dir,
-        'CACHE_ROOT': os.path.join(self.tmp_dir, "index_cache"),
-        'PARAMS_ROOT': os.path.join(self.tmp_dir, "params"),
-        'LOG_ROOT': os.path.join(self.tmp_dir, "media/0/realdata"),
-        'GNSS_CACHE_DIR': os.path.join(self.tmp_dir, "gnss_cache"),
-        'CDDIS_BASE_URL': "http://gnss-cache.comma.internal:8082/gnss-data",
-        'CDDIS_HOURLY_BASE_URL': "http://gnss-cache.comma.internal:8082/gnss-data-hourly",
-        'ENABLE_MODEL_CACHE': str(int(not TRITON_SERVER_ENABLED)),
-        'RESULT_FILE': self.result_file,
-      }
-      python3_exe = os.path.join(self.venv_dir, "bin/python3")
-
-      cgroup_controllers = ",".join(CGROUP_CONTROLLERS)
-      p_args = ["cgexec", "-g", f"{cgroup_controllers}:/{self.cgroup_name}", "--sticky", python3_exe, os.path.join(SCRIPT_DIR, "lib/worker_task.py")]
-      if DEBUG: print("[worker]", " ".join(p_args))
-
-      self.proc = subprocess.Popen(p_args, user=0, group=self.task_gid, extra_groups=task_extra_groups, cwd=EMPTY_DIR, env=p_env,
-                                   start_new_session=True, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-      assert self.proc.stdin is not None
-      self.proc.stdin.write(self.pickled_fn)
-      self.proc.stdin.write(self.pickled_args)
-      self.proc.stdin.close()
-      self.proc.stdin = None
-      self.start_time = time.time()
-      return True
-    except BaseException as e:
-      traceback.print_exc()
-      self._done = True
-      self._error = (type(e).__name__, traceback.format_exc())
-      return False
-
-  def check_done(self, exiting=False) -> bool:
-    if self._done:
-      return True
-
-    self._timed_out = time.time() > self.start_time + self.limits.timeout_seconds
-
-    # Wait for the process to terminate
-    if self.proc.returncode is None:
-      pid, returncode = os.waitpid(self.proc.pid, os.WNOHANG)
-      if not pid and not self._timed_out:
-        return False  # still waiting
-      self.proc.returncode = returncode
-
-    # Kill the process group and wait for it to terminate
-    if self.proc.returncode is not None or self._timed_out:
-      if not reap_process(self.proc):
-        return False  # still waiting
-
-    # Collect stdout/stderr
-    stdout, stderr = self.proc.communicate()
-    if stdout:
-      print(stdout.decode())
-    if stderr:
-      print(stderr.decode())
-
-    # Read result file
-    try:
-      with open(self.result_file, 'rb') as f:
-        self._task_result = f.read()
-    except FileNotFoundError:
-      self._task_result = b''
-
-    # Determine result/error state
-    if self._timed_out:
-      self._error = ("TimeoutError", f"TimeoutError: task timed out after {self.limits.timeout_seconds} seconds")
-    elif self.proc.returncode != 0 and not exiting:
-      error_type = f"ChildProcessError<{self.proc.returncode}>"
-      self._error = (error_type, f"{error_type}: task died with result code {self.proc.returncode}")
-    elif self.proc.returncode == 0 and len(self._task_result) > 0:
-      self._error = None
-    elif self.proc.returncode == 0:
-      self._error = ("NoResultError", "Task completed but produced no result")
-    else:
-      self._error = None  # exiting case
-
-    self._done = True
-    return True
-
-  def finish(self, ignore_errors=False):
-    """Push results to Redis and cleanup. This is the ONLY place that pushes to Redis."""
-    # Collect stats (must happen before cgroup cleanup)
-    if self.start_time is not None:
-      task_gpu_stats = get_gpu_stats(self.proc.pid, [gpu.handle for gpu in self.rm.gpus])
-      task_run_time = time.time() - self.start_time
-      task_cpu_time = get_cgroup_cpu_usage(self.cgroup_name)
-      task_gpu_time = get_gpu_utilization(task_gpu_stats) * task_run_time
-      task_memory_gb = get_cgroup_mem_usage(self.cgroup_name) * 1e-9
-      task_gpu_memory_gb = get_gpu_mem_usage(task_gpu_stats) * 1e-9
-      statsd.event("pipeline.worker.task_done", runtime=task_run_time, cpu=task_cpu_time, gpu=task_gpu_time, memory=task_memory_gb, gpu_memory=task_gpu_memory_gb, tags={'task_id': self.job})
-      print(f"[worker] finished miniray task from job {self.job} stats: elapsed={task_run_time:0.2f}s cpu={task_cpu_time:0.2f}s gpu={task_gpu_time:0.2f}s mem={task_memory_gb:0.2f}GB gpumem={task_gpu_memory_gb:0.2f}GB")
-
-    if self._error:
-      error_type, error_msg = self._error
-      result_header = MinirayResultHeader(self.job, False, HOST_NAME, error_type, error_msg, self.task_uuid)
-      self.r_results.lpush(f'fq-{self.job}', json.dumps(result_header))
-      self.r_master.delete(f'{self.task_uuid}-start')
-      statsd.event('pipeline.worker.task_error', tags={'task_id': self.job, 'type': error_type})
-    elif len(self._task_result) > 0:
-      success_marker = self._task_result[0:1]
-      payload = self._task_result[1:]
-
-      if success_marker == b'\x00':
-        result_header = MinirayResultHeader(self.job, True, HOST_NAME, "", "", self.task_uuid)
-        self.r_results.lpush(f'fq-{self.job}', json.dumps(result_header).encode() + b'\x00' + payload)
-      else:
-        error_type, error_desc = json.loads(payload)
-        statsd.event('pipeline.worker.task_error', tags={'task_id': self.job, 'type': error_type})
-        result_header = MinirayResultHeader(self.job, False, HOST_NAME, error_type, error_desc, self.task_uuid)
-        self.r_results.lpush(f'fq-{self.job}', json.dumps(result_header))
-
-      self.r_results.expire(f'fq-{self.job}', 86400)  # extend availability for 24 hours
-      self.r_master.delete(f'{self.task_uuid}-start')
-
-    # Cleanup cgroups, shared memory, and temp directories
-    if self.alloc_id is not None:
-      while True:
-        try:
-          if not DOCKER_CONTAINER:
-            cgroup_kill(self.cgroup_name, recursive=True)
-            cgroup_delete(self.cgroup_name, recursive=True)
-          break
-        except Exception as e:
-          print(f"[worker] {self.cgroup_name} cgroup cleanup failed: {desc(e)}")
-          if ignore_errors:
-            break
-          time.sleep(1)
-
-      while True:
-        try:
-          cleanup_shm_by_gid(self.alloc_id, self.triton_client, self.task_gid)
-          break
-        except Exception as e:
-          print(f"[worker] {self.cgroup_name} /dev/shm cleanup failed: {desc(e)}")
-          if ignore_errors:
-            break
-          time.sleep(1)
-
-    self.rm.release(self.task_uuid)
 
 DOCKER_CONTAINER = os.path.exists("/.dockerenv")
 HOST_NAME = socket.gethostname()
@@ -370,6 +119,245 @@ def reap_process(proc):
     return False
   except (ChildProcessError, ProcessLookupError):
     return True  # all processes have exited
+  
+
+class Task:
+  def __init__(self, task: MinirayTask, limits: Limits, proc_index: int,
+               resource_manager: ResourceManager, r_master: redis.StrictRedis, r_results: redis.StrictRedis,
+               job_metadata: JobMetadata, venv_cache: LRU, triton_client):
+    self.task = task
+    self.limits = limits
+    self.proc_index = proc_index
+    self.rm = resource_manager
+    self.r_master = r_master
+    self.r_results = r_results
+    self.job_metadata = job_metadata
+    self.venv_cache = venv_cache
+    self.triton_client = triton_client
+
+    self.proc = None
+    self.alloc_id = None
+    self.task_gid = None
+    self.cgroup_name = None
+    self.result_file = None
+    self.start_time = None
+    self.tmp_dir = None
+    self.venv_dir = None
+
+    self._done = False
+    self._timed_out = False
+    self._task_result = b''
+    self._error = None
+
+  @property
+  def job(self):
+    return self.task.job
+
+  @property
+  def task_uuid(self):
+    return self.task.uuid
+
+  def init(self) -> bool:
+    self.r_master.set(f'{self.task_uuid}-start',
+                  json.dumps([self.job, WORKER_ID, time.time() + self.limits.timeout_seconds + TASK_TIMEOUT_GRACE_SECONDS]),
+                  ex=3600)
+    try:
+      if not self.job_metadata.valid:
+        raise ValueError("Invalid JobMetadata, key was probably missing")
+
+      ensure_venv(self.job, self.job_metadata.codedir, self.venv_cache)
+      self.venv_dir = self.venv_cache[self.job]
+
+      # Fetch function if needed
+      if self.task.function_ptr:
+        self.pickled_fn = self.r_master.get(self.task.function_ptr)
+        if self.pickled_fn is None:
+          self._done = True
+          self._error = ("CacheMissError", f"Cached function {self.task.function_ptr} not found in redis")
+          return False
+      else:
+        self.pickled_fn = base64.b64decode(self.task.pickled_fn)
+      self.pickled_args = base64.b64decode(self.task.pickled_args)
+
+      self.alloc_id = f"proc{self.proc_index:0>3}"
+      self.task_gid = grp.getgrnam(self.alloc_id).gr_gid if not DOCKER_CONTAINER else TASK_UID
+      self.cgroup_name = os.path.join(CGROUP_NODE, self.alloc_id) if not DOCKER_CONTAINER else ""
+      mem_limit_bytes = int((self.limits.memory or 1) * GB_TO_BYTES)
+      self.tmp_dir = get_tmp_dir_for_task(self.alloc_id)
+
+      self.numa_node = self.rm.get_numa_node(self.task_uuid)
+      self.big_gpu_id, self.small_gpu_id = self.rm.get_gpu_ids(self.task_uuid)
+
+      if not DOCKER_CONTAINER:
+        cgroup_create(self.cgroup_name)
+        cgroup_set_numa_nodes(self.cgroup_name, [self.numa_node])
+        cgroup_set_memory_limit(self.cgroup_name, mem_limit_bytes)
+      create_tmp_dir(self.tmp_dir, TASK_UID, self.task_gid)
+
+      self.result_file = os.path.join(self.tmp_dir, "task_result")
+      return True
+    except BaseException as e:
+      traceback.print_exc()
+      self._done = True
+      self._error = (type(e).__name__, traceback.format_exc())
+      return False
+
+  def start(self) -> bool:
+    self.start_time = time.time()
+    try:
+      task_extra_groups = ["video"] + ["docker"] if not DOCKER_CONTAINER else []
+
+      # CPU tasks only get a GPU if they reserve GPU memory
+      cuda_visible_devices = []
+      if self.big_gpu_id is not None:
+        cuda_visible_devices.append(str(self.big_gpu_id))
+      if self.small_gpu_id is not None:
+        cuda_visible_devices.append(str(self.small_gpu_id))
+
+      p_env = {
+        **os.environ,
+        'NO_PROGRESS': '1',
+        'CUPY_CACHE_DIR': CUPY_CACHE_DIR,
+        'CUDA_VISIBLE_DEVICES': ','.join(cuda_visible_devices),
+        'USER': 'batman',
+        'HOME': '/home/batman',
+        'TASK_UID': str(TASK_UID),
+        'TASK_CGROUP': self.cgroup_name,
+        'TMPDIR': self.tmp_dir,
+        'CACHE_ROOT': os.path.join(self.tmp_dir, "index_cache"),
+        'PARAMS_ROOT': os.path.join(self.tmp_dir, "params"),
+        'LOG_ROOT': os.path.join(self.tmp_dir, "media/0/realdata"),
+        'GNSS_CACHE_DIR': os.path.join(self.tmp_dir, "gnss_cache"),
+        'CDDIS_BASE_URL': "http://gnss-cache.comma.internal:8082/gnss-data",
+        'CDDIS_HOURLY_BASE_URL': "http://gnss-cache.comma.internal:8082/gnss-data-hourly",
+        'ENABLE_MODEL_CACHE': str(int(not TRITON_SERVER_ENABLED)),
+        'RESULT_FILE': self.result_file,
+      }
+      python3_exe = os.path.join(self.venv_dir, "bin/python3")
+
+      cgroup_controllers = ",".join(CGROUP_CONTROLLERS)
+      p_args = ["cgexec", "-g", f"{cgroup_controllers}:/{self.cgroup_name}", "--sticky", python3_exe, os.path.join(SCRIPT_DIR, "lib/worker_task.py")]
+      if DEBUG: print("[worker]", " ".join(p_args))
+
+      self.proc = subprocess.Popen(p_args, user=0, group=self.task_gid, extra_groups=task_extra_groups, cwd=EMPTY_DIR, env=p_env,
+                                   start_new_session=True, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+      assert self.proc.stdin is not None
+      self.proc.stdin.write(self.pickled_fn)
+      self.proc.stdin.write(self.pickled_args)
+      self.proc.stdin.close()
+      self.proc.stdin = None
+      return True
+    except BaseException as e:
+      traceback.print_exc()
+      self._done = True
+      self._error = (type(e).__name__, traceback.format_exc())
+      return False
+
+  def check_done(self, exiting=False) -> bool:
+    if self._done:
+      return True
+
+    self._timed_out = time.time() > self.start_time + self.limits.timeout_seconds
+
+    # Wait for the process to terminate
+    if self.proc.returncode is None:
+      pid, returncode = os.waitpid(self.proc.pid, os.WNOHANG)
+      if not pid and not self._timed_out:
+        return False  # still waiting
+      self.proc.returncode = returncode
+
+    # Kill the process group and wait for it to terminate
+    if self.proc.returncode is not None or self._timed_out:
+      if not reap_process(self.proc):
+        return False  # still waiting
+
+    # Collect stdout/stderr
+    stdout, stderr = self.proc.communicate()
+    if stdout:
+      print(stdout.decode())
+    if stderr:
+      print(stderr.decode())
+
+    # Read result file
+    try:
+      with open(self.result_file, 'rb') as f:
+        self._task_result = f.read()
+    except FileNotFoundError:
+      self._task_result = b''
+
+    # Determine result/error state
+    if self._timed_out:
+      self._error = ("TimeoutError", f"TimeoutError: task timed out after {self.limits.timeout_seconds} seconds")
+    elif self.proc.returncode != 0 and not exiting:
+      error_type = f"ChildProcessError<{self.proc.returncode}>"
+      self._error = (error_type, f"{error_type}: task died with result code {self.proc.returncode}")
+    elif self.proc.returncode == 0 and len(self._task_result) > 0:
+      self._error = None
+    elif self.proc.returncode == 0:
+      self._error = ("NoResultError", "Task completed but produced no result")
+    else:
+      self._error = None  # exiting case
+
+    self._done = True
+    return True
+
+  def finish(self, ignore_errors=False):
+    task_run_time = time.time() - self.start_time
+    task_gpu_stats = get_gpu_stats(self.proc.pid, [gpu.handle for gpu in self.rm.gpus])
+    task_cpu_time = get_cgroup_cpu_usage(self.cgroup_name)
+    task_gpu_time = get_gpu_utilization(task_gpu_stats) * task_run_time
+    task_memory_gb = get_cgroup_mem_usage(self.cgroup_name) * 1e-9
+    task_gpu_memory_gb = get_gpu_mem_usage(task_gpu_stats) * 1e-9
+    statsd.event("pipeline.worker.task_done", runtime=task_run_time, cpu=task_cpu_time, gpu=task_gpu_time, memory=task_memory_gb, gpu_memory=task_gpu_memory_gb, tags={'task_id': self.job})
+    print(f"[worker] finished miniray task from job {self.job} stats: elapsed={task_run_time:0.2f}s cpu={task_cpu_time:0.2f}s gpu={task_gpu_time:0.2f}s mem={task_memory_gb:0.2f}GB gpumem={task_gpu_memory_gb:0.2f}GB")
+
+    if self._error:
+      error_type, error_msg = self._error
+      result_header = MinirayResultHeader(self.job, False, HOST_NAME, error_type, error_msg, self.task_uuid)
+      self.r_results.lpush(f'fq-{self.job}', json.dumps(result_header))
+      self.r_master.delete(f'{self.task_uuid}-start')
+      statsd.event('pipeline.worker.task_error', tags={'task_id': self.job, 'type': error_type})
+    elif len(self._task_result) > 0:
+      success_marker = self._task_result[0:1]
+      payload = self._task_result[1:]
+
+      if success_marker == b'\x00':
+        result_header = MinirayResultHeader(self.job, True, HOST_NAME, "", "", self.task_uuid)
+        self.r_results.lpush(f'fq-{self.job}', json.dumps(result_header).encode() + b'\x00' + payload)
+      else:
+        error_type, error_desc = json.loads(payload)
+        statsd.event('pipeline.worker.task_error', tags={'task_id': self.job, 'type': error_type})
+        result_header = MinirayResultHeader(self.job, False, HOST_NAME, error_type, error_desc, self.task_uuid)
+        self.r_results.lpush(f'fq-{self.job}', json.dumps(result_header))
+
+      self.r_results.expire(f'fq-{self.job}', 86400)  # extend availability for 24 hours
+      self.r_master.delete(f'{self.task_uuid}-start')
+
+    # Cleanup cgroups, shared memory, and temp directories
+    if self.alloc_id is not None:
+      while True:
+        try:
+          if not DOCKER_CONTAINER:
+            cgroup_kill(self.cgroup_name, recursive=True)
+            cgroup_delete(self.cgroup_name, recursive=True)
+          break
+        except Exception as e:
+          print(f"[worker] {self.cgroup_name} cgroup cleanup failed: {desc(e)}")
+          if ignore_errors:
+            break
+          time.sleep(1)
+
+      while True:
+        try:
+          cleanup_shm_by_gid(self.alloc_id, self.triton_client, self.task_gid)
+          break
+        except Exception as e:
+          print(f"[worker] {self.cgroup_name} /dev/shm cleanup failed: {desc(e)}")
+          if ignore_errors:
+            break
+          time.sleep(1)
+
+    self.rm.release(self.task_uuid)
 
 
 # Divide the interval [0, 1) amongst the available jobs, weighted by job priority.
