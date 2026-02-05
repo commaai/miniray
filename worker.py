@@ -25,7 +25,8 @@ from typing import Optional
 from tritonclient.http import InferenceServerClient
 from lru import LRU
 
-from miniray.lib.cgroup import cgroup_create, cgroup_set_subcontrollers, cgroup_set_memory_limit, cgroup_set_numa_nodes, cgroup_kill, cgroup_delete, cgroup_clear_all_children
+from miniray.lib.cgroup import (
+  cgroup_create, cgroup_set_subcontrollers, cgroup_set_memory_limit, cgroup_set_numa_nodes, cgroup_kill, cgroup_delete, cgroup_clear_all_children)
 from miniray.lib.sig_term_handler import SigTermHandler
 from miniray.lib.resource_manager import ResourceManager, ResourceLimitError
 from miniray.lib.worker_helpers import ExponentialBackoff
@@ -119,7 +120,7 @@ def reap_process(proc):
     return False
   except (ChildProcessError, ProcessLookupError):
     return True  # all processes have exited
-  
+
 
 class Task:
   def __init__(self, task: MinirayTask, limits: Limits, proc_index: int,
@@ -158,9 +159,8 @@ class Task:
     return self.task.uuid
 
   def init(self) -> bool:
-    self.r_master.set(f'{self.task_uuid}-start',
-                  json.dumps([self.job, WORKER_ID, time.time() + self.limits.timeout_seconds + TASK_TIMEOUT_GRACE_SECONDS]),
-                  ex=3600)
+    task_data = json.dumps([self.job, WORKER_ID, time.time() + self.limits.timeout_seconds + TASK_TIMEOUT_GRACE_SECONDS])
+    self.r_master.set(f'{self.task_uuid}-start', task_data, ex=3600)
     try:
       if not self.job_metadata.valid:
         raise ValueError("Invalid JobMetadata, key was probably missing")
@@ -308,8 +308,11 @@ class Task:
     task_gpu_time = get_gpu_utilization(task_gpu_stats) * task_run_time
     task_memory_gb = get_cgroup_mem_usage(self.cgroup_name) * 1e-9
     task_gpu_memory_gb = get_gpu_mem_usage(task_gpu_stats) * 1e-9
-    statsd.event("pipeline.worker.task_done", runtime=task_run_time, cpu=task_cpu_time, gpu=task_gpu_time, memory=task_memory_gb, gpu_memory=task_gpu_memory_gb, tags={'task_id': self.job})
-    print(f"[worker] finished miniray task from job {self.job} stats: elapsed={task_run_time:0.2f}s cpu={task_cpu_time:0.2f}s gpu={task_gpu_time:0.2f}s mem={task_memory_gb:0.2f}GB gpumem={task_gpu_memory_gb:0.2f}GB")
+    statsd.event("pipeline.worker.task_done", runtime=task_run_time, cpu=task_cpu_time, gpu=task_gpu_time,
+                                              memory=task_memory_gb, gpu_memory=task_gpu_memory_gb, tags={'task_id': self.job})
+    print(f"[worker] finished miniray task from job {self.job} stats: "
+          f"elapsed={task_run_time:0.2f}s cpu={task_cpu_time:0.2f}s gpu={task_gpu_time:0.2f}s "
+          f"mem={task_memory_gb:0.2f}GB gpumem={task_gpu_memory_gb:0.2f}GB")
 
     if self._error:
       error_type, error_msg = self._error

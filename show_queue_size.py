@@ -26,7 +26,7 @@ def print_queue(title: str, items: list[str]) -> None:
   for key in items:
     pipe.llen(key)
   lengths = pipe.execute()
-  for key, length in sorted(zip(items, lengths)):
+  for key, length in sorted(zip(items, lengths, strict=True)):
     print(f"{key} {length}")
 
 print_queue(f"pending tasks for {REMOTE_QUEUE} :", queue_keys[REMOTE_QUEUE])

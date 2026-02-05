@@ -1,11 +1,14 @@
 #!/usr/bin/env python
 import os
 import sys
+import io
+import json
+import traceback
+import cloudpickle
+import wrapt
 
 # Tasks initially start as root so they can be moved into the appropriate cgroup
 os.setuid(int(os.getenv("TASK_UID", 1000)))
-
-import wrapt
 
 @wrapt.when_imported("cv2")
 def cv2_import_hook(cv2):
@@ -15,11 +18,6 @@ def cv2_import_hook(cv2):
 def torch_import_hook(torch):
   torch.set_num_threads(1) # intraop parallelism
   torch.set_num_interop_threads(1)
-
-import io
-import json
-import traceback
-import cloudpickle
 
 
 def worker_process():

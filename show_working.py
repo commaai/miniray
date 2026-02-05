@@ -17,7 +17,7 @@ for key in keys:
 vals: list[str | None] = pipe.execute()
 
 now = time.time()
-for key, value in zip(keys, vals):
+for key, value in zip(keys, vals, strict=True):
   if value is None:
     continue
   job, worker, expiry_time = json.loads(value)

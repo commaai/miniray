@@ -14,15 +14,15 @@ import cloudpickle
 import multiprocessing as mp
 from tqdm import tqdm
 
-from pathlib import Path
+from dataclasses import dataclass, asdict, field, replace
 from datetime import datetime
-from concurrent.futures import Future, Executor as BaseExecutor, ProcessPoolExecutor, as_completed
 from collections import Counter, defaultdict
+from concurrent.futures import Future, Executor as BaseExecutor, ProcessPoolExecutor, as_completed
 from functools import partial
 from itertools import islice, chain
+from pathlib import Path
 from queue import Queue
 from typing import Any, Callable, Iterable, Iterator, NamedTuple, Optional, Sequence, cast
-from dataclasses import dataclass, asdict, field, replace
 
 from miniray.lib.helpers import Limits, extract_error, StreamLogger
 
@@ -34,6 +34,11 @@ DEFAULT_RESULT_PAYLOAD_TIMEOUT_SECONDS = 20 * 60
 USE_MAIN_RESULT_REDIS = bool(int(os.getenv("USE_MAIN_RESULT_REDIS", "0")))
 CACHE_ROOT = Path("/code.nfs/branches/caches")
 REMOTE_QUEUE = 'remote_v2'
+DEFAULT_LOGGER = StreamLogger('miniray', level=logging.INFO)
+
+MISSING_RESULT_PAYLOAD_ERROR = (
+  f"Did not find payload on worker redis. Results may be piling up and reader has fallen more than {DEFAULT_RESULT_PAYLOAD_TIMEOUT_SECONDS/60:.1f}"
+  " minutes behind. If your results are small, consider a larger chunksize. If your results are big, consider multiple miniray executors.")
 
 #TODO xx should be referenced here
 XX_BASEDIR = os.path.abspath(os.path.join(os.path.dirname(os.path.realpath(__file__)), "../"))
@@ -338,9 +343,7 @@ class Executor(BaseExecutor):
       result_payload = r.lpop(key)
       if result_payload is None:
         for future in futures:
-          future.set_exception(MinirayError("MinirayError", "Did not find payload on worker redis. Results may be piling up and reader has fallen more than " +
-                                                            f'{DEFAULT_RESULT_PAYLOAD_TIMEOUT_SECONDS/60:.1f} minutes behind. If your results are small, consider a larger chunksize'
-                                                            '. If your results are big, consider multiple miniray executors.', header.job, header.worker))
+          future.set_exception(MinirayError("MinirayError", MISSING_RESULT_PAYLOAD_ERROR, header.job, header.worker))
       else:
         subtasks = cloudpickle.loads(result_payload)
         for future, subtask in zip(futures, subtasks, strict=True):
@@ -355,7 +358,7 @@ class Executor(BaseExecutor):
   def _submit_task(self, batch: list[bytes]) -> None:
     self._submit_redis_tasks.lpush(f'{self.submit_queue_id}', *batch)
 
-def log(iterable: Iterable[Future], logger: Any = StreamLogger('miniray', level=logging.INFO), desc='running miniray tasks') -> list[Any]:
+def log(iterable: Iterable[Future], logger: Any = DEFAULT_LOGGER, desc='running miniray tasks') -> list[Any]:
   results = []
   statuses: Counter[str] = Counter()
   statuses_hosts = defaultdict(list)

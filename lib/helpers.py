@@ -11,6 +11,21 @@ TASK_TIMEOUT_GRACE_SECONDS = 10
 JOB_CACHE_SIZE = 1024
 JOB_BLOCK_SECONDS = 60 * 5  # 5 minutes
 
+@dataclass
+class Limits:
+  cpu_threads: int = 1
+  memory: float = 1.0
+  small_gpu_memory: float = 0.0
+  big_gpu_memory: float = 0.0
+  timeout_seconds: int = 60
+  triton: bool = False
+
+  def asdict(self):
+    return asdict(self)
+
+  def requires_gpu(self) -> bool:
+    return self.small_gpu_memory > 0 or self.big_gpu_memory > 0 or self.triton
+
 
 def set_random_seeds(seed: int):
   import os
@@ -36,45 +51,28 @@ def StreamLogger(name, level=None):
 def desc(e):
   return f"{type(e).__name__}: {str(e)}"
 
-
-@dataclass
-class Limits:
-  cpu_threads: int = 1
-  memory: float = 1.0
-  small_gpu_memory: float = 0.0
-  big_gpu_memory: float = 0.0
-  timeout_seconds: int = 60
-  triton: bool = False
-
-  def asdict(self):
-    return asdict(self)
-
-  def requires_gpu(self) -> bool:
-    return self.small_gpu_memory > 0 or self.big_gpu_memory > 0 or self.triton
-
-
 def extract_error(e):
-  a = e.strip().split('\n')
-  l = a[-1].split(':', 1)
-  c = l[0].split('.')[-1]
-  m = l[1].strip() if len(l) > 1 else ""
+  lines = e.strip().split('\n')
+  last_line = lines[-1].split(':', 1)
+  cls = last_line[0].split('.')[-1]
+  msg = last_line[1].strip() if len(last_line) > 1 else ""
   try:
-    if c == "AssertionError":
-      m = a[-2].strip()
-    elif c == "ColumnStoreException":
+    if cls == "AssertionError":
+      msg = lines[-2].strip()
+    elif cls == "ColumnStoreException":
       pattern = r"\('(.*?)/[a-f0-9]+\|[0-9\-]+/[0-9]+/columnstore', 404\)"
-      match = re.match(pattern, m)
+      match = re.match(pattern, msg)
       if match:
-        m = match.groups(1)[0]
-    elif c == "DependencyMissingError":
-      m = m.split('/')[-3].strip()
-    elif c == "Exception":
+        msg = match.groups(1)[0]
+    elif cls == "DependencyMissingError":
+      msg = msg.split('/')[-3].strip()
+    elif cls == "Exception":
       patterns = ["Error, range out of bounds [0-9]{3}", "Error, requested range but got unexpected response [0-9]{3}", "Error [0-9]{3}"]
       for pattern in patterns:
-        match = re.match(pattern, m)
+        match = re.match(pattern, msg)
         if match:
-          m = str(match.group())
+          msg = str(match.group())
           break
   except IndexError:
     pass
-  return f"{c}: {m}"
+  return f"{cls}: {msg}"

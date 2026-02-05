@@ -201,10 +201,10 @@ class ResourceManager():
     """
     meminfo_fn = f"/sys/devices/system/node/node{numa_node}/meminfo"
     with open(meminfo_fn,'r') as f:
-      for l in f:
-        if f"{k}:" in l:
+      for line in f:
+        if f"{k}:" in line:
           # convert kb to bytes
-          return int(l.strip().split()[-2]) * 1024
+          return int(line.strip().split()[-2]) * 1024
     raise LookupError(k)
 
   def _get_mem_info_by_node(self, mem_limit_multiplier):

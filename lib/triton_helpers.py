@@ -30,7 +30,7 @@ def create_triton_client(url: str = TRITON_SERVER_ADDRESS, verbose: bool = False
   try:
     assert client.is_server_live(), NOT_READY_MSG
   except ConnectionRefusedError:
-    raise ConnectionRefusedError(CONNECTION_ERR_MSG)
+    raise ConnectionRefusedError(CONNECTION_ERR_MSG) from None
   return client
 
 @retry(stop=stop_after_attempt(3), wait=wait_random(1, 2), reraise=True)
