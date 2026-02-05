@@ -5,6 +5,7 @@ DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 cd "$DIR/.."
 
 export COMPOSE_PROJECT_NAME="${COMPOSE_PROJECT_NAME:-miniray-test-$$}"
+pre-commit run --all-files --config .pre-commit-config.yaml
 
 cleanup() {
   echo "[CLEANUP] Showing worker logs..."
