@@ -10,9 +10,10 @@ from functools import wraps
 from pathlib import Path
 from typing import Optional, Any
 from redis import StrictRedis
-from miniray.lib.helpers import desc
 from tenacity import retry, stop_after_attempt, wait_random
 from tritonclient.http import InferenceServerClient
+
+from miniray.lib.helpers import desc
 
 TRITON_REDIS_HOST = os.getenv('TRITON_REDIS_HOST', '127.0.0.1')
 TRITON_SERVER_ADDRESS = os.getenv('TRITON_SERVER_ADDRESS', '127.0.0.1:8000')

@@ -2,15 +2,13 @@ import os
 import time
 import numpy as np
 import pytest
-
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import miniray
-from miniray import REMOTE_QUEUE
 
 MINIRAY_PRIORITY = 1000
 MINIRAY_MEMORY_GB = 0.4
-QUEUE_NAME = os.environ.get('MINIRAY_QUEUE', REMOTE_QUEUE)
+QUEUE_NAME = os.environ.get('MINIRAY_QUEUE', miniray.REMOTE_QUEUE)
 
 
 class MinirayTestClass:

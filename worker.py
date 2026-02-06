@@ -36,7 +36,7 @@ from miniray.lib.system_helpers import get_cgroup_cpu_usage, get_cgroup_mem_usag
 from miniray.lib.statsd_helpers import statsd
 from miniray.lib.helpers import Limits, desc, GB_TO_BYTES, TASK_TIMEOUT_GRACE_SECONDS, JOB_CACHE_SIZE
 from miniray.lib.uv import sync_venv_cache, cleanup_venvs
-from miniray import MinirayResultHeader, MinirayTask, JobMetadata, get_metadata_key
+from miniray.executor import MinirayResultHeader, MinirayTask, JobMetadata, get_metadata_key
 
 
 

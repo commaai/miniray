@@ -12,7 +12,6 @@ import threading
 import traceback
 import cloudpickle
 import multiprocessing as mp
-from tqdm import tqdm
 
 from dataclasses import dataclass, asdict, field, replace
 from datetime import datetime
@@ -22,6 +21,7 @@ from functools import partial
 from itertools import islice, chain
 from pathlib import Path
 from queue import Queue
+from tqdm import tqdm
 from typing import Any, Callable, Iterable, Iterator, NamedTuple, Optional, Sequence, cast
 
 from miniray.lib.helpers import Limits, extract_error, StreamLogger
