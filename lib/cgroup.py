@@ -1,7 +1,5 @@
 import os
-import signal
 import time
-import traceback
 from itertools import count
 
 CGROUP_DELETE_RETRIES = 5
@@ -72,40 +70,19 @@ def cgroup_add_pid(name: str, pid: int) -> None:
     f.write(str(pid))
 
 
-def cgroup_kill(name: str, recursive: bool=False) -> None:
+def cgroup_kill(name: str) -> None:
   cgroup_path = _get_cgroup_path(name)
-
-  pids = []
-  with open(os.path.join(cgroup_path, "cgroup.procs"), "r") as f:
-    for line in f:
-      try:
-        pids.append(int(line.strip()))
-      except Exception:
-        print(f"FAILED TO PARSE PID: {line}")
-        traceback.print_exc()
-
-  for pid in pids:
-    try:
-      os.kill(pid, signal.SIGKILL)
-    except Exception:
-      print(f"FAILED TO KILL PID: {pid}")
-      traceback.print_exc()
-
-  if recursive:
-    with os.scandir(cgroup_path) as it:
-      for de in it:
-        if de.is_dir():
-          cgroup_kill(os.path.join(name, de.name), recursive)
+  with open(os.path.join(cgroup_path, "cgroup.kill"), "w") as f:
+    f.write("1")
 
 
 def cgroup_clear_all_children(name: str) -> None:
   cgroup_path = _get_cgroup_path(name)
+  cgroup_kill(name)
   with os.scandir(cgroup_path) as it:
     for de in it:
       if de.is_dir():
         child_cgroup = os.path.join(name, de.name)
-        cgroup_kill(child_cgroup, recursive=True)
-
         for attempt in count():
           try:
             cgroup_delete(child_cgroup, recursive=True)
