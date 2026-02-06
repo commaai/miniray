@@ -342,7 +342,7 @@ class Task:
     if self.alloc_id is not None:
       while True:
         try:
-          cgroup_kill(self.cgroup_name, recursive=True)
+          cgroup_kill(self.cgroup_name)
           cgroup_delete(self.cgroup_name, recursive=True)
           break
         except Exception as e:
