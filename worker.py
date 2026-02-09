@@ -492,7 +492,7 @@ def main():
 
     jobs = sorted(key.decode() for key in r_tasks.keys(f"*{PIPELINE_QUEUE}"))
     update_job_metadatas(r_master, jobs, job_metadatas)
-    jobs = [j for j in jobs if not job_metadatas[j].node_whitelist or HOST_NAME in job_metadatas[j].node_whitelist]
+    jobs = [j for j in jobs if not job_metadatas[j].limits.get('node_whitelist') or HOST_NAME in job_metadatas[j].limits['node_whitelist']]
     current_gpu_job = get_globally_scheduled_job(r_master, jobs, job_metadatas)
     for i, proc in procs.items():
       # check if task is done and handle completion

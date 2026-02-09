@@ -1,6 +1,7 @@
 import re
 import sys
 import logging
+from typing import Optional
 from dataclasses import dataclass, asdict
 
 # Memory conversion constants
@@ -19,6 +20,7 @@ class Limits:
   big_gpu_memory: float = 0.0
   timeout_seconds: int = 60
   triton: bool = False
+  node_whitelist: Optional[list[str]] = None
 
   def asdict(self):
     return asdict(self)
