@@ -66,6 +66,7 @@ class JobMetadata(NamedTuple):
   codedir: str
   executor_host: str
   limits: dict[str, Any]
+  node_whitelist: list[str] = []
 
 class MinirayResultHeader(NamedTuple):
   job: str
@@ -90,6 +91,7 @@ class JobConfig:
   codedir: Optional[str] = None
   use_local_codedir: bool = False
   limits: Limits = field(default_factory=Limits)
+  node_whitelist: Optional[list[str]] = None
 
   def asdict(self):
     return asdict(self)
@@ -190,7 +192,7 @@ class Executor(BaseExecutor):
     self.expiry_check_timer: float = time.time()
     self.no_work_found_cnt = 0
 
-    job_metadata = JobMetadata(True, self.config.priority, self.codedir, socket.gethostname(), self.config.limits.asdict())
+    job_metadata = JobMetadata(True, self.config.priority, self.codedir, socket.gethostname(), self.config.limits.asdict(), self.config.node_whitelist or [])
     self._submit_redis_master.set(get_metadata_key(self.submit_queue_id), json.dumps(job_metadata), ex=7*24*60*60)
 
 
