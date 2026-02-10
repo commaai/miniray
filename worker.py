@@ -120,8 +120,8 @@ def reap_process(proc):
 
 
 class Task:
-  proc: subprocess.Popen
-  alloc_id: str
+  proc: Optional[subprocess.Popen]
+  alloc_id: Optional[str]
   task_gid: int
   cgroup_name: str
   result_file: str
