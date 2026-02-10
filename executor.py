@@ -188,6 +188,8 @@ class Executor(BaseExecutor):
     self.result_queue_id = f'fq-{self.submit_queue_id}'
 
     self._futures: dict[str, list[Future]] = {}
+    self._task_payloads: dict[str, bytes] = {}
+    self._retry_counts: dict[str, int] = {}
     self._submit_redis_master = StrictRedis(host=self.config.redis_host, port=6379, db=1, socket_keepalive=True)
     self._submit_redis_tasks = StrictRedis(host=self.config.redis_host, port=6379, db=4, socket_keepalive=True)
     self._result_redis = StrictRedis(host=self.config.redis_host, port=6379, db=5, socket_keepalive=True)
@@ -226,6 +228,8 @@ class Executor(BaseExecutor):
       if task_keys:
         self._submit_redis_master.delete(*task_keys)
       self._futures.clear()
+      self._task_payloads.clear()
+      self._retry_counts.clear()
       self._submit_redis_tasks.delete(self.submit_queue_id)
       self._submit_redis_master.delete(get_metadata_key(self.submit_queue_id))
 
@@ -236,10 +240,12 @@ class Executor(BaseExecutor):
     pickled_fn = cloudpickle.dumps(partial(_execute_batch, fn))
     task = self._pack_task('', pickled_fn, [args], kwargs, task_uuid)
     self._futures[task_uuid] = [future]
+    self._task_payloads[task_uuid] = task[1]
     try:
       self._submit_task([task])
     except Exception:
       self._futures.pop(task_uuid, None)
+      self._task_payloads.pop(task_uuid, None)
       raise
     return future
 
@@ -281,9 +287,12 @@ class Executor(BaseExecutor):
           submitted_queue.put(future)
 
         try:
-          self._submit_task([self._pack_task(function_ptr, b'', batch, {}, task_uuid)])
+          task = self._pack_task(function_ptr, b'', batch, {}, task_uuid)
+          self._task_payloads[task_uuid] = task[1]
+          self._submit_task([task])
         except Exception as e:
           self._futures.pop(task_uuid, None)
+          self._task_payloads.pop(task_uuid, None)
           for future in futures:
             future.set_exception(e)
 
@@ -317,8 +326,15 @@ class Executor(BaseExecutor):
                    self._submit_redis_master.scan_iter(match=f'task:{self.submit_queue_id}:*')}
     for task_uuid in list(self._futures.keys()):
       if task_uuid not in alive_uuids:
-        for future in self._futures.pop(task_uuid):
-          future.set_exception(MinirayError("RuntimeError", "task lost: key missing from redis", "", ""))
+        retries = self._retry_counts.get(task_uuid, 0)
+        if retries < 2 and task_uuid in self._task_payloads:
+          self._retry_counts[task_uuid] = retries + 1
+          self._submit_task([(task_uuid, self._task_payloads[task_uuid])])
+        else:
+          self._task_payloads.pop(task_uuid, None)
+          self._retry_counts.pop(task_uuid, None)
+          for future in self._futures.pop(task_uuid):
+            future.set_exception(MinirayError("RuntimeError", "task lost: key missing from redis (retries exhausted)", "", ""))
 
   def _pack_task(self, function_ptr: str, pickled_fn: bytes, args: Sequence[Any], kwargs: dict[str, Any], task_uuid: str) -> tuple[str, bytes]:
     pickled_args = cloudpickle.dumps((args, kwargs))
@@ -345,6 +361,8 @@ class Executor(BaseExecutor):
       return
     self._submit_redis_master.delete(get_task_key(self.submit_queue_id, header.task_uuid))
     futures = self._futures.pop(header.task_uuid)
+    self._task_payloads.pop(header.task_uuid, None)
+    self._retry_counts.pop(header.task_uuid, None)
 
     if header.succeeded:
       hostname, key = cloudpickle.loads(dat[1])
