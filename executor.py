@@ -340,7 +340,7 @@ class Executor(BaseExecutor):
     if header.succeeded:
       hostname, key = cloudpickle.loads(dat[1])
       r = StrictRedis(host=hostname, db=10)
-      result_payload = cast(bytes, r.lpop(key))
+      result_payload = cast(Optional[bytes], r.lpop(key))
       if result_payload is None:
         for future in futures:
           future.set_exception(MinirayError("MinirayError", MISSING_RESULT_PAYLOAD_ERROR, header.job, header.worker))
