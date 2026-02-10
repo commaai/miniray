@@ -1,4 +1,5 @@
 #!/usr/bin/env python
+from __future__ import annotations
 import os
 
 # prevent lots of threads from being started when importing task classes
@@ -11,7 +12,6 @@ import random
 import json
 import time
 import base64
-import redis
 import signal
 import socket
 import hashlib
@@ -22,9 +22,10 @@ import stat
 import shutil
 import numpy as np
 from collections.abc import Buffer
-from typing import Optional
-from tritonclient.http import InferenceServerClient
 from lru import LRU
+from redis import StrictRedis
+from typing import Optional, cast
+from tritonclient.http import InferenceServerClient
 
 from miniray.lib.cgroup import cgroup_create, cgroup_set_subcontrollers, cgroup_set_memory_limit, \
                                cgroup_set_numa_nodes, cgroup_add_pid, cgroup_kill, cgroup_delete, cgroup_clear_all_children
@@ -135,8 +136,8 @@ class Task:
   pickled_args: Buffer
 
   def __init__(self, task: MinirayTask, limits: Limits, proc_index: int,
-               resource_manager: ResourceManager, r_master: redis.StrictRedis, r_results: redis.StrictRedis,
-               job_metadata: JobMetadata, venv_cache: LRU, triton_client):
+               resource_manager: ResourceManager, r_master: StrictRedis, r_results: StrictRedis,
+               job_metadata: JobMetadata, venv_cache: LRU[str, str], triton_client):
     self.task = task
     self.limits = limits
     self.proc_index = proc_index
@@ -369,7 +370,7 @@ class Task:
 # we want to normalize by x such that sum(max(1 / N, weights / x)) = 1.
 # For example: if we have weights [1, 100, 1000] and N = 10, we find x = 1250
 # to get weights = [0.1, 0.1, 0.8], which satisfies all(W >= 1 / N) and sum(W) == 1.
-def get_job_intervals(raw_weights:list[int], N:int) -> list[float]:
+def get_job_intervals(raw_weights: list[int], N: int) -> list[float]:
   weights = all_weights = np.array(raw_weights[:N])  # we have N workers, so we can only schedule a maximum of N jobs at once
   x = 0
   while sum(weights) / N > x + 1e-7:  # small epsilon to fix rounding errors
@@ -385,9 +386,9 @@ def get_job_intervals(raw_weights:list[int], N:int) -> list[float]:
 # - Find our position in the sorted list of N active workers, this will be a number in [0, N). Divide by N to get a point P in [0, 1).
 # - Divide the interval [0, 1] amongst the available jobs, weighted by job priority
 # - Find the job whose interval contains P, this will be the job we accept.
-def get_globally_scheduled_job(r_master:redis.StrictRedis, jobs:list[str], job_metadatas: dict[str, JobMetadata]) -> Optional[str]:
+def get_globally_scheduled_job(r_master: StrictRedis, jobs: list[str], job_metadatas: LRU[str, JobMetadata]) -> Optional[str]:
   active_key = hashlib.md5(ACTIVE_KEY.encode()).hexdigest()  # we use the hash so machines with different compute capabilities are evenly distributed
-  active_workers = sorted(hashlib.md5(k).hexdigest() for k in r_master.keys(f"active:{PIPELINE_QUEUE}:*"))
+  active_workers = sorted(hashlib.md5(k).hexdigest() for k in cast(list[bytes], r_master.keys(f"active:{PIPELINE_QUEUE}:*")))
   if not jobs or active_key not in active_workers:
     return None
 
@@ -397,7 +398,7 @@ def get_globally_scheduled_job(r_master:redis.StrictRedis, jobs:list[str], job_m
   job_index = next(i for i,end in enumerate(job_intervals) if end >= P + 1e-7)
   return jobs[job_index]
 
-def get_randomly_scheduled_job(r_master:redis.StrictRedis, jobs:list[str], job_metadatas: dict[str, JobMetadata]) -> Optional[str]:
+def get_randomly_scheduled_job(jobs: list[str], job_metadatas: LRU[str, JobMetadata]) -> Optional[str]:
   # gpu jobs are only scheduled via the global scheduler
   jobs = [job for job in jobs if not Limits(**job_metadatas[job].limits).requires_gpu()]
 
@@ -407,17 +408,17 @@ def get_randomly_scheduled_job(r_master:redis.StrictRedis, jobs:list[str], job_m
   job = random.choices(jobs, weights=job_weights, k=1)[0]
   return job
 
-def update_job_metadatas(r_master:redis.StrictRedis, jobs:list[str], job_metadatas:dict[str, JobMetadata]):
+def update_job_metadatas(r_master: StrictRedis, jobs: list[str], job_metadatas: LRU[str, JobMetadata]):
   for job in jobs:
     if job not in job_metadatas:
-      raw_metadata = r_master.get(get_metadata_key(job))
+      raw_metadata = cast(bytes, r_master.get(get_metadata_key(job)))
       if raw_metadata is not None:
         job_metadatas[job] = JobMetadata(*json.loads(raw_metadata))
       else:
         job_metadatas[job] = JobMetadata(False, 1, "", "", Limits().asdict())
 
-def get_task(resource_manager: ResourceManager, r_master: redis.StrictRedis, r_tasks: redis.StrictRedis,
-             r_results: redis.StrictRedis, job: str, job_metadatas: dict[str, JobMetadata], venvs: LRU,
+def get_task(resource_manager: ResourceManager, r_master: StrictRedis, r_tasks: StrictRedis,
+             r_results: StrictRedis, job: str, job_metadatas: LRU[str, JobMetadata], venvs: LRU,
              proc_index: int, triton_client) -> Optional[Task]:
   limits = Limits(**job_metadatas[job].limits)
   temp_key = f"{job}-pending"
@@ -427,7 +428,7 @@ def get_task(resource_manager: ResourceManager, r_master: redis.StrictRedis, r_t
     print(f"[worker] {MINIRAY_TARGET_NAME} resource limit: {desc(e)}")
     return None
 
-  raw_task = r_tasks.rpop(job)
+  raw_task = cast(bytes, r_tasks.rpop(job))
   if not raw_task:  # something else grabbed the last task
     resource_manager.release(temp_key)
     return None
@@ -478,9 +479,9 @@ def main():
   sigterm_handler = SigTermHandler(callback=sig_callback)
   backoff = ExponentialBackoff(SLEEP_TIME_MAX, DEBUG)
 
-  r_master = redis.StrictRedis(host=REDIS_HOST, port=6379, db=1)
-  r_tasks = redis.StrictRedis(host=REDIS_HOST, port=6379, db=4)
-  r_results = redis.StrictRedis(host=REDIS_HOST, port=6379, db=5)
+  r_master = StrictRedis(host=REDIS_HOST, port=6379, db=1)
+  r_tasks = StrictRedis(host=REDIS_HOST, port=6379, db=4)
+  r_results = StrictRedis(host=REDIS_HOST, port=6379, db=5)
 
   os.nice(1)
 
@@ -490,7 +491,7 @@ def main():
     r_master.set(ACTIVE_KEY, 1, ex=SLEEP_TIME_MAX+1)
     backoff.sleep()
 
-    jobs = sorted(key.decode() for key in r_tasks.keys(f"*{PIPELINE_QUEUE}"))
+    jobs = sorted(key.decode() for key in cast(list[bytes], r_tasks.keys(f"*{PIPELINE_QUEUE}")))
     update_job_metadatas(r_master, jobs, job_metadatas)
     current_gpu_job = get_globally_scheduled_job(r_master, jobs, job_metadatas)
     for i, proc in procs.items():
@@ -508,7 +509,7 @@ def main():
       if current_gpu_job is not None:
         task = get_task(rm, r_master, r_tasks, r_results, current_gpu_job, job_metadatas, venvs, i, triton_client)
       if task is None:
-        job = get_randomly_scheduled_job(r_master, jobs, job_metadatas)
+        job = get_randomly_scheduled_job(jobs, job_metadatas)
         if job is not None:
           task = get_task(rm, r_master, r_tasks, r_results, job, job_metadatas, venvs, i, triton_client)
       if task is None:

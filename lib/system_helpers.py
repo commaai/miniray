@@ -36,7 +36,7 @@ def get_gpu_stats(pid, devices):
     for device in devices:
       try:
         return pynvml.nvmlDeviceGetAccountingStats(device, pid)
-      except pynvml.NVMLError_NotFound:
+      except pynvml.NVMLError_NotFound:  # ty: ignore[unresolved-attribute]
         continue
   except pynvml.NVMLError:
     pass

@@ -3,7 +3,6 @@ import sys
 import json
 import time
 import uuid
-import redis
 import socket
 import base64
 import logging
@@ -21,6 +20,7 @@ from functools import partial
 from itertools import islice, chain
 from pathlib import Path
 from queue import Queue
+from redis import StrictRedis, ConnectionError as RedisConnectionError
 from tqdm import tqdm
 from typing import Any, Callable, Iterable, Iterator, NamedTuple, Optional, Sequence, cast
 
@@ -123,7 +123,7 @@ def _execute_batch(fn, *batch, **kwargs):
 def _wrap_result_local_redis(data: Any, timeout_seconds: int) -> tuple[str, str]:
   key = f"miniray-{uuid.uuid4()}"
   redis_result_host = REDIS_HOST if USE_MAIN_RESULT_REDIS else socket.gethostname()
-  r = redis.StrictRedis(host=redis_result_host, db=10)
+  r = StrictRedis(host=redis_result_host, db=10)
   pipe = r.pipeline()
   pipe.lpush(key, cloudpickle.dumps(data))
   pipe.expire(key, timeout_seconds)
@@ -180,9 +180,9 @@ class Executor(BaseExecutor):
     self.result_queue_id = f'fq-{self.submit_queue_id}'
 
     self._futures: dict[str, list[Future]] = {}
-    self._submit_redis_master = redis.StrictRedis(host=self.config.redis_host, port=6379, db=1, socket_keepalive=True)
-    self._submit_redis_tasks = redis.StrictRedis(host=self.config.redis_host, port=6379, db=4, socket_keepalive=True)
-    self._result_redis = redis.StrictRedis(host=self.config.redis_host, port=6379, db=5, socket_keepalive=True)
+    self._submit_redis_master = StrictRedis(host=self.config.redis_host, port=6379, db=1, socket_keepalive=True)
+    self._submit_redis_tasks = StrictRedis(host=self.config.redis_host, port=6379, db=4, socket_keepalive=True)
+    self._result_redis = StrictRedis(host=self.config.redis_host, port=6379, db=5, socket_keepalive=True)
     self._shutdown_lock = threading.Lock()
     self._shutdown_reader_thread = False
     self._reader_thread: Optional[threading.Thread] = None
@@ -252,7 +252,7 @@ class Executor(BaseExecutor):
       yield future
 
   def get_submit_queue_size(self) -> int:
-    return self._submit_redis_tasks.llen(self.submit_queue_id)
+    return cast(int, self._submit_redis_tasks.llen(self.submit_queue_id))
 
   # Worker threads
 
@@ -289,7 +289,7 @@ class Executor(BaseExecutor):
           self._unpack_result(result)
           self.expiry_check_timer = time.time()
         time.sleep(0.1)
-      except redis.ConnectionError:
+      except RedisConnectionError:
         print("[ERROR] Redis connection error in miniray reader thread. Retrying in 10 seconds...", file=sys.stderr)
         print(traceback.format_exc(), file=sys.stderr)
         time.sleep(10)
@@ -300,7 +300,7 @@ class Executor(BaseExecutor):
     self.expiry_check_timer = now
     any_working = False
     for task_uuid in list(self._futures.keys())[:1000]:  # avoid blocking for too long
-      start_data = self._submit_redis_master.get(f"{task_uuid}-start")
+      start_data = cast(Optional[bytes], self._submit_redis_master.get(f"{task_uuid}-start"))
       if start_data is not None:
         any_working = True
         job, worker, expiry_time = json.loads(start_data)
@@ -339,8 +339,8 @@ class Executor(BaseExecutor):
 
     if header.succeeded:
       hostname, key = cloudpickle.loads(dat[1])
-      r = redis.StrictRedis(hostname, db=10)
-      result_payload = r.lpop(key)
+      r = StrictRedis(host=hostname, db=10)
+      result_payload = cast(bytes, r.lpop(key))
       if result_payload is None:
         for future in futures:
           future.set_exception(MinirayError("MinirayError", MISSING_RESULT_PAYLOAD_ERROR, header.job, header.worker))
