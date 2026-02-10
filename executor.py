@@ -226,11 +226,8 @@ class Executor(BaseExecutor):
       task_keys = [get_task_key(self.submit_queue_id, task_uuid) for task_uuid in self._futures]
       if task_keys:
         self._submit_redis_master.delete(*task_keys)
-      self._futures.clear()
-      self._task_payloads.clear()
-      self._retry_counts.clear()
-      self._submit_redis_master.delete(self.submit_queue_id)
-      self._submit_redis_master.delete(get_metadata_key(self.submit_queue_id))
+      self._submit_redis_master.delete(*task_keys, self.submit_queue_id, get_metadata_key(self.submit_queue_id))
+
 
   def submit(self, fn: Callable, /, *args, **kwargs) -> Future:
     assert not self._shutdown_reader_thread, "Cannot submit new tasks after shutdown has started"
