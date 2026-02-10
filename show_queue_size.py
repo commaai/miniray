@@ -7,7 +7,7 @@ REDIS_HOST = os.environ.get("REDIS_HOST", "redis.comma.internal")
 REDIS_DB = int(os.environ.get("REDIS_DB", "1"))
 
 client = redis.StrictRedis(host=REDIS_HOST, port=6379, db=REDIS_DB, decode_responses=True)
-keys = [k for k in client.scan_iter(match="*") if ":" not in k]
+keys = list(client.scan_iter(match="*"))
 
 queue_keys: dict[str, list[str]] = {REMOTE_QUEUE: []}
 other_keys: list[str] = []

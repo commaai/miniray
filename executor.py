@@ -234,13 +234,7 @@ class Executor(BaseExecutor):
     pickled_fn = cloudpickle.dumps(partial(_execute_batch, fn))
     task = self._pack_task('', pickled_fn, [args], kwargs, task_uuid)
     self._futures[task_uuid] = [future]
-    self._task_payloads[task_uuid] = task[1]
-    try:
-      self._submit_task([task])
-    except Exception:
-      self._futures.pop(task_uuid, None)
-      self._task_payloads.pop(task_uuid, None)
-      raise
+    self._submit_task([task])
     return future
 
   def map(self, fn: Callable, *iterables: Iterable[Any], timeout: Optional[float] = None, chunksize: int = 1) -> Iterator[Any]:
@@ -279,16 +273,7 @@ class Executor(BaseExecutor):
         self._futures[task_uuid] = futures
         for future in futures:
           submitted_queue.put(future)
-
-        try:
-          task = self._pack_task(function_ptr, b'', batch, {}, task_uuid)
-          self._task_payloads[task_uuid] = task[1]
-          self._submit_task([task])
-        except Exception as e:
-          self._futures.pop(task_uuid, None)
-          self._task_payloads.pop(task_uuid, None)
-          for future in futures:
-            future.set_exception(e)
+        self._submit_task([self._pack_task(function_ptr, b'', batch, {}, task_uuid)])
 
       submitted_queue.put(None)  # Signal the end of the stream
     except Exception:
@@ -313,22 +298,13 @@ class Executor(BaseExecutor):
 
   def _check_lost_tasks(self) -> None:
     self._last_lost_check = time.time()
-    if not self._futures:
-      return
     prefix = f'task:{self.submit_queue_id}:'.encode()
     alive_uuids = {key[len(prefix):].decode() for key in
                    self._submit_redis_master.scan_iter(match=f'task:{self.submit_queue_id}:*')}
     for task_uuid in list(self._futures.keys()):
       if task_uuid not in alive_uuids:
-        retries = self._retry_counts.get(task_uuid, 0)
-        if retries < 2 and task_uuid in self._task_payloads:
-          self._retry_counts[task_uuid] = retries + 1
-          self._submit_task([(task_uuid, self._task_payloads[task_uuid])])
-        else:
-          self._task_payloads.pop(task_uuid, None)
-          self._retry_counts.pop(task_uuid, None)
-          for future in self._futures.pop(task_uuid):
-            future.set_exception(MinirayError("RuntimeError", "task lost: key missing from redis (retries exhausted)", "", ""))
+        for future in self._futures.pop(task_uuid):
+          future.set_exception(MinirayError("RuntimeError", "task lost", "", ""))
 
   def _pack_task(self, function_ptr: str, pickled_fn: bytes, args: Sequence[Any], kwargs: dict[str, Any], task_uuid: str) -> tuple[str, bytes]:
     pickled_args = cloudpickle.dumps((args, kwargs))
