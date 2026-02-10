@@ -1,3 +1,4 @@
+from __future__ import annotations
 import os
 import time
 import traceback
@@ -5,11 +6,11 @@ import types
 import resource
 import threading
 import pynvml
+from ctypes import _Pointer
 from dataclasses import dataclass
 
 from miniray.lib.triton_helpers import cleanup_triton
 from miniray.lib.helpers import Limits, GB_TO_BYTES
-
 
 class ResourceLimitError(Exception):
   pass
@@ -38,7 +39,7 @@ class GPUInfo:
     memory: int
     bus_id: str
     small: bool
-    handle: pynvml.c_nvmlDevice_t
+    handle: _Pointer[pynvml.struct_c_nvmlDevice_t]
 
 
 @dataclass
@@ -225,7 +226,7 @@ class ResourceManager():
         mem_info = pynvml.nvmlDeviceGetMemoryInfo(gpu_dev)
         is_small = "T600" in pynvml.nvmlDeviceGetName(gpu_dev)
         gpu_info.append(GPUInfo(index=i, memory=mem_info.total, bus_id=pci_info.busId, small=is_small, handle=gpu_dev))
-    except pynvml.NVMLError_LibraryNotFound:
+    except pynvml.NVMLError_LibraryNotFound:  # ty: ignore[unresolved-attribute]
       print("WARNING: NVML shared library not found, running without GPUs")
       return []
     return gpu_info

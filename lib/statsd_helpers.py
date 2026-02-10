@@ -1,5 +1,5 @@
-import statsd
 import atexit
+from statsd import StatsClient as BaseStatsClient
 
 global_tags: dict[str, str] = {}
 
@@ -7,7 +7,7 @@ def with_tags(stat, tags=None):
   return stat + ''.join(f',{k}={v}' for k, v in (global_tags | (tags or {})).items())
 
 
-class StatsClient(statsd.StatsClient):
+class StatsClient(BaseStatsClient):
   def bind_global(self, **kwargs):
     global_tags.update(kwargs)
 
@@ -29,8 +29,8 @@ class StatsClient(statsd.StatsClient):
   def decr(self, stat, count=1, rate=1, tags=None):
     super().decr(with_tags(stat, tags), count=count, rate=rate)
 
-  def gauge(self, stat, values, rate=1, delta=False, tags=None):
-    super().gauge(with_tags(stat, tags), values, rate=rate, delta=delta)
+  def gauge(self, stat, value, rate=1, delta=False, tags=None):
+    super().gauge(with_tags(stat, tags), value, rate=rate, delta=delta)
 
   def set(self, stat, value, rate=1, tags=None):
     super().set(with_tags(stat, tags), value, rate=rate)
