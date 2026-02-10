@@ -358,12 +358,12 @@ class Executor(BaseExecutor):
   def _submit_task(self, batch: list[bytes]) -> None:
     self._submit_redis_tasks.lpush(f'{self.submit_queue_id}', *batch)
 
-def log(iterable: Iterable[Future], logger: Any = DEFAULT_LOGGER, desc='running miniray tasks') -> list[Any]:
+def log(iterable: Iterable[Future], logger: Any = DEFAULT_LOGGER, desc: str = 'running miniray tasks', **kwargs: Any) -> list[Any]:
   results = []
   statuses: Counter[str] = Counter()
   statuses_hosts = defaultdict(list)
   iterable = list(iterable)
-  for future in tqdm(as_completed(iterable), total=len(iterable), desc=desc):
+  for future in tqdm(as_completed(iterable), total=len(iterable), desc=desc, **kwargs):
     try:
       result = future.result()
       statuses["Succeeded"] += 1

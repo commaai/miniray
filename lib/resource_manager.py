@@ -5,6 +5,7 @@ import types
 import resource
 import threading
 import pynvml
+from ctypes import _Pointer
 from dataclasses import dataclass
 
 from miniray.lib.triton_helpers import cleanup_triton
@@ -38,7 +39,7 @@ class GPUInfo:
     memory: int
     bus_id: str
     small: bool
-    handle: pynvml.c_nvmlDevice_t
+    handle: _Pointer[pynvml.struct_c_nvmlDevice_t]
 
 
 @dataclass
