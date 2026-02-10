@@ -53,12 +53,21 @@ class MinirayError(Exception):
     self.job = job
     self.worker = worker
 
-class MinirayTask(NamedTuple):
+class TaskRecord(NamedTuple):
   uuid: str
   job: str
   function_ptr: str
   pickled_fn: str
   pickled_args: str
+  state: str          # 'pending' | 'working' | 'done'
+  worker: str
+  submitted_at: float
+  started_at: float
+
+def get_task_key(task_uuid: str) -> str:
+  return f'task:{task_uuid}'
+
+PENDING_TASK_SAFETY_TTL = 24 * 60 * 60
 
 class JobMetadata(NamedTuple):
   valid: bool
@@ -185,9 +194,7 @@ class Executor(BaseExecutor):
     self._shutdown_lock = threading.Lock()
     self._shutdown_reader_thread = False
     self._reader_thread: Optional[threading.Thread] = None
-    self._last_resubmit_check = 0.0
-    self.expiry_check_timer: float = time.time()
-    self.no_work_found_cnt = 0
+    self._last_lost_check: float = time.time()
 
     job_metadata = JobMetadata(True, self.config.priority, self.codedir, socket.gethostname(), self.config.limits.asdict())
     self._submit_redis_master.set(get_metadata_key(self.submit_queue_id), json.dumps(job_metadata), ex=7*24*60*60)
@@ -215,6 +222,9 @@ class Executor(BaseExecutor):
       self._shutdown_reader_thread = True
       if wait and self._reader_thread is not None:
           self._reader_thread.join()
+      task_keys = [get_task_key(task_uuid) for task_uuid in self._futures]
+      if task_keys:
+        self._submit_redis_master.delete(*task_keys)
       self._futures.clear()
       self._submit_redis_tasks.delete(self.submit_queue_id)
       self._submit_redis_master.delete(get_metadata_key(self.submit_queue_id))
@@ -226,7 +236,11 @@ class Executor(BaseExecutor):
     pickled_fn = cloudpickle.dumps(partial(_execute_batch, fn))
     task = self._pack_task('', pickled_fn, [args], kwargs, task_uuid)
     self._futures[task_uuid] = [future]
-    self._submit_task([task])
+    try:
+      self._submit_task([task])
+    except Exception:
+      self._futures.pop(task_uuid, None)
+      raise
     return future
 
   def map(self, fn: Callable, *iterables: Iterable[Any], timeout: Optional[float] = None, chunksize: int = 1) -> Iterator[Any]:
@@ -269,6 +283,7 @@ class Executor(BaseExecutor):
         try:
           self._submit_task([self._pack_task(function_ptr, b'', batch, {}, task_uuid)])
         except Exception as e:
+          self._futures.pop(task_uuid, None)
           for future in futures:
             future.set_exception(e)
 
@@ -281,51 +296,48 @@ class Executor(BaseExecutor):
   def _reader_loop(self) -> None:
     while not self._shutdown_reader_thread or not all(future.done() for future in chain.from_iterable(self._futures.values())):
       try:
-        if time.time() - self.expiry_check_timer > 10:
-          self._check_expired_tasks()
+        if time.time() - self._last_lost_check > 10:
+          self._check_lost_tasks()
         results = cast(list[bytes], self._result_redis.lpop(self.result_queue_id, count=1000) or [])
         for result in results:
           self._unpack_result(result)
-          self.expiry_check_timer = time.time()
+          self._last_lost_check = time.time()
         time.sleep(0.1)
       except RedisConnectionError:
         print("[ERROR] Redis connection error in miniray reader thread. Retrying in 10 seconds...", file=sys.stderr)
         print(traceback.format_exc(), file=sys.stderr)
         time.sleep(10)
 
-  def _check_expired_tasks(self) -> None:
-    # TODO this is super jank. Worker should garantuee work keys are present, so no race conditions
-    now = time.time()
-    self.expiry_check_timer = now
-    any_working = False
-    for task_uuid in list(self._futures.keys())[:1000]:  # avoid blocking for too long
-      start_data = cast(Optional[bytes], self._submit_redis_master.get(f"{task_uuid}-start"))
-      if start_data is not None:
-        any_working = True
-        job, worker, expiry_time = json.loads(start_data)
-        if now > float(expiry_time):
-          self._submit_redis_master.delete(f"{task_uuid}-start")
-          for future in self._futures.pop(task_uuid):
-            future.set_exception(MinirayError("TimeoutError", "TimeoutError: task did not complete before expiry time", job, worker))
-    if not any_working and self.get_submit_queue_size() == 0:
-      self.no_work_found_cnt += 1
-      if self.no_work_found_cnt >= 3:
-        for task_uuid in list(self._futures.keys()):
-          for future in self._futures.pop(task_uuid):
-            future.set_exception(MinirayError("RuntimeError", "task got lost", "", ""))
+  def _check_lost_tasks(self) -> None:
+    self._last_lost_check = time.time()
+    task_uuids = list(self._futures.keys())
+    if not task_uuids:
+      return
+    pipe = self._submit_redis_master.pipeline()
+    for task_uuid in task_uuids:
+      pipe.exists(get_task_key(task_uuid))
+    results = pipe.execute()
+    for task_uuid, exists in zip(task_uuids, results):
+      if not exists:
+        for future in self._futures.pop(task_uuid):
+          future.set_exception(MinirayError("RuntimeError", "task lost: key missing from redis", "", ""))
 
-  def _pack_task(self, function_ptr: str, pickled_fn: bytes, args: Sequence[Any], kwargs: dict[str, Any], task_uuid: str) -> bytes:
+  def _pack_task(self, function_ptr: str, pickled_fn: bytes, args: Sequence[Any], kwargs: dict[str, Any], task_uuid: str) -> tuple[str, bytes]:
     pickled_args = cloudpickle.dumps((args, kwargs))
     if len(pickled_fn) + len(pickled_args) > MAX_ARG_STRLEN:
       raise RuntimeError(f"Can't send target, size ({len(pickled_fn) + len(pickled_args)}) exceeds max allowed length ({MAX_ARG_STRLEN})")
-    task = MinirayTask(
-      task_uuid,
-      self.submit_queue_id,
-      function_ptr,
-      base64.b64encode(pickled_fn).decode('ascii'),
-      base64.b64encode(pickled_args).decode('ascii'),
+    record = TaskRecord(
+      uuid=task_uuid,
+      job=self.submit_queue_id,
+      function_ptr=function_ptr,
+      pickled_fn=base64.b64encode(pickled_fn).decode('ascii'),
+      pickled_args=base64.b64encode(pickled_args).decode('ascii'),
+      state='pending',
+      worker='',
+      submitted_at=time.time(),
+      started_at=0.0,
     )
-    return json.dumps(task, ensure_ascii=False).encode('utf-8')
+    return (task_uuid, json.dumps(record, ensure_ascii=False).encode('utf-8'))
 
   def _unpack_result(self, res: bytes) -> None:
     dat = res.split(b"\x00", 1)
@@ -333,7 +345,7 @@ class Executor(BaseExecutor):
     if header.task_uuid not in self._futures:
       print(f"[ERROR] finished unstarted task: {header.task_uuid} [{header.worker}]", file=sys.stderr)
       return
-    self._submit_redis_master.delete(f"{header.task_uuid}-start")
+    self._submit_redis_master.delete(get_task_key(header.task_uuid))
     futures = self._futures.pop(header.task_uuid)
 
     if header.succeeded:
@@ -354,8 +366,13 @@ class Executor(BaseExecutor):
       for future in futures:
         future.set_exception(MinirayError(header.exception_type, header.exception_desc, header.job, header.worker))
 
-  def _submit_task(self, batch: list[bytes]) -> None:
-    self._submit_redis_tasks.lpush(f'{self.submit_queue_id}', *batch)
+  def _submit_task(self, batch: list[tuple[str, bytes]]) -> None:
+    pipe = self._submit_redis_master.pipeline()
+    for task_uuid, task_json in batch:
+      pipe.set(get_task_key(task_uuid), task_json, ex=PENDING_TASK_SAFETY_TTL)
+    pipe.execute()
+    uuids = [task_uuid for task_uuid, _ in batch]
+    self._submit_redis_tasks.lpush(f'{self.submit_queue_id}', *uuids)
 
 def log(iterable: Iterable[Future], logger: Any = DEFAULT_LOGGER, desc: str = 'running miniray tasks', **kwargs: Any) -> list[Any]:
   results = []
