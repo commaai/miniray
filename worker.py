@@ -424,7 +424,7 @@ def update_job_metadatas(r_master: StrictRedis, jobs: list[str], job_metadatas: 
       else:
         job_metadatas[job] = JobMetadata(False, 1, "", "", Limits().asdict())
 
-def get_task(resource_manager: ResourceManager, r_master: StrictRedis, r_tasks: StrictRedis,
+def get_task(resource_manager: ResourceManager, r_master: StrictRedis,
              r_results: StrictRedis, job: str, job_metadatas: LRU[str, JobMetadata], venvs: LRU,
              proc_index: int, triton_client) -> Optional[Task]:
   limits = Limits(**job_metadatas[job].limits)
@@ -435,7 +435,7 @@ def get_task(resource_manager: ResourceManager, r_master: StrictRedis, r_tasks: 
     print(f"[worker] {MINIRAY_TARGET_NAME} resource limit: {desc(e)}")
     return None
 
-  task_uuid = r_tasks.rpop(job)
+  task_uuid = r_master.rpop(job)
   if not task_uuid:  # something else grabbed the last task
     resource_manager.release(temp_key)
     return None
@@ -500,7 +500,6 @@ def main():
   backoff = ExponentialBackoff(SLEEP_TIME_MAX, DEBUG)
 
   r_master = StrictRedis(host=REDIS_HOST, port=6379, db=1)
-  r_tasks = StrictRedis(host=REDIS_HOST, port=6379, db=4)
   r_results = StrictRedis(host=REDIS_HOST, port=6379, db=5)
 
   os.nice(1)
@@ -514,7 +513,7 @@ def main():
     if triton_client is not None:
       assert triton_client.is_server_live(), "Triton server died or never started"
 
-    jobs = sorted(key.decode() for key in cast(list[bytes], r_tasks.keys(f"*{PIPELINE_QUEUE}")))
+    jobs = sorted(key.decode() for key in cast(list[bytes], r_master.keys(f"*{PIPELINE_QUEUE}")) if b":" not in key)
     update_job_metadatas(r_master, jobs, job_metadatas)
     jobs = [j for j in jobs if not job_metadatas[j].limits.get('node_whitelist') or HOST_NAME in job_metadatas[j].limits['node_whitelist']]
     current_gpu_job = get_globally_scheduled_job(r_master, jobs, job_metadatas)
@@ -531,11 +530,11 @@ def main():
       # schedule new task if slot is free
       task = None
       if current_gpu_job is not None:
-        task = get_task(rm, r_master, r_tasks, r_results, current_gpu_job, job_metadatas, venvs, i, triton_client)
+        task = get_task(rm, r_master, r_results, current_gpu_job, job_metadatas, venvs, i, triton_client)
       if task is None:
         job = get_randomly_scheduled_job(jobs, job_metadatas)
         if job is not None:
-          task = get_task(rm, r_master, r_tasks, r_results, job, job_metadatas, venvs, i, triton_client)
+          task = get_task(rm, r_master, r_results, job, job_metadatas, venvs, i, triton_client)
       if task is None:
         continue
 
