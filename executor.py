@@ -224,8 +224,6 @@ class Executor(BaseExecutor):
       if wait and self._reader_thread is not None:
           self._reader_thread.join()
       task_keys = [get_task_key(self.submit_queue_id, task_uuid) for task_uuid in self._futures]
-      if task_keys:
-        self._submit_redis_master.delete(*task_keys)
       self._submit_redis_master.delete(*task_keys, self.submit_queue_id, get_metadata_key(self.submit_queue_id))
 
 
