@@ -64,8 +64,8 @@ class TaskRecord(NamedTuple):
   submitted_at: float
   started_at: float
 
-def get_task_key(task_uuid: str) -> str:
-  return f'task:{task_uuid}'
+def get_task_key(job: str, task_uuid: str) -> str:
+  return f'task:{job}:{task_uuid}'
 
 PENDING_TASK_SAFETY_TTL = 24 * 60 * 60
 
@@ -222,7 +222,7 @@ class Executor(BaseExecutor):
       self._shutdown_reader_thread = True
       if wait and self._reader_thread is not None:
           self._reader_thread.join()
-      task_keys = [get_task_key(task_uuid) for task_uuid in self._futures]
+      task_keys = [get_task_key(self.submit_queue_id, task_uuid) for task_uuid in self._futures]
       if task_keys:
         self._submit_redis_master.delete(*task_keys)
       self._futures.clear()
@@ -310,15 +310,13 @@ class Executor(BaseExecutor):
 
   def _check_lost_tasks(self) -> None:
     self._last_lost_check = time.time()
-    task_uuids = list(self._futures.keys())
-    if not task_uuids:
+    if not self._futures:
       return
-    pipe = self._submit_redis_master.pipeline()
-    for task_uuid in task_uuids:
-      pipe.exists(get_task_key(task_uuid))
-    results = pipe.execute()
-    for task_uuid, exists in zip(task_uuids, results):
-      if not exists:
+    prefix = f'task:{self.submit_queue_id}:'.encode()
+    alive_uuids = {key[len(prefix):].decode() for key in
+                   self._submit_redis_master.scan_iter(match=f'task:{self.submit_queue_id}:*')}
+    for task_uuid in list(self._futures.keys()):
+      if task_uuid not in alive_uuids:
         for future in self._futures.pop(task_uuid):
           future.set_exception(MinirayError("RuntimeError", "task lost: key missing from redis", "", ""))
 
@@ -345,7 +343,7 @@ class Executor(BaseExecutor):
     if header.task_uuid not in self._futures:
       print(f"[ERROR] finished unstarted task: {header.task_uuid} [{header.worker}]", file=sys.stderr)
       return
-    self._submit_redis_master.delete(get_task_key(header.task_uuid))
+    self._submit_redis_master.delete(get_task_key(self.submit_queue_id, header.task_uuid))
     futures = self._futures.pop(header.task_uuid)
 
     if header.succeeded:
@@ -369,7 +367,7 @@ class Executor(BaseExecutor):
   def _submit_task(self, batch: list[tuple[str, bytes]]) -> None:
     pipe = self._submit_redis_master.pipeline()
     for task_uuid, task_json in batch:
-      pipe.set(get_task_key(task_uuid), task_json, ex=PENDING_TASK_SAFETY_TTL)
+      pipe.set(get_task_key(self.submit_queue_id, task_uuid), task_json, ex=PENDING_TASK_SAFETY_TTL)
     pipe.execute()
     uuids = [task_uuid for task_uuid, _ in batch]
     self._submit_redis_tasks.lpush(f'{self.submit_queue_id}', *uuids)

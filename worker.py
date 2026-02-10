@@ -340,7 +340,7 @@ class Task:
       self.r_results.expire(f'fq-{self.job}', 86400)  # extend availability for 24 hours
 
     # Transition task key to done — executor deletes it after reading the result
-    task_key = get_task_key(self.task_uuid)
+    task_key = get_task_key(self.job, self.task_uuid)
     done_record = TaskRecord(
       uuid=self.task_uuid, job=self.job, function_ptr=self.task.function_ptr,
       pickled_fn='', pickled_args='',
@@ -444,7 +444,7 @@ def get_task(resource_manager: ResourceManager, r_master: StrictRedis, r_tasks: 
     return None
 
   task_uuid = task_uuid.decode() if isinstance(task_uuid, bytes) else task_uuid
-  task_key = get_task_key(task_uuid)
+  task_key = get_task_key(job, task_uuid)
   task_data = r_master.get(task_key)
   if task_data is None:
     # Task key missing — executor shutdown or orphaned UUID
