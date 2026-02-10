@@ -191,7 +191,6 @@ class Executor(BaseExecutor):
     self._task_payloads: dict[str, bytes] = {}
     self._retry_counts: dict[str, int] = {}
     self._submit_redis_master = StrictRedis(host=self.config.redis_host, port=6379, db=1, socket_keepalive=True)
-    self._submit_redis_tasks = StrictRedis(host=self.config.redis_host, port=6379, db=4, socket_keepalive=True)
     self._result_redis = StrictRedis(host=self.config.redis_host, port=6379, db=5, socket_keepalive=True)
     self._shutdown_lock = threading.Lock()
     self._shutdown_reader_thread = False
@@ -230,7 +229,7 @@ class Executor(BaseExecutor):
       self._futures.clear()
       self._task_payloads.clear()
       self._retry_counts.clear()
-      self._submit_redis_tasks.delete(self.submit_queue_id)
+      self._submit_redis_master.delete(self.submit_queue_id)
       self._submit_redis_master.delete(get_metadata_key(self.submit_queue_id))
 
   def submit(self, fn: Callable, /, *args, **kwargs) -> Future:
@@ -271,7 +270,7 @@ class Executor(BaseExecutor):
       yield future
 
   def get_submit_queue_size(self) -> int:
-    return cast(int, self._submit_redis_tasks.llen(self.submit_queue_id))
+    return cast(int, self._submit_redis_master.llen(self.submit_queue_id))
 
   # Worker threads
 
@@ -388,7 +387,7 @@ class Executor(BaseExecutor):
       pipe.set(get_task_key(self.submit_queue_id, task_uuid), task_json, ex=PENDING_TASK_SAFETY_TTL)
     pipe.execute()
     uuids = [task_uuid for task_uuid, _ in batch]
-    self._submit_redis_tasks.lpush(f'{self.submit_queue_id}', *uuids)
+    self._submit_redis_master.lpush(f'{self.submit_queue_id}', *uuids)
 
 def log(iterable: Iterable[Future], logger: Any = DEFAULT_LOGGER, desc: str = 'running miniray tasks', **kwargs: Any) -> list[Any]:
   results = []
