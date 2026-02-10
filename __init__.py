@@ -3,11 +3,12 @@ from miniray.executor import (
   LocalExecutor,
   MinirayError,
   MinirayResultHeader,
-  MinirayTask,
+  TaskRecord,
   JobConfig,
   JobMetadata,
   REMOTE_QUEUE,
   get_metadata_key,
+  get_task_key,
   log,
 )
 from miniray.lib.helpers import Limits
@@ -17,11 +18,12 @@ __all__ = [
   "LocalExecutor",
   "MinirayError",
   "MinirayResultHeader",
-  "MinirayTask",
+  "TaskRecord",
   "JobConfig",
   "JobMetadata",
   "REMOTE_QUEUE",
   "get_metadata_key",
+  "get_task_key",
   "log",
   "Limits",
 ]

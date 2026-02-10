@@ -36,7 +36,7 @@ from miniray.lib.system_helpers import get_cgroup_cpu_usage, get_cgroup_mem_usag
 from miniray.lib.statsd_helpers import statsd
 from miniray.lib.helpers import Limits, desc, GB_TO_BYTES, TASK_TIMEOUT_GRACE_SECONDS, JOB_CACHE_SIZE
 from miniray.lib.uv import sync_venv_cache, cleanup_venvs
-from miniray.executor import MinirayResultHeader, MinirayTask, JobMetadata, get_metadata_key
+from miniray.executor import MinirayResultHeader, JobMetadata, TaskRecord, get_metadata_key, get_task_key
 
 
 
@@ -134,7 +134,7 @@ class Task:
   pickled_fn: bytes
   pickled_args: bytes
 
-  def __init__(self, task: MinirayTask, limits: Limits, proc_index: int,
+  def __init__(self, task: TaskRecord, limits: Limits, proc_index: int,
                resource_manager: ResourceManager, r_master: StrictRedis, r_results: StrictRedis,
                job_metadata: JobMetadata, venv_cache: LRU[str, str], triton_client):
     self.task = task
@@ -163,8 +163,6 @@ class Task:
     return self.task.uuid
 
   def init(self) -> bool:
-    task_data = json.dumps([self.job, WORKER_ID, time.time() + self.limits.timeout_seconds + TASK_TIMEOUT_GRACE_SECONDS])
-    self.r_master.set(f'{self.task_uuid}-start', task_data, ex=3600)
     self.start_time = time.time()
     try:
       if not self.job_metadata.valid:
@@ -294,15 +292,15 @@ class Task:
     # Determine result/error state
     if self._timed_out:
       self._error = ("TimeoutError", f"TimeoutError: task timed out after {self.limits.timeout_seconds} seconds")
-    elif self.proc.returncode != 0 and not exiting:
+    elif self.proc.returncode != 0 and exiting:
+      self._error = ("WorkerShutdown", "task killed due to worker shutdown")
+    elif self.proc.returncode != 0:
       error_type = f"ChildProcessError<{self.proc.returncode}>"
       self._error = (error_type, f"{error_type}: task died with result code {self.proc.returncode}")
     elif self.proc.returncode == 0 and len(self._task_result) > 0:
       self._error = None
     elif self.proc.returncode == 0:
       self._error = ("NoResultError", "Task completed but produced no result")
-    else:
-      self._error = None  # exiting case
 
     self._done = True
     return True
@@ -325,7 +323,6 @@ class Task:
       error_type, error_msg = self._error
       result_header = MinirayResultHeader(self.job, False, HOST_NAME, error_type, error_msg, self.task_uuid)
       self.r_results.lpush(f'fq-{self.job}', json.dumps(result_header))
-      self.r_master.delete(f'{self.task_uuid}-start')
       statsd.event('pipeline.worker.task_error', tags={'task_id': self.job, 'type': error_type})
     elif len(self._task_result) > 0:
       success_marker = self._task_result[0:1]
@@ -341,7 +338,16 @@ class Task:
         self.r_results.lpush(f'fq-{self.job}', json.dumps(result_header))
 
       self.r_results.expire(f'fq-{self.job}', 86400)  # extend availability for 24 hours
-      self.r_master.delete(f'{self.task_uuid}-start')
+
+    # Transition task key to done — executor deletes it after reading the result
+    task_key = get_task_key(self.task_uuid)
+    done_record = TaskRecord(
+      uuid=self.task_uuid, job=self.job, function_ptr=self.task.function_ptr,
+      pickled_fn='', pickled_args='',
+      state='done', worker=WORKER_ID,
+      submitted_at=0.0, started_at=self.start_time,
+    )
+    self.r_master.set(task_key, json.dumps(done_record), ex=3600)
 
     # Cleanup cgroups, shared memory, and temp directories
     if self.alloc_id is not None:
@@ -432,15 +438,28 @@ def get_task(resource_manager: ResourceManager, r_master: StrictRedis, r_tasks: 
     print(f"[worker] {MINIRAY_TARGET_NAME} resource limit: {desc(e)}")
     return None
 
-  raw_task = cast(bytes, r_tasks.rpop(job))
-  if not raw_task:  # something else grabbed the last task
+  task_uuid = r_tasks.rpop(job)
+  if not task_uuid:  # something else grabbed the last task
     resource_manager.release(temp_key)
     return None
 
-  miniray_task = MinirayTask(*json.loads(raw_task))
-  resource_manager.rekey(temp_key, miniray_task.uuid)
+  task_uuid = task_uuid.decode() if isinstance(task_uuid, bytes) else task_uuid
+  task_key = get_task_key(task_uuid)
+  task_data = r_master.get(task_key)
+  if task_data is None:
+    # Task key missing — executor shutdown or orphaned UUID
+    resource_manager.release(temp_key)
+    return None
 
-  return Task(miniray_task, limits, proc_index, resource_manager, r_master, r_results, job_metadatas[job], venvs, triton_client)
+  record = TaskRecord(*json.loads(task_data))
+
+  # Transition pending -> working with TTL = timeout + grace
+  ttl = int(limits.timeout_seconds + TASK_TIMEOUT_GRACE_SECONDS)
+  working_record = record._replace(state='working', worker=WORKER_ID, started_at=time.time())
+  r_master.set(task_key, json.dumps(working_record), ex=ttl)
+  resource_manager.rekey(temp_key, record.uuid)
+
+  return Task(record, limits, proc_index, resource_manager, r_master, r_results, job_metadatas[job], venvs, triton_client)
 
 
 def sig_callback(signal):
