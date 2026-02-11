@@ -246,8 +246,8 @@ class Task:
                                    start_new_session=True, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
       cgroup_add_pid(self.cgroup_name, self.proc.pid)
       assert self.proc.stdin is not None
-      self.proc.stdin.write(self.pickled_fn)  # ty: ignore[no-matching-overload]
-      self.proc.stdin.write(self.pickled_args)  # ty: ignore[no-matching-overload]
+      self.proc.stdin.write(self.pickled_fn)
+      self.proc.stdin.write(self.pickled_args)
       self.proc.stdin.close()
       self.proc.stdin = None
       return True
