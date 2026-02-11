@@ -148,6 +148,8 @@ class Task:
     self.venv_cache = venv_cache
     self.triton_client = triton_client
 
+    self.proc = None
+    self.alloc_id = None
     self._done = False
     self._timed_out = False
     self._task_result = b''
@@ -306,16 +308,17 @@ class Task:
 
   def finish(self, ignore_errors=False):
     task_run_time = time.time() - self.start_time
-    task_gpu_stats = get_gpu_stats(self.proc.pid, [gpu.handle for gpu in self.rm.gpus])
-    task_cpu_time = get_cgroup_cpu_usage(self.cgroup_name)
-    task_gpu_time = get_gpu_utilization(task_gpu_stats) * task_run_time
-    task_memory_gb = get_cgroup_mem_usage(self.cgroup_name) * 1e-9
-    task_gpu_memory_gb = get_gpu_mem_usage(task_gpu_stats) * 1e-9
-    statsd.event("pipeline.worker.task_done", runtime=task_run_time, cpu=task_cpu_time, gpu=task_gpu_time,
-                                              memory=task_memory_gb, gpu_memory=task_gpu_memory_gb, tags={'task_id': self.job})
-    print(f"[worker] finished miniray task from job {self.job} stats: "
-          f"elapsed={task_run_time:0.2f}s cpu={task_cpu_time:0.2f}s gpu={task_gpu_time:0.2f}s "
-          f"mem={task_memory_gb:0.2f}GB gpumem={task_gpu_memory_gb:0.2f}GB")
+    if self.proc is not None:
+      task_gpu_stats = get_gpu_stats(self.proc.pid, [gpu.handle for gpu in self.rm.gpus])
+      task_cpu_time = get_cgroup_cpu_usage(self.cgroup_name)
+      task_gpu_time = get_gpu_utilization(task_gpu_stats) * task_run_time
+      task_memory_gb = get_cgroup_mem_usage(self.cgroup_name) * 1e-9
+      task_gpu_memory_gb = get_gpu_mem_usage(task_gpu_stats) * 1e-9
+      statsd.event("pipeline.worker.task_done", runtime=task_run_time, cpu=task_cpu_time, gpu=task_gpu_time,
+                                                memory=task_memory_gb, gpu_memory=task_gpu_memory_gb, tags={'task_id': self.job})
+      print(f"[worker] finished miniray task from job {self.job} stats: "
+            f"elapsed={task_run_time:0.2f}s cpu={task_cpu_time:0.2f}s gpu={task_gpu_time:0.2f}s "
+            f"mem={task_memory_gb:0.2f}GB gpumem={task_gpu_memory_gb:0.2f}GB")
 
     if self._error:
       error_type, error_msg = self._error
