@@ -136,11 +136,10 @@ def _local_worker_init():
     set_random_seeds(int(seed))
 
 class LocalExecutor(ProcessPoolExecutor):
-  def __init__(self, *args, **kwargs):
+  def __init__(self):
     ctx = mp.get_context("spawn")
     # separate processes per task to avoid leaking states (simulating a behaviour from distributed run)
-    override_kwargs = {'max_workers': NUM_LOCAL_WORKERS, 'mp_context': ctx, 'max_tasks_per_child': 1, 'initializer': _local_worker_init} | kwargs
-    super().__init__(*args, **override_kwargs)
+    super().__init__(max_workers=NUM_LOCAL_WORKERS, mp_context=ctx, max_tasks_per_child=1, initializer=_local_worker_init)
 
   def fmap(self, fn: Callable, *iterables: Iterable[Any], chunksize: int = 1) -> Iterator[Future]:
     for args in zip(*iterables, strict=True):

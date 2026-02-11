@@ -21,7 +21,6 @@ import grp
 import stat
 import shutil
 import numpy as np
-from collections.abc import Buffer
 from lru import LRU
 from redis import StrictRedis
 from typing import Optional, cast
@@ -132,8 +131,8 @@ class Task:
   start_time: float
   tmp_dir: str
   venv_dir: str
-  pickled_fn: Buffer
-  pickled_args: Buffer
+  pickled_fn: bytes
+  pickled_args: bytes
 
   def __init__(self, task: MinirayTask, limits: Limits, proc_index: int,
                resource_manager: ResourceManager, r_master: StrictRedis, r_results: StrictRedis,
@@ -176,11 +175,12 @@ class Task:
 
       # Fetch function if needed
       if self.task.function_ptr:
-        self.pickled_fn = self.r_master.get(self.task.function_ptr)
-        if self.pickled_fn is None:
+        pickled_fn = cast(Optional[bytes], self.r_master.get(self.task.function_ptr))
+        if pickled_fn is None:
           self._done = True
           self._error = ("CacheMissError", f"Cached function {self.task.function_ptr} not found in redis")
           return False
+        self.pickled_fn = pickled_fn
       else:
         self.pickled_fn = base64.b64decode(self.task.pickled_fn)
       self.pickled_args = base64.b64decode(self.task.pickled_args)
@@ -246,8 +246,8 @@ class Task:
                                    start_new_session=True, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
       cgroup_add_pid(self.cgroup_name, self.proc.pid)
       assert self.proc.stdin is not None
-      self.proc.stdin.write(self.pickled_fn)
-      self.proc.stdin.write(self.pickled_args)
+      self.proc.stdin.write(self.pickled_fn)  # ty: ignore[no-matching-overload]
+      self.proc.stdin.write(self.pickled_args)  # ty: ignore[no-matching-overload]
       self.proc.stdin.close()
       self.proc.stdin = None
       return True

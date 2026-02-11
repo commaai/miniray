@@ -2,7 +2,7 @@
 name = "miniray"
 version = "0.1.0"
 description = "Distributed task execution framework"
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 dependencies = [
     "redis>=4.0.0",
     "cloudpickle>=2.0.0",
@@ -33,6 +33,7 @@ lint.select = ["E", "F", "W", "PIE", "C4", "ISC", "RUF100", "A", "B", "TID251"]
 lint.ignore = ["E701"]
 line-length = 160
 target-version="py310"
+exclude = ["miniray"]
 
-[tool.ty.rules]
-unresolved-import = "ignore"
+[tool.ty.src]
+exclude = ["miniray"]
