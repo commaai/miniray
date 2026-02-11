@@ -148,8 +148,8 @@ class Task:
     self.venv_cache = venv_cache
     self.triton_client = triton_client
 
-    self.proc = None
-    self.alloc_id = None
+    self.proc: Optional[subprocess.Popen] = None
+    self.alloc_id: Optional[str] = None
     self._done = False
     self._timed_out = False
     self._task_result = b''
