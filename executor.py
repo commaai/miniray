@@ -40,7 +40,7 @@ MISSING_RESULT_PAYLOAD_ERROR = (
   f"Did not find payload on worker redis. Results may be piling up and reader has fallen more than {DEFAULT_RESULT_PAYLOAD_TIMEOUT_SECONDS/60:.1f}"
   " minutes behind. If your results are small, consider a larger chunksize. If your results are big, consider multiple miniray executors.")
 
-#TODO xx should not be referenced here
+#TODO xx should be referenced here
 XX_BASEDIR = os.path.abspath(os.path.join(os.path.dirname(os.path.realpath(__file__)), "../"))
 XX_BASEPATH = Path(XX_BASEDIR)
 
@@ -169,7 +169,7 @@ class Executor(BaseExecutor):
     elif config.use_local_codedir:
       config = replace(config, codedir=sync_local_codedir(job_desc))
     else:
-      config = replace(config, '/code.nfs/xx/')
+      config = replace(config, codedir=str(XX_BASEPATH))
 
     self.config = config
 
