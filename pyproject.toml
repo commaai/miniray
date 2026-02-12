@@ -25,6 +25,9 @@ testing = [
     "ty",
 ]
 
+[tool.setuptools]
+py-modules = []
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 
