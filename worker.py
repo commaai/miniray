@@ -451,7 +451,7 @@ def ensure_venv(job: str, codedir: str, venv_cache: LRU):
     venv_dir = str(sync_venv_cache(codedir, TASK_UID, job))
     venv_cache[job] = venv_dir
     cleanup_venvs(TASK_UID, keep_venvs=list(venv_cache.keys()))
-  assert job in venv_cache, "Failed to find venv in cache, {codedir} exists: {os.path.exists(codedir)}"
+  assert job in venv_cache, f"Failed to find venv in cache, {codedir} exists: {os.path.exists(codedir)}"
 
 
 def main():
