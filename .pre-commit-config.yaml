@@ -1,20 +1,20 @@
 repos:
--   repo: https://github.com/pre-commit/pre-commit-hooks
-    rev: v5.0.0
-    hooks:
-    -   id: check-ast
-    -   id: check-merge-conflict
-    -   id: check-symlinks
-    -   id: check-added-large-files
-        args: ['--maxkb=380']
--   repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: v0.15.0
-    hooks:
-    -   id: ruff-check
--   repo: local
-    hooks:
-      - id: ty
-        name: ty check
-        entry: ty check .
-        language: python
-        types: [python]
+- repo: https://github.com/pre-commit/pre-commit-hooks
+  rev: v5.0.0
+  hooks:
+  - id: check-ast
+  - id: check-merge-conflict
+  - id: check-symlinks
+  - id: check-added-large-files
+    args: ['--maxkb=380']
+- repo: https://github.com/astral-sh/ruff-pre-commit
+  rev: v0.15.0
+  hooks:
+  - id: ruff-check
+- repo: local
+  hooks:
+  - id: ty
+    name: ty check
+    entry: ty check .
+    language: python
+    types: [python]
