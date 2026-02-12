@@ -236,6 +236,7 @@ class Task:
         'CDDIS_HOURLY_BASE_URL': "http://gnss-cache.comma.internal:8082/gnss-data-hourly",
         'ENABLE_MODEL_CACHE': str(int(not TRITON_SERVER_ENABLED)),
         'RESULT_FILE': self.result_file,
+        'DISABLE_FILEREADER_CACHE': '1',
       }
       python3_exe = os.path.join(self.venv_dir, "bin/python3")
 
