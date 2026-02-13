@@ -232,6 +232,7 @@ class Task:
         'ENABLE_MODEL_CACHE': str(int(not TRITON_SERVER_ENABLED)),
         'RESULT_FILE': self.result_file,
         'DISABLE_FILEREADER_CACHE': '1',
+        **self.job_metadata.env,
       }
       python3_exe = os.path.join(self.venv_dir, "bin/python3")
 
@@ -422,7 +423,7 @@ def update_job_metadatas(r_master: StrictRedis, jobs: list[str], job_metadatas: 
       if raw_metadata is not None:
         job_metadatas[job] = JobMetadata(*json.loads(raw_metadata))
       else:
-        job_metadatas[job] = JobMetadata(False, 1, "", "", Limits().asdict())
+        job_metadatas[job] = JobMetadata(False, 1, "", "", Limits().asdict(), {})
 
 def get_task(resource_manager: ResourceManager, r_master: StrictRedis,
              r_results: StrictRedis, job: str, job_metadatas: LRU[str, JobMetadata], venvs: LRU,
