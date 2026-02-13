@@ -8,7 +8,7 @@ import signal
 import subprocess
 from functools import wraps
 from pathlib import Path
-from typing import Optional, Any
+from typing import Any, Callable, Optional, TypedDict
 from redis import StrictRedis
 from tenacity import retry, stop_after_attempt, wait_random
 from tritonclient.http import InferenceServerClient
@@ -26,6 +26,9 @@ Unable to connect to the triton server at {TRITON_SERVER_ADDRESS}.
  - If this occurs on a worker, it may indicate that the server has crashed. This can occur, for instance, if the 3080 TI falls off the bus.
 """.strip()
 
+IOConfig = TypedDict('IOConfig', {'name': str, 'data_type': str, 'dims': list[int]})
+ModelConfig = TypedDict('ModelConfig', {'input': list[IOConfig], 'output': list[IOConfig]})
+
 def create_triton_client(url: str = TRITON_SERVER_ADDRESS, verbose: bool = False) -> InferenceServerClient:
   client = InferenceServerClient(url=url, verbose=verbose)
   try:
@@ -42,9 +45,9 @@ def get_triton_inference_stats(client: InferenceServerClient):
 def load_triton_model(client: InferenceServerClient, model: str, config: dict[str, Any]):
   return client.load_model(model, config=json.dumps(config))
 
-def setup_triton_model(func):
+def setup_triton_model(func: Callable[..., ModelConfig]):
   @wraps(func)
-  def wrapper(*self, client: InferenceServerClient, model: str, redis: Optional[StrictRedis] = None) -> None:
+  def wrapper(*self: Any, client: InferenceServerClient, model: str, redis: Optional[StrictRedis] = None) -> None:
       model_dir = TRITON_MODEL_REPOSITORY / model / '1'
       if client.is_model_ready(model):  # if the model is already loaded, bump the mtime and return
         mtime = time.time()
