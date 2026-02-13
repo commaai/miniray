@@ -36,7 +36,7 @@ from miniray.lib.system_helpers import get_cgroup_cpu_usage, get_cgroup_mem_usag
 from miniray.lib.statsd_helpers import statsd
 from miniray.lib.helpers import Limits, desc, GB_TO_BYTES, TASK_TIMEOUT_GRACE_SECONDS, JOB_CACHE_SIZE
 from miniray.lib.uv import sync_venv_cache, cleanup_venvs
-from miniray.executor import MinirayResultHeader, JobMetadata, TaskRecord, get_metadata_key, get_task_key
+from miniray.executor import MinirayResultHeader, JobMetadata, TaskRecord, TaskState, get_metadata_key, get_task_key
 
 
 
@@ -342,7 +342,7 @@ class Task:
     done_record = TaskRecord(
       uuid=self.task_uuid, job=self.job, function_ptr=self.task.function_ptr,
       pickled_fn='', pickled_args='',
-      state='done', worker=WORKER_ID,
+      state=TaskState.DONE, worker=WORKER_ID,
       submitted_at=0.0, started_at=self.start_time,
     )
     self.r_master.set(task_key, json.dumps(done_record), ex=3600)
@@ -453,7 +453,7 @@ def get_task(resource_manager: ResourceManager, r_master: StrictRedis,
 
   # Transition pending -> working with TTL = timeout + grace
   ttl = int(limits.timeout_seconds + TASK_TIMEOUT_GRACE_SECONDS)
-  working_record = record._replace(state='working', worker=WORKER_ID, started_at=time.time())
+  working_record = record._replace(state=TaskState.WORKING, worker=WORKER_ID, started_at=time.time())
   r_master.set(task_key, json.dumps(working_record), ex=ttl)
   resource_manager.rekey(temp_key, record.uuid)
 
