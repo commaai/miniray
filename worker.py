@@ -23,7 +23,7 @@ import shutil
 import numpy as np
 from lru import LRU
 from redis import StrictRedis
-from typing import Optional, cast
+from typing import BinaryIO, Optional, cast
 from tritonclient.http import InferenceServerClient
 
 from miniray.lib.cgroup import cgroup_create, cgroup_set_subcontrollers, cgroup_set_memory_limit, \
@@ -243,9 +243,10 @@ class Task:
                                    start_new_session=True, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
       cgroup_add_pid(self.cgroup_name, self.proc.pid)
       assert self.proc.stdin is not None
-      self.proc.stdin.write(self.pickled_fn)
-      self.proc.stdin.write(self.pickled_args)
-      self.proc.stdin.close()
+      stdin = cast(BinaryIO, self.proc.stdin)
+      stdin.write(self.pickled_fn)
+      stdin.write(self.pickled_args)
+      stdin.close()
       self.proc.stdin = None
       return True
     except BaseException as e:
@@ -436,14 +437,14 @@ def get_task(resource_manager: ResourceManager, r_master: StrictRedis,
     print(f"[worker] {MINIRAY_TARGET_NAME} resource limit: {desc(e)}")
     return None
 
-  task_uuid = r_master.rpop(job)
-  if not task_uuid:  # something else grabbed the last task
+  raw_task_uuid = cast(Optional[bytes], r_master.rpop(job))
+  if raw_task_uuid is None:  # something else grabbed the last task
     resource_manager.release(temp_key)
     return None
 
-  task_uuid = task_uuid.decode() if isinstance(task_uuid, bytes) else task_uuid
+  task_uuid = raw_task_uuid.decode()
   task_key = get_task_key(job, task_uuid)
-  task_data = r_master.get(task_key)
+  task_data = cast(Optional[bytes], r_master.get(task_key))
   if task_data is None:
     # Task key missing — executor shutdown or orphaned UUID
     resource_manager.release(temp_key)
