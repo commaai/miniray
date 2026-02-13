@@ -13,7 +13,6 @@ from redis import StrictRedis
 from tenacity import retry, stop_after_attempt, wait_random
 from tritonclient.http import InferenceServerClient
 
-from miniray.lib.helpers import desc
 
 TRITON_REDIS_HOST = os.getenv('TRITON_REDIS_HOST', '127.0.0.1')
 TRITON_SERVER_ADDRESS = os.getenv('TRITON_SERVER_ADDRESS', '127.0.0.1:8000')
@@ -101,16 +100,8 @@ def get_triton_container_id() -> str:
   return container_ids.split('\n')[0]
 
 def cleanup_triton(triton_client, gpu_bus_ids):
-  try:
-    unload_triton_models(triton_client)
-  except ConnectionRefusedError as e:
-    print(f"[worker] could not connect to triton server: {desc(e)}")
-  except Exception as e:
-    print(f"[worker] error unloading triton models: {desc(e)}")
-  try:
-    kill_triton_backend_stubs(gpu_bus_ids)
-  except Exception as e:
-    print(f"[worker] error killing triton backend stubs: {desc(e)}")
+  unload_triton_models(triton_client)
+  kill_triton_backend_stubs(gpu_bus_ids)
 
 
 if __name__ == '__main__':
