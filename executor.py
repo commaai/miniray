@@ -11,6 +11,7 @@ import threading
 import traceback
 import cloudpickle
 import multiprocessing as mp
+from enum import StrEnum
 
 from dataclasses import dataclass, asdict, field, replace
 from datetime import datetime
@@ -53,13 +54,20 @@ class MinirayError(Exception):
     self.job = job
     self.worker = worker
 
+
+class TaskState(StrEnum):
+  PENDING = "pending"
+  WORKING = "working"
+  DONE = "done"
+
+
 class TaskRecord(NamedTuple):
   uuid: str
   job: str
   function_ptr: str
   pickled_fn: str
   pickled_args: str
-  state: str          # 'pending' | 'working' | 'done'
+  state: TaskState
   worker: str
   submitted_at: float
   started_at: float
@@ -325,7 +333,7 @@ class Executor(BaseExecutor):
       function_ptr=function_ptr,
       pickled_fn=base64.b64encode(pickled_fn).decode('ascii'),
       pickled_args=base64.b64encode(pickled_args).decode('ascii'),
-      state='pending',
+      state=TaskState.PENDING,
       worker='',
       submitted_at=time.time(),
       started_at=0.0,
