@@ -344,7 +344,7 @@ class Task:
     # Transition task key to done — executor deletes it after reading the result
     task_key = get_task_key(self.job, self.task_uuid)
     done_record = TaskRecord(
-      uuid=self.task_uuid, job=self.job, function_ptr=self.task.function_ptr,
+      uuid=self.task_uuid, job=self.job, executor=self.task.executor, function_ptr=self.task.function_ptr,
       pickled_fn='', pickled_args='',
       state=TaskState.DONE, worker=WORKER_ID,
       submitted_at=0.0, started_at=self.start_time,

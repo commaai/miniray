@@ -64,6 +64,7 @@ class TaskState(StrEnum):
 class TaskRecord(NamedTuple):
   uuid: str
   job: str
+  executor: str
   function_ptr: str
   pickled_fn: str
   pickled_args: str
@@ -81,7 +82,7 @@ class JobMetadata(NamedTuple):
   valid: bool
   priority: int
   codedir: str
-  executor_host: str
+  executor: str
   limits: dict[str, Any]
   env: dict[str, str]
 
@@ -207,11 +208,12 @@ class Executor(BaseExecutor):
     self._reader_thread: Optional[threading.Thread] = None
     self._last_lost_check: float = time.time()
 
+    self.executor = socket.gethostname()
     job_metadata = JobMetadata(
       True,
       self.config.priority,
       self.codedir,
-      socket.gethostname(),
+      self.executor,
       self.config.limits.asdict(),
       self.config.env,
     )
@@ -330,6 +332,7 @@ class Executor(BaseExecutor):
     record = TaskRecord(
       uuid=task_uuid,
       job=self.submit_queue_id,
+      executor=self.executor,
       function_ptr=function_ptr,
       pickled_fn=base64.b64encode(pickled_fn).decode('ascii'),
       pickled_args=base64.b64encode(pickled_args).decode('ascii'),
