@@ -2,7 +2,7 @@
 import os
 import json
 import redis
-from miniray.executor import TaskRecord
+from miniray.executor import TaskRecord, TaskState
 
 REDIS_HOST: str = os.environ.get("REDIS_HOST", "redis.comma.internal")
 
@@ -23,6 +23,6 @@ for i in range(0, len(results), 2):
   if value is None:
     continue
   record = TaskRecord(*json.loads(value))
-  if record.state != 'working':
+  if record.state != TaskState.WORKING:
     continue
-  print(f"{record.worker:>10s} {record.job:>40s} {ttl:8d}s remaining")
+  print(f"{record.worker:>10s} {record.executor:>12s} {record.job:>40s} {ttl:8d}s remaining")
