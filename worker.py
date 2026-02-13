@@ -492,9 +492,8 @@ def main():
     r_master.set(ACTIVE_KEY, 1, ex=SLEEP_TIME_MAX+1)
     backoff.sleep()
 
-    # crash if triton server is down
     if triton_client is not None:
-      assert triton_client.is_server_live(), "Triton server is not live"
+      assert triton_client.is_server_live(), "Triton server died or never started"
 
     jobs = sorted(key.decode() for key in cast(list[bytes], r_tasks.keys(f"*{PIPELINE_QUEUE}")))
     update_job_metadatas(r_master, jobs, job_metadatas)
