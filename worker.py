@@ -89,13 +89,10 @@ def cleanup_shm_by_gid(alloc_id, triton_client, gid):
     shm_entries_for_gid = [(de, s) for de, s in shm_entries if s.st_gid == gid]
 
   if TRITON_SERVER_ENABLED and len(shm_entries_for_gid) > 0:
-    try:
-      triton_shm_entries = {x['name'] for x in triton_client.get_system_shared_memory_status()}
-      for de, s in shm_entries_for_gid:
-        if de.name in triton_shm_entries and not stat.S_ISDIR(s.st_mode):
-          triton_client.unregister_system_shared_memory(de.name)
-    except ConnectionRefusedError as e:
-      print(f"[worker] could not connect to triton server: {desc(e)}")
+    triton_shm_entries = {x['name'] for x in triton_client.get_system_shared_memory_status()}
+    for de, s in shm_entries_for_gid:
+      if de.name in triton_shm_entries and not stat.S_ISDIR(s.st_mode):
+        triton_client.unregister_system_shared_memory(de.name)
 
   for de, s in shm_entries_for_gid:
     if stat.S_ISDIR(s.st_mode):
@@ -494,6 +491,9 @@ def main():
   while not sigterm_handler.raised:
     r_master.set(ACTIVE_KEY, 1, ex=SLEEP_TIME_MAX+1)
     backoff.sleep()
+
+    if triton_client is not None:
+      assert triton_client.is_server_live(), "Triton server died or never started"
 
     jobs = sorted(key.decode() for key in cast(list[bytes], r_tasks.keys(f"*{PIPELINE_QUEUE}")))
     update_job_metadatas(r_master, jobs, job_metadatas)
