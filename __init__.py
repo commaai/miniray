@@ -9,7 +9,7 @@ from miniray.executor import (
   JobMetadata,
   REMOTE_QUEUE,
   get_metadata_key,
-  get_task_key,
+  get_tasks_key,
   log,
 )
 from miniray.lib.helpers import Limits
@@ -25,7 +25,7 @@ __all__ = [
   "JobMetadata",
   "REMOTE_QUEUE",
   "get_metadata_key",
-  "get_task_key",
+  "get_tasks_key",
   "log",
   "Limits",
 ]
