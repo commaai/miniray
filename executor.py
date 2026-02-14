@@ -31,6 +31,7 @@ MAX_ARG_STRLEN = 131071  # max length for unix string arguments, see https://sta
 REDIS_HOST = os.getenv('REDIS_HOST', 'redis.comma.internal')
 FORCE_LOCAL = bool(int(os.getenv("MINIRAY_FORCE_LOCAL", "0")))
 NUM_LOCAL_WORKERS = int(os.getenv("MINIRAY_LOCAL_NUM_WORKERS", "1"))
+PENDING_TASK_SAFETY_TTL = 24 * 60 * 60
 DEFAULT_RESULT_PAYLOAD_TIMEOUT_SECONDS = 20 * 60
 USE_MAIN_RESULT_REDIS = bool(int(os.getenv("USE_MAIN_RESULT_REDIS", "0")))
 CACHE_ROOT = Path("/code.nfs/branches/caches")
@@ -60,7 +61,6 @@ class TaskState(StrEnum):
   WORKING = "working"
   DONE = "done"
 
-
 class TaskRecord(NamedTuple):
   uuid: str
   job: str
@@ -72,11 +72,6 @@ class TaskRecord(NamedTuple):
   worker: str
   submitted_at: float
   started_at: float
-
-def get_task_key(job: str, task_uuid: str) -> str:
-  return f'task:{job}:{task_uuid}'
-
-PENDING_TASK_SAFETY_TTL = 24 * 60 * 60
 
 class JobMetadata(NamedTuple):
   valid: bool
@@ -113,6 +108,9 @@ class JobConfig:
 
   def asdict(self):
     return asdict(self)
+
+def get_tasks_key(job: str) -> str:
+  return f'tasks:{job}'
 
 def get_metadata_key(job: str) -> str:
   return f'job-metadata:{job}'
@@ -242,9 +240,7 @@ class Executor(BaseExecutor):
       self._shutdown_reader_thread = True
       if wait and self._reader_thread is not None:
           self._reader_thread.join()
-      task_keys = [get_task_key(self.submit_queue_id, task_uuid) for task_uuid in self._futures]
-      self._submit_redis_master.delete(*task_keys, self.submit_queue_id, get_metadata_key(self.submit_queue_id))
-
+      self._submit_redis_master.delete(get_tasks_key(self.submit_queue_id), self.submit_queue_id, get_metadata_key(self.submit_queue_id))
 
   def submit(self, fn: Callable, /, *args, **kwargs) -> Future:
     assert not self._shutdown_reader_thread, "Cannot submit new tasks after shutdown has started"
@@ -349,7 +345,7 @@ class Executor(BaseExecutor):
     if header.task_uuid not in self._futures:
       print(f"[ERROR] finished unstarted task: {header.task_uuid} [{header.worker}]", file=sys.stderr)
       return
-    self._submit_redis_master.delete(get_task_key(self.submit_queue_id, header.task_uuid))
+    self._submit_redis_master.hdel(get_tasks_key(self.submit_queue_id), header.task_uuid)
     futures = self._futures.pop(header.task_uuid)
     self._task_payloads.pop(header.task_uuid, None)
     self._retry_counts.pop(header.task_uuid, None)
@@ -373,10 +369,7 @@ class Executor(BaseExecutor):
         future.set_exception(MinirayError(header.exception_type, header.exception_desc, header.job, header.worker))
 
   def _submit_task(self, batch: list[tuple[str, bytes]]) -> None:
-    pipe = self._submit_redis_master.pipeline()
-    for task_uuid, task_json in batch:
-      pipe.set(get_task_key(self.submit_queue_id, task_uuid), task_json, ex=PENDING_TASK_SAFETY_TTL)
-    pipe.execute()
+    self._submit_redis_master.hsetex(get_tasks_key(self.submit_queue_id), mapping=dict(batch), ex=PENDING_TASK_SAFETY_TTL)
     uuids = [task_uuid for task_uuid, _ in batch]
     self._submit_redis_master.lpush(f'{self.submit_queue_id}', *uuids)
 

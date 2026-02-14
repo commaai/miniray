@@ -36,7 +36,7 @@ from miniray.lib.system_helpers import get_cgroup_cpu_usage, get_cgroup_mem_usag
 from miniray.lib.statsd_helpers import statsd
 from miniray.lib.helpers import Limits, desc, GB_TO_BYTES, TASK_TIMEOUT_GRACE_SECONDS, JOB_CACHE_SIZE
 from miniray.lib.uv import sync_venv_cache, cleanup_venvs
-from miniray.executor import MinirayResultHeader, JobMetadata, TaskRecord, TaskState, get_metadata_key, get_task_key
+from miniray.executor import MinirayResultHeader, JobMetadata, TaskRecord, TaskState, get_metadata_key, get_tasks_key
 
 
 
@@ -342,14 +342,14 @@ class Task:
       self.r_results.expire(f'fq-{self.job}', 86400)  # extend availability for 24 hours
 
     # Transition task key to done — executor deletes it after reading the result
-    task_key = get_task_key(self.job, self.task_uuid)
+    tasks_key = get_tasks_key(self.job)
     done_record = TaskRecord(
       uuid=self.task_uuid, job=self.job, executor=self.task.executor, function_ptr=self.task.function_ptr,
       pickled_fn='', pickled_args='',
       state=TaskState.DONE, worker=WORKER_ID,
       submitted_at=0.0, started_at=self.start_time,
     )
-    self.r_master.set(task_key, json.dumps(done_record), ex=3600)
+    self.r_master.hsetex(tasks_key, self.task_uuid, json.dumps(done_record), ex=3600)
 
     # Cleanup cgroups, shared memory, and temp directories
     if self.alloc_id is not None:
@@ -446,8 +446,8 @@ def get_task(resource_manager: ResourceManager, r_master: StrictRedis,
     return None
 
   task_uuid = raw_task_uuid.decode()
-  task_key = get_task_key(job, task_uuid)
-  task_data = cast(Optional[bytes], r_master.get(task_key))
+  tasks_key = get_tasks_key(job)
+  task_data = cast(Optional[bytes], r_master.hget(tasks_key, task_uuid))
   if task_data is None:
     # Task key missing — executor shutdown or orphaned UUID
     resource_manager.release(temp_key)
@@ -458,7 +458,7 @@ def get_task(resource_manager: ResourceManager, r_master: StrictRedis,
   # Transition pending -> working with TTL = timeout + grace
   ttl = int(limits.timeout_seconds + TASK_TIMEOUT_GRACE_SECONDS)
   working_record = record._replace(state=TaskState.WORKING, worker=WORKER_ID, started_at=time.time())
-  r_master.set(task_key, json.dumps(working_record), ex=ttl)
+  r_master.hsetex(tasks_key, record.uuid, json.dumps(working_record), ex=ttl)
   resource_manager.rekey(temp_key, record.uuid)
 
   return Task(record, limits, proc_index, resource_manager, r_master, r_results, job_metadatas[job], venvs, triton_client)
