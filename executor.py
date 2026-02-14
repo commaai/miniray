@@ -317,7 +317,7 @@ class Executor(BaseExecutor):
     if self._futures:
       tasks_key = get_tasks_key(self.submit_queue_id)
       sampled_task_uuids = random.sample(list(self._futures.keys()), k=min(10000, len(self._futures)))
-      task_records = self._submit_redis_master.hmget(tasks_key, sampled_task_uuids)
+      task_records = cast(list[Optional[bytes]], self._submit_redis_master.hmget(tasks_key, sampled_task_uuids))
 
       for task_uuid, record in zip(sampled_task_uuids, task_records, strict=True):
         if record is None:
