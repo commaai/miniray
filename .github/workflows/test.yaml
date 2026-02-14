@@ -2,7 +2,7 @@ name: Test Miniray
 
 on:
   workflow_dispatch: {}
-  pull_request: { branches: [ master ] }
+  pull_request: { branches: [] }
   push: { branches: [ master ] }
 
 concurrency:
