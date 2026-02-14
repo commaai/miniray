@@ -1,28 +1,34 @@
 #!/usr/bin/env python
 import os
 import json
+import itertools
 import redis
 from miniray.executor import TaskRecord, TaskState
 
 REDIS_HOST: str = os.environ.get("REDIS_HOST", "redis.comma.internal")
 
 client = redis.StrictRedis(host=REDIS_HOST, port=6379, db=1, decode_responses=True)
-keys: list[str] = sorted(client.scan_iter(match="task:*"))
-if not keys:
-  raise SystemExit(0)
+jobs: list[str] = [k for k in client.keys("tasks:*")]
+if not jobs:
+  exit(0)
 
-pipe = client.pipeline()
-for key in keys:
-  pipe.get(key)
-  pipe.ttl(key)
-results: list = pipe.execute()
+for i, job in enumerate(jobs):
+  lines = []
+  for batch in itertools.batched(client.hscan_iter(job), 100):
+    records = {task_id: TaskRecord(*json.loads(task_value)) for task_id, task_value in batch}
+    working = {task_id: record for task_id, record in records.items() if record.state == TaskState.WORKING}
+    if working:
+      ttls = client.httl(job, *working.keys())
+      for (task_id, record), ttl in zip(working.items(), ttls):
+        lines.append(f"{record.worker:<24s} {record.executor:<24s} {ttl:8d}s remaining")
 
-for i in range(0, len(results), 2):
-  value = results[i]
-  ttl = results[i + 1]
-  if value is None:
-    continue
-  record = TaskRecord(*json.loads(value))
-  if record.state != TaskState.WORKING:
-    continue
-  print(f"{record.worker:>10s} {record.executor:>12s} {record.job:>40s} {ttl:8d}s remaining")
+  print()
+  print(f"Job: {job.removeprefix('tasks:')} | Active tasks: {len(lines)}")
+  if lines:
+    print(f"{'Worker':<24s} {'Executor':<24s} {'TTL':>8s}")
+    for line in lines:
+      print(line)
+  print()
+
+  if i < len(jobs) - 1:
+    print('-' * 60)
