@@ -6,6 +6,7 @@ import uuid
 import socket
 import base64
 import logging
+import random
 import subprocess
 import threading
 import traceback
@@ -313,13 +314,15 @@ class Executor(BaseExecutor):
 
   def _check_lost_tasks(self) -> None:
     self._last_lost_check = time.time()
-    prefix = f'task:{self.submit_queue_id}:'.encode()
-    alive_uuids = {key[len(prefix):].decode() for key in
-                   self._submit_redis_master.scan_iter(match=f'task:{self.submit_queue_id}:*')}
-    for task_uuid in list(self._futures.keys()):
-      if task_uuid not in alive_uuids:
-        for future in self._futures.pop(task_uuid):
-          future.set_exception(MinirayError("RuntimeError", "task lost", "", ""))
+    if self._futures:
+      tasks_key = get_tasks_key(self.submit_queue_id)
+      sampled_task_uuids = random.sample(list(self._futures.keys()), k=min(10000, len(self._futures)))
+      task_records = self._submit_redis_master.hmget(tasks_key, sampled_task_uuids)
+
+      for task_uuid, record in zip(sampled_task_uuids, task_records):
+        if record is None:
+          for future in self._futures.pop(task_uuid):
+            future.set_exception(MinirayError("RuntimeError", "task lost", "", ""))
 
   def _pack_task(self, function_ptr: str, pickled_fn: bytes, args: Sequence[Any], kwargs: dict[str, Any], task_uuid: str) -> tuple[str, bytes]:
     pickled_args = cloudpickle.dumps((args, kwargs))
