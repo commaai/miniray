@@ -8,7 +8,7 @@ from miniray.executor import TaskRecord, TaskState
 REDIS_HOST: str = os.environ.get("REDIS_HOST", "redis.comma.internal")
 
 client = redis.StrictRedis(host=REDIS_HOST, port=6379, db=1, decode_responses=True)
-jobs: list[str] = [k for k in client.keys("tasks:*")]
+jobs: list[str] = client.keys("tasks:*")
 if not jobs:
   exit(0)
 
@@ -19,7 +19,7 @@ for i, job in enumerate(jobs):
     working = {task_id: record for task_id, record in records.items() if record.state == TaskState.WORKING}
     if working:
       ttls = client.httl(job, *working.keys())
-      for (task_id, record), ttl in zip(working.items(), ttls):
+      for record, ttl in zip(working.values(), ttls, strict=True):
         lines.append(f"{record.worker:<24s} {record.executor:<24s} {ttl:8d}s remaining")
 
   print()
