@@ -15,6 +15,6 @@ repos:
   hooks:
   - id: ty
     name: ty check
-    entry: ty check .
+    entry: uv run --active ty check .
     language: python
     types: [python]
