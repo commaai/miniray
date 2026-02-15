@@ -11,11 +11,11 @@ from pathlib import Path
 from typing import Any, Callable, Optional, TypedDict
 from redis import StrictRedis
 from tenacity import retry, stop_after_attempt, wait_random
-from tritonclient.http import InferenceServerClient
+from tritonclient.grpc import InferenceServerClient
 
 
 TRITON_REDIS_HOST = os.getenv('TRITON_REDIS_HOST', '127.0.0.1')
-TRITON_SERVER_ADDRESS = os.getenv('TRITON_SERVER_ADDRESS', '127.0.0.1:8000')
+TRITON_SERVER_ADDRESS = os.getenv('TRITON_SERVER_ADDRESS', '127.0.0.1:8001')
 TRITON_MODEL_REPOSITORY = Path(os.getenv('TRITON_MODEL_REPOSITORY', '/dev/shm/model-repository'))
 
 NOT_READY_MSG = "Triton server is not yet ready! If this persists for more than a few seconds, try restarting the triton server"
@@ -38,7 +38,7 @@ def create_triton_client(url: str = TRITON_SERVER_ADDRESS, verbose: bool = False
 
 @retry(stop=stop_after_attempt(3), wait=wait_random(1, 2), reraise=True)
 def get_triton_inference_stats(client: InferenceServerClient):
-  return client.get_inference_statistics()['model_stats']
+  return client.get_inference_statistics().model_stats
 
 @retry(stop=stop_after_attempt(3), wait=wait_random(1, 2), reraise=True)
 def load_triton_model(client: InferenceServerClient, model: str, config: dict[str, Any]):
@@ -74,9 +74,9 @@ def unload_triton_model(client: InferenceServerClient, model: str):
 
 def unload_triton_models(client: InferenceServerClient, model: Optional[str] = None):
   for model_stats in get_triton_inference_stats(client):
-    if model is None or model == model_stats['name']:
-      print(f"Unloading {model_stats['name']}")
-      unload_triton_model(client, model_stats['name'])
+    if model is None or model == model_stats.name:
+      print(f"Unloading {model_stats.name}")
+      unload_triton_model(client, model_stats.name)
 
   if model is None:
     for subdir in TRITON_MODEL_REPOSITORY.iterdir():
@@ -85,6 +85,7 @@ def unload_triton_models(client: InferenceServerClient, model: Optional[str] = N
       except FileNotFoundError: pass
 
 # NOTE: This function must be run as the root user or it will throw a PermissionError
+# FIXME
 def kill_triton_backend_stubs(gpu_bus_ids: Optional[list[str]] = None):
   nvidia_smi_output = subprocess.check_output(["nvidia-smi", "--query-compute-apps=gpu_bus_id,pid,process_name", "--format=csv,noheader"]).decode('utf-8')
   for line in nvidia_smi_output.strip().split('\n'):
@@ -135,15 +136,16 @@ if __name__ == '__main__':
   if args.command == 'unload':
     unload_triton_models(triton_client, model=args.model)
   elif args.command in ('list', 'stats'):
-    inference_stats = triton_client.get_inference_statistics()['model_stats']
+    inference_stats = triton_client.get_inference_statistics().model_stats
     if not inference_stats:
       print("No models loaded")
     elif args.command == 'list':
       print(f"Models loaded in triton server at {args.host}:{args.port}:")
       for stat in inference_stats:
-        print(f"  {stat['name']}")
+        print(f"  {stat.name}")
     else:
+      from google.protobuf.json_format import MessageToJson
       print(f"-- Inference statistics for triton server at {args.host}:{args.port} --")
       for stat in inference_stats:
-        print(json.dumps(stat, indent=2))
+        print(MessageToJson(stat, preserving_proto_field_names=True, including_default_value_fields=True, indent=2))
         print()

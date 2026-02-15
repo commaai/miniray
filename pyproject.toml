@@ -9,7 +9,7 @@ dependencies = [
     "tqdm>=4.60.0",
     "lru-dict>=1.1.0",
     "numpy>=1.20.0",
-    "tritonclient[http]>=2.30.0",
+    "tritonclient[http,grpc]>=2.30.0",
     "nvidia-ml-py",
     "tenacity",
     "statsd",

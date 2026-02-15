@@ -24,7 +24,7 @@ import numpy as np
 from lru import LRU
 from redis import StrictRedis
 from typing import Optional, cast
-from tritonclient.http import InferenceServerClient
+from tritonclient.grpc import InferenceServerClient
 
 from miniray.lib.cgroup import cgroup_create, cgroup_set_subcontrollers, cgroup_set_memory_limit, \
                                cgroup_set_numa_nodes, cgroup_add_pid, cgroup_kill, cgroup_delete, cgroup_clear_all_children
@@ -89,7 +89,7 @@ def cleanup_shm_by_gid(alloc_id, triton_client, gid):
     shm_entries_for_gid = [(de, s) for de, s in shm_entries if s.st_gid == gid]
 
   if TRITON_SERVER_ENABLED and len(shm_entries_for_gid) > 0:
-    triton_shm_entries = {x['name'] for x in triton_client.get_system_shared_memory_status()}
+    triton_shm_entries = {x['name'] for x in triton_client.get_system_shared_memory_status(as_json=True).get('regions', [])}
     for de, s in shm_entries_for_gid:
       if de.name in triton_shm_entries and not stat.S_ISDIR(s.st_mode):
         triton_client.unregister_system_shared_memory(de.name)
