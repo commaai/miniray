@@ -23,7 +23,7 @@ import shutil
 import numpy as np
 from lru import LRU
 from redis import StrictRedis
-from typing import Optional, cast
+from typing import BinaryIO, Optional, cast
 from tritonclient.http import InferenceServerClient
 
 from miniray.lib.cgroup import cgroup_create, cgroup_set_subcontrollers, cgroup_set_memory_limit, \
@@ -36,7 +36,7 @@ from miniray.lib.system_helpers import get_cgroup_cpu_usage, get_cgroup_mem_usag
 from miniray.lib.statsd_helpers import statsd
 from miniray.lib.helpers import Limits, desc, GB_TO_BYTES, TASK_TIMEOUT_GRACE_SECONDS, JOB_CACHE_SIZE
 from miniray.lib.uv import sync_venv_cache, cleanup_venvs
-from miniray.executor import MinirayResultHeader, MinirayTask, JobMetadata, get_metadata_key
+from miniray.executor import MinirayResultHeader, JobMetadata, TaskRecord, TaskState, get_metadata_key, get_tasks_key
 
 
 
@@ -120,8 +120,8 @@ def reap_process(proc):
 
 
 class Task:
-  proc: subprocess.Popen
-  alloc_id: str
+  proc: Optional[subprocess.Popen]
+  alloc_id: Optional[str]
   task_gid: int
   cgroup_name: str
   result_file: str
@@ -131,7 +131,7 @@ class Task:
   pickled_fn: bytes
   pickled_args: bytes
 
-  def __init__(self, task: MinirayTask, limits: Limits, proc_index: int,
+  def __init__(self, task: TaskRecord, limits: Limits, proc_index: int,
                resource_manager: ResourceManager, r_master: StrictRedis, r_results: StrictRedis,
                job_metadata: JobMetadata, venv_cache: LRU[str, str], triton_client):
     self.task = task
@@ -160,8 +160,6 @@ class Task:
     return self.task.uuid
 
   def init(self) -> bool:
-    task_data = json.dumps([self.job, WORKER_ID, time.time() + self.limits.timeout_seconds + TASK_TIMEOUT_GRACE_SECONDS])
-    self.r_master.set(f'{self.task_uuid}-start', task_data, ex=3600)
     self.start_time = time.time()
     try:
       if not self.job_metadata.valid:
@@ -234,6 +232,7 @@ class Task:
         'ENABLE_MODEL_CACHE': str(int(not TRITON_SERVER_ENABLED)),
         'RESULT_FILE': self.result_file,
         'DISABLE_FILEREADER_CACHE': '1',
+        **self.job_metadata.env,
       }
       python3_exe = os.path.join(self.venv_dir, "bin/python3")
 
@@ -244,9 +243,10 @@ class Task:
                                    start_new_session=True, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
       cgroup_add_pid(self.cgroup_name, self.proc.pid)
       assert self.proc.stdin is not None
-      self.proc.stdin.write(self.pickled_fn)
-      self.proc.stdin.write(self.pickled_args)
-      self.proc.stdin.close()
+      stdin = cast(BinaryIO, self.proc.stdin)
+      stdin.write(self.pickled_fn)
+      stdin.write(self.pickled_args)
+      stdin.close()
       self.proc.stdin = None
       return True
     except BaseException as e:
@@ -291,15 +291,15 @@ class Task:
     # Determine result/error state
     if self._timed_out:
       self._error = ("TimeoutError", f"TimeoutError: task timed out after {self.limits.timeout_seconds} seconds")
-    elif self.proc.returncode != 0 and not exiting:
+    elif self.proc.returncode != 0 and exiting:
+      self._error = ("WorkerShutdown", "task killed due to worker shutdown")
+    elif self.proc.returncode != 0:
       error_type = f"ChildProcessError<{self.proc.returncode}>"
       self._error = (error_type, f"{error_type}: task died with result code {self.proc.returncode}")
     elif self.proc.returncode == 0 and len(self._task_result) > 0:
       self._error = None
     elif self.proc.returncode == 0:
       self._error = ("NoResultError", "Task completed but produced no result")
-    else:
-      self._error = None  # exiting case
 
     self._done = True
     return True
@@ -322,7 +322,6 @@ class Task:
       error_type, error_msg = self._error
       result_header = MinirayResultHeader(self.job, False, HOST_NAME, error_type, error_msg, self.task_uuid)
       self.r_results.lpush(f'fq-{self.job}', json.dumps(result_header))
-      self.r_master.delete(f'{self.task_uuid}-start')
       statsd.event('pipeline.worker.task_error', tags={'task_id': self.job, 'type': error_type})
     elif len(self._task_result) > 0:
       success_marker = self._task_result[0:1]
@@ -338,7 +337,16 @@ class Task:
         self.r_results.lpush(f'fq-{self.job}', json.dumps(result_header))
 
       self.r_results.expire(f'fq-{self.job}', 86400)  # extend availability for 24 hours
-      self.r_master.delete(f'{self.task_uuid}-start')
+
+    # Transition task key to done — executor deletes it after reading the result
+    tasks_key = get_tasks_key(self.job)
+    done_record = TaskRecord(
+      uuid=self.task_uuid, job=self.job, executor=self.task.executor, function_ptr=self.task.function_ptr,
+      pickled_fn='', pickled_args='',
+      state=TaskState.DONE, worker=WORKER_ID,
+      submitted_at=0.0, started_at=self.start_time,
+    )
+    self.r_master.hsetex(tasks_key, self.task_uuid, json.dumps(done_record), ex=3600)
 
     # Cleanup cgroups, shared memory, and temp directories
     if self.alloc_id is not None:
@@ -416,9 +424,9 @@ def update_job_metadatas(r_master: StrictRedis, jobs: list[str], job_metadatas: 
       if raw_metadata is not None:
         job_metadatas[job] = JobMetadata(*json.loads(raw_metadata))
       else:
-        job_metadatas[job] = JobMetadata(False, 1, "", "", Limits().asdict())
+        job_metadatas[job] = JobMetadata(False, 1, "", "", Limits().asdict(), {})
 
-def get_task(resource_manager: ResourceManager, r_master: StrictRedis, r_tasks: StrictRedis,
+def get_task(resource_manager: ResourceManager, r_master: StrictRedis,
              r_results: StrictRedis, job: str, job_metadatas: LRU[str, JobMetadata], venvs: LRU,
              proc_index: int, triton_client) -> Optional[Task]:
   limits = Limits(**job_metadatas[job].limits)
@@ -429,15 +437,28 @@ def get_task(resource_manager: ResourceManager, r_master: StrictRedis, r_tasks: 
     print(f"[worker] {MINIRAY_TARGET_NAME} resource limit: {desc(e)}")
     return None
 
-  raw_task = cast(bytes, r_tasks.rpop(job))
-  if not raw_task:  # something else grabbed the last task
+  raw_task_uuid = cast(Optional[bytes], r_master.rpop(job))
+  if raw_task_uuid is None:  # something else grabbed the last task
     resource_manager.release(temp_key)
     return None
 
-  miniray_task = MinirayTask(*json.loads(raw_task))
-  resource_manager.rekey(temp_key, miniray_task.uuid)
+  task_uuid = raw_task_uuid.decode()
+  tasks_key = get_tasks_key(job)
+  task_data = cast(Optional[bytes], r_master.hget(tasks_key, task_uuid))
+  if task_data is None:
+    # Task key missing — executor shutdown or orphaned UUID
+    resource_manager.release(temp_key)
+    return None
 
-  return Task(miniray_task, limits, proc_index, resource_manager, r_master, r_results, job_metadatas[job], venvs, triton_client)
+  record = TaskRecord(*json.loads(task_data))
+
+  # Transition pending -> working with TTL = timeout + grace
+  ttl = int(limits.timeout_seconds + TASK_TIMEOUT_GRACE_SECONDS)
+  working_record = record._replace(state=TaskState.WORKING, worker=WORKER_ID, started_at=time.time())
+  r_master.hsetex(tasks_key, record.uuid, json.dumps(working_record), ex=ttl)
+  resource_manager.rekey(temp_key, record.uuid)
+
+  return Task(record, limits, proc_index, resource_manager, r_master, r_results, job_metadatas[job], venvs, triton_client)
 
 
 def sig_callback(signal):
@@ -481,7 +502,6 @@ def main():
   backoff = ExponentialBackoff(SLEEP_TIME_MAX, DEBUG)
 
   r_master = StrictRedis(host=REDIS_HOST, port=6379, db=1)
-  r_tasks = StrictRedis(host=REDIS_HOST, port=6379, db=4)
   r_results = StrictRedis(host=REDIS_HOST, port=6379, db=5)
 
   os.nice(1)
@@ -495,7 +515,7 @@ def main():
     if triton_client is not None:
       assert triton_client.is_server_live(), "Triton server died or never started"
 
-    jobs = sorted(key.decode() for key in cast(list[bytes], r_tasks.keys(f"*{PIPELINE_QUEUE}")))
+    jobs = sorted(key.decode() for key in cast(list[bytes], r_master.keys(f"*{PIPELINE_QUEUE}")) if b":" not in key)
     update_job_metadatas(r_master, jobs, job_metadatas)
     jobs = [j for j in jobs if not job_metadatas[j].limits.get('node_whitelist') or HOST_NAME in job_metadatas[j].limits['node_whitelist']]
     current_gpu_job = get_globally_scheduled_job(r_master, jobs, job_metadatas)
@@ -512,11 +532,11 @@ def main():
       # schedule new task if slot is free
       task = None
       if current_gpu_job is not None:
-        task = get_task(rm, r_master, r_tasks, r_results, current_gpu_job, job_metadatas, venvs, i, triton_client)
+        task = get_task(rm, r_master, r_results, current_gpu_job, job_metadatas, venvs, i, triton_client)
       if task is None:
         job = get_randomly_scheduled_job(jobs, job_metadatas)
         if job is not None:
-          task = get_task(rm, r_master, r_tasks, r_results, job, job_metadatas, venvs, i, triton_client)
+          task = get_task(rm, r_master, r_results, job, job_metadatas, venvs, i, triton_client)
       if task is None:
         continue
 

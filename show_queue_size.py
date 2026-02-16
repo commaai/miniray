@@ -4,7 +4,7 @@ import redis
 from miniray import REMOTE_QUEUE
 
 REDIS_HOST = os.environ.get("REDIS_HOST", "redis.comma.internal")
-REDIS_DB = int(os.environ.get("REDIS_DB", "4"))
+REDIS_DB = int(os.environ.get("REDIS_DB", "1"))
 
 client = redis.StrictRedis(host=REDIS_HOST, port=6379, db=REDIS_DB, decode_responses=True)
 keys = list(client.scan_iter(match="*"))
