@@ -32,7 +32,7 @@ MAX_ARG_STRLEN = 131071  # max length for unix string arguments, see https://sta
 REDIS_HOST = os.getenv('REDIS_HOST', 'redis.comma.internal')
 FORCE_LOCAL = bool(int(os.getenv("MINIRAY_FORCE_LOCAL", "0")))
 NUM_LOCAL_WORKERS = int(os.getenv("MINIRAY_LOCAL_NUM_WORKERS", "1"))
-PENDING_TASK_SAFETY_TTL = 24 * 60 * 60
+PENDING_TASK_SAFETY_TTL = 3 * 24 * 60 * 60
 DEFAULT_RESULT_PAYLOAD_TIMEOUT_SECONDS = 20 * 60
 USE_MAIN_RESULT_REDIS = bool(int(os.getenv("USE_MAIN_RESULT_REDIS", "0")))
 CACHE_ROOT = Path("/code.nfs/branches/caches")
@@ -198,7 +198,6 @@ class Executor(BaseExecutor):
     self.result_queue_id = f'fq-{self.submit_queue_id}'
 
     self._futures: dict[str, list[Future]] = {}
-    self._retry_counts: dict[str, int] = {}
     self._submit_redis_master = StrictRedis(host=self.config.redis_host, port=6379, db=1, socket_keepalive=True)
     self._result_redis = StrictRedis(host=self.config.redis_host, port=6379, db=5, socket_keepalive=True)
     self._shutdown_lock = threading.Lock()
@@ -349,7 +348,6 @@ class Executor(BaseExecutor):
       return
     self._submit_redis_master.hdel(get_tasks_key(self.submit_queue_id), header.task_uuid)
     futures = self._futures.pop(header.task_uuid)
-    self._retry_counts.pop(header.task_uuid, None)
 
     if header.succeeded:
       hostname, key = cloudpickle.loads(dat[1])
