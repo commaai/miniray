@@ -23,7 +23,7 @@ TRITON_MODEL_REPOSITORY = Path(os.getenv('TRITON_MODEL_REPOSITORY', '/dev/shm/mo
 CONNECTION_ERR_MSG = f"""
 Unable to connect to the triton server at {TRITON_SERVER_ADDRESS}.
  - If this occurs on your workstation, make sure the triton server is active.
- - If this occurs on a worker, it may indicate that the server has crashed. This can occur, for instance, if the 3080 TI falls off the bus.
+ - If this occurs on a worker, it may indicate that the server has crashed.
 """.strip()
 
 IOConfig = TypedDict('IOConfig', {'name': str, 'data_type': str, 'dims': list[int]})
