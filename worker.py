@@ -513,7 +513,7 @@ def main():
     backoff.sleep()
 
     if triton_client is not None:
-      check_triton_server_health(triton_client)
+      check_triton_server_health(url=TRITON_SERVER_ADDRESS)
 
     jobs = sorted(key.decode() for key in cast(list[bytes], r_master.keys(f"*{PIPELINE_QUEUE}")) if b":" not in key)
     update_job_metadatas(r_master, jobs, job_metadatas)

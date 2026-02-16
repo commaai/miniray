@@ -20,8 +20,8 @@ TRITON_REDIS_HOST = os.getenv('TRITON_REDIS_HOST', '127.0.0.1')
 TRITON_SERVER_ADDRESS = os.getenv('TRITON_SERVER_ADDRESS', '127.0.0.1:8000')
 TRITON_MODEL_REPOSITORY = Path(os.getenv('TRITON_MODEL_REPOSITORY', '/dev/shm/model-repository'))
 
-CONNECTION_ERR_MSG = f"""
-Unable to connect to the triton server at {TRITON_SERVER_ADDRESS}.
+CONNECTION_ERR_MSG = """
+Unable to connect to the triton server at {url}.
  - If this occurs on your workstation, make sure the triton server is active.
  - If this occurs on a worker, it may indicate that the server has crashed.
 """.strip()
@@ -29,12 +29,13 @@ Unable to connect to the triton server at {TRITON_SERVER_ADDRESS}.
 IOConfig = TypedDict('IOConfig', {'name': str, 'data_type': str, 'dims': list[int]})
 ModelConfig = TypedDict('ModelConfig', {'input': list[IOConfig], 'output': list[IOConfig]})
 
-def check_triton_server_health(client: InferenceServerClient, timeout: int = 10) -> None:
-  url = client._parsed_url
+def check_triton_server_health(url: str, timeout: int = 10, scheme: str = "http") -> None:
+  if "://" not in url:
+    url = f"{scheme}://{url}"
   try:
     urllib.request.urlopen(f"{url}/v2/health/live", timeout=timeout)
   except urllib.error.URLError as e:
-    raise AssertionError(CONNECTION_ERR_MSG) from e
+    raise AssertionError(CONNECTION_ERR_MSG.format(url=url)) from e
 
 @retry(stop=stop_after_attempt(3), wait=wait_random(1, 2), reraise=True)
 def get_triton_inference_stats(client: InferenceServerClient):
