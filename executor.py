@@ -247,8 +247,8 @@ class Executor(BaseExecutor):
     task_uuid = str(uuid.uuid4())
     pickled_fn = cloudpickle.dumps(partial(_execute_batch, fn))
     task = self._pack_task('', pickled_fn, [args], kwargs, task_uuid)
-    self._futures[task_uuid] = [future]
     self._submit_task([task])
+    self._futures[task_uuid] = [future]
     return future
 
   def map(self, fn: Callable, *iterables: Iterable[Any], timeout: Optional[float] = None, chunksize: int = 1) -> Iterator[Any]:
