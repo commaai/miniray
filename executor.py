@@ -149,16 +149,23 @@ def _wrap_result_local_redis(data: Any, timeout_seconds: int) -> tuple[str, str]
   pipe.execute()
   return (redis_result_host, key)
 
-def _local_worker_init():
+def _local_worker_init(env: dict[str, str]):
+  os.environ.update(env)
   if (seed := os.getenv("MINIRAY_LOCAL_SEED")) is not None:
     from miniray.lib.helpers import set_random_seeds
     set_random_seeds(int(seed))
 
 class LocalExecutor(ProcessPoolExecutor):
-  def __init__(self):
+  def __init__(self, env: Optional[dict[str, str]] = None):
     ctx = mp.get_context("spawn")
     # separate processes per task to avoid leaking states (simulating a behaviour from distributed run)
-    super().__init__(max_workers=NUM_LOCAL_WORKERS, mp_context=ctx, max_tasks_per_child=1, initializer=_local_worker_init)
+    super().__init__(
+      max_workers=NUM_LOCAL_WORKERS,
+      mp_context=ctx,
+      max_tasks_per_child=1,
+      initializer=_local_worker_init,
+      initargs=(env or {},),
+    )
 
   def fmap(self, fn: Callable, *iterables: Iterable[Any], chunksize: int = 1) -> Iterator[Future]:
     for args in zip(*iterables, strict=True):
@@ -167,8 +174,13 @@ class LocalExecutor(ProcessPoolExecutor):
 
 class Executor(BaseExecutor):
   def __new__(cls, *args, **kwargs):
-    if FORCE_LOCAL or kwargs.pop('force_local', False):
-      return LocalExecutor()
+    force_local = kwargs.pop('force_local', False)
+    if FORCE_LOCAL or force_local:
+      config = kwargs.get('config') or (args[0] if args else None)
+      env: dict[str, str] = config.env if isinstance(config, JobConfig) else {}
+      if 'env' in kwargs:
+        env = cast(dict[str, str], kwargs['env'])
+      return LocalExecutor(env=env)
     return super().__new__(cls)
 
   def __init__(self, config: Optional[JobConfig] = None, **kwargs) -> None:
