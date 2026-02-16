@@ -20,7 +20,6 @@ TRITON_REDIS_HOST = os.getenv('TRITON_REDIS_HOST', '127.0.0.1')
 TRITON_SERVER_ADDRESS = os.getenv('TRITON_SERVER_ADDRESS', '127.0.0.1:8000')
 TRITON_MODEL_REPOSITORY = Path(os.getenv('TRITON_MODEL_REPOSITORY', '/dev/shm/model-repository'))
 
-NOT_READY_MSG = "Triton server is not yet ready! If this persists for more than a few seconds, try restarting the triton server"
 CONNECTION_ERR_MSG = f"""
 Unable to connect to the triton server at {TRITON_SERVER_ADDRESS}.
  - If this occurs on your workstation, make sure the triton server is active.
@@ -35,15 +34,7 @@ def check_triton_server_health(client: InferenceServerClient, timeout: int = 10)
   try:
     urllib.request.urlopen(f"{url}/v2/health/live", timeout=timeout)
   except urllib.error.URLError as e:
-    raise AssertionError("Triton server died or never started") from e
-
-def create_triton_client(url: str = TRITON_SERVER_ADDRESS, **kwargs) -> InferenceServerClient:
-  client = InferenceServerClient(url=url, **kwargs)
-  try:
-    assert client.is_server_live(), NOT_READY_MSG
-  except ConnectionRefusedError:
-    raise ConnectionRefusedError(CONNECTION_ERR_MSG) from None
-  return client
+    raise AssertionError(CONNECTION_ERR_MSG) from e
 
 @retry(stop=stop_after_attempt(3), wait=wait_random(1, 2), reraise=True)
 def get_triton_inference_stats(client: InferenceServerClient):
