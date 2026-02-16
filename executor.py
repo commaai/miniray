@@ -156,7 +156,7 @@ def _local_worker_init(env: dict[str, str]):
     set_random_seeds(int(seed))
 
 class LocalExecutor(ProcessPoolExecutor):
-  def __init__(self, env: Optional[dict[str, str]] = None):
+  def __init__(self, env: dict[str, str]):
     ctx = mp.get_context("spawn")
     # separate processes per task to avoid leaking states (simulating a behaviour from distributed run)
     super().__init__(
@@ -164,7 +164,7 @@ class LocalExecutor(ProcessPoolExecutor):
       mp_context=ctx,
       max_tasks_per_child=1,
       initializer=_local_worker_init,
-      initargs=(env or {},),
+      initargs=(env,),
     )
 
   def fmap(self, fn: Callable, *iterables: Iterable[Any], chunksize: int = 1) -> Iterator[Future]:
@@ -184,6 +184,7 @@ class Executor(BaseExecutor):
     return super().__new__(cls)
 
   def __init__(self, config: Optional[JobConfig] = None, **kwargs) -> None:
+    kwargs.pop('force_local', None)
     limits = kwargs.pop('limits', {})
     config = JobConfig() if config is None else config
     config = replace(config, **kwargs)
