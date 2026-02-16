@@ -6,6 +6,8 @@ import time
 import shutil
 import signal
 import subprocess
+import urllib.request
+import urllib.error
 from functools import wraps
 from pathlib import Path
 from typing import Any, Callable, Optional, TypedDict
@@ -18,23 +20,22 @@ TRITON_REDIS_HOST = os.getenv('TRITON_REDIS_HOST', '127.0.0.1')
 TRITON_SERVER_ADDRESS = os.getenv('TRITON_SERVER_ADDRESS', '127.0.0.1:8000')
 TRITON_MODEL_REPOSITORY = Path(os.getenv('TRITON_MODEL_REPOSITORY', '/dev/shm/model-repository'))
 
-NOT_READY_MSG = "Triton server is not yet ready! If this persists for more than a few seconds, try restarting the triton server"
-CONNECTION_ERR_MSG = f"""
-Unable to connect to the triton server at {TRITON_SERVER_ADDRESS}.
+CONNECTION_ERR_MSG = """
+Unable to connect to the triton server at {url}.
  - If this occurs on your workstation, make sure the triton server is active.
- - If this occurs on a worker, it may indicate that the server has crashed. This can occur, for instance, if the 3080 TI falls off the bus.
+ - If this occurs on a worker, it may indicate that the server has crashed.
 """.strip()
 
 IOConfig = TypedDict('IOConfig', {'name': str, 'data_type': str, 'dims': list[int]})
 ModelConfig = TypedDict('ModelConfig', {'input': list[IOConfig], 'output': list[IOConfig]})
 
-def create_triton_client(url: str = TRITON_SERVER_ADDRESS, verbose: bool = False) -> InferenceServerClient:
-  client = InferenceServerClient(url=url, verbose=verbose)
+def check_triton_server_health(url: str, timeout: int = 10, scheme: str = "http") -> None:
+  if "://" not in url:
+    url = f"{scheme}://{url}"
   try:
-    assert client.is_server_live(), NOT_READY_MSG
-  except ConnectionRefusedError:
-    raise ConnectionRefusedError(CONNECTION_ERR_MSG) from None
-  return client
+    urllib.request.urlopen(f"{url}/v2/health/live", timeout=timeout)
+  except urllib.error.URLError as e:
+    raise AssertionError(CONNECTION_ERR_MSG.format(url=url)) from e
 
 @retry(stop=stop_after_attempt(3), wait=wait_random(1, 2), reraise=True)
 def get_triton_inference_stats(client: InferenceServerClient):
@@ -55,7 +56,7 @@ def setup_triton_model(func: Callable[..., ModelConfig]):
         return
       if redis is None:
         redis = StrictRedis(host=TRITON_REDIS_HOST, port=6379, db=8)
-      with redis.lock(model, timeout=4*60):
+      with redis.lock(model, timeout=10*60):
         if client.is_model_ready(model):
           return  # check if the model is ready both before and after acquiring the lock
         shutil.rmtree(model_dir, ignore_errors=True)
