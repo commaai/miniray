@@ -149,9 +149,9 @@ class ResourceManager():
     numa_node = min(candidate_nodes, key=lambda node: cpu_usages[node] / self.cpu_totals[node])  # Pick the candidate node with the lowest CPU usage
 
     if small_gpu_mem_bytes and (not small_gpu or gpu_mem_usages[small_gpu.index] + small_gpu_mem_bytes > small_gpu.memory):
-      raise ResourceLimitError("small gpu memory request of {} will exceed limit of {}".format(small_gpu_mem_bytes, small_gpu.memory if small_gpu else 0.0))
+      raise ResourceLimitError(f"small gpu memory request of {small_gpu_mem_bytes} will exceed limit of {small_gpu.memory if small_gpu else 0.0}")
     if big_gpu_mem_bytes and (not big_gpu or gpu_mem_usages[big_gpu.index] + big_gpu_mem_bytes > big_gpu.memory):
-      raise ResourceLimitError("big gpu memory request of {} will exceed limit of {}".format(big_gpu_mem_bytes, big_gpu.memory if big_gpu else 0.0))
+      raise ResourceLimitError(f"big gpu memory request of {big_gpu_mem_bytes} will exceed limit of {big_gpu.memory if big_gpu else 0.0}")
 
     # Store allocation (no exceptions should be raised below this line)
     if self.gpu_locked_job != job and limits.requires_gpu():

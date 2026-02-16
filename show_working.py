@@ -1,5 +1,6 @@
 #!/usr/bin/env python
 import os
+import sys
 import json
 import redis
 import itertools
@@ -17,7 +18,7 @@ def show_working():
   client = redis.StrictRedis(host=REDIS_HOST, port=6379, db=1, decode_responses=True)
   jobs: list[str] = cast(list[str], client.keys("tasks:*"))
   if not jobs:
-    exit(0)
+    sys.exit(0)
 
   for i, job in enumerate(jobs):
     lines = []
