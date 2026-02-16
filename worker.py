@@ -17,6 +17,7 @@ import socket
 import hashlib
 import traceback
 import subprocess
+import urllib
 import grp
 import stat
 import shutil
@@ -31,7 +32,7 @@ from miniray.lib.cgroup import cgroup_create, cgroup_set_subcontrollers, cgroup_
 from miniray.lib.sig_term_handler import SigTermHandler
 from miniray.lib.resource_manager import ResourceManager, ResourceLimitError
 from miniray.lib.worker_helpers import ExponentialBackoff
-from miniray.lib.triton_helpers import TRITON_SERVER_ADDRESS
+from miniray.lib.triton_helpers import TRITON_SERVER_ADDRESS, check_triton_server_health
 from miniray.lib.system_helpers import get_cgroup_cpu_usage, get_cgroup_mem_usage, get_gpu_stats, get_gpu_mem_usage, get_gpu_utilization
 from miniray.lib.statsd_helpers import statsd
 from miniray.lib.helpers import Limits, desc, GB_TO_BYTES, TASK_TIMEOUT_GRACE_SECONDS, JOB_CACHE_SIZE
@@ -493,7 +494,7 @@ def main():
     backoff.sleep()
 
     if triton_client is not None:
-      assert triton_client.is_server_live(), "Triton server died or never started"
+      check_triton_server_health(triton_client)
 
     jobs = sorted(key.decode() for key in cast(list[bytes], r_tasks.keys(f"*{PIPELINE_QUEUE}")))
     update_job_metadatas(r_master, jobs, job_metadatas)

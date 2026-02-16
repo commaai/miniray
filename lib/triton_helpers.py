@@ -6,6 +6,8 @@ import time
 import shutil
 import signal
 import subprocess
+import urllib.request
+import urllib.error
 from functools import wraps
 from pathlib import Path
 from typing import Any, Callable, Optional, TypedDict
@@ -28,8 +30,15 @@ Unable to connect to the triton server at {TRITON_SERVER_ADDRESS}.
 IOConfig = TypedDict('IOConfig', {'name': str, 'data_type': str, 'dims': list[int]})
 ModelConfig = TypedDict('ModelConfig', {'input': list[IOConfig], 'output': list[IOConfig]})
 
-def create_triton_client(url: str = TRITON_SERVER_ADDRESS, verbose: bool = False) -> InferenceServerClient:
-  client = InferenceServerClient(url=url, verbose=verbose)
+def check_triton_server_health(client: InferenceServerClient, timeout: int = 10) -> None:
+  url = client._parsed_url
+  try:
+    urllib.request.urlopen(f"{url}/v2/health/live", timeout=timeout)
+  except urllib.error.URLError:
+    raise AssertionError("Triton server died or never started")
+
+def create_triton_client(url: str = TRITON_SERVER_ADDRESS, verbose: bool = False, network_timeout: float = 60.0) -> InferenceServerClient:
+  client = InferenceServerClient(url=url, verbose=verbose, network_timeout=network_timeout)
   try:
     assert client.is_server_live(), NOT_READY_MSG
   except ConnectionRefusedError:
@@ -55,7 +64,7 @@ def setup_triton_model(func: Callable[..., ModelConfig]):
         return
       if redis is None:
         redis = StrictRedis(host=TRITON_REDIS_HOST, port=6379, db=8)
-      with redis.lock(model, timeout=4*60):
+      with redis.lock(model, timeout=10*60):
         if client.is_model_ready(model):
           return  # check if the model is ready both before and after acquiring the lock
         shutil.rmtree(model_dir, ignore_errors=True)
