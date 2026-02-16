@@ -61,6 +61,23 @@ def test_submit_result():
     assert future.result() is True
 
 
+@pytest.mark.parametrize("force_local", [True, False], ids=["local", "remote"])
+def test_env_propagates_to_task_runtime(monkeypatch, force_local):
+  key = "MINIRAY_TEST_LOCAL_ENV"
+  value = "local_env_is_forwarded"
+  monkeypatch.delenv(key, raising=False)
+  timeout_seconds = 120
+
+  with miniray.Executor(job_name='miniray_test_env',
+                        priority=MINIRAY_PRIORITY,
+                        queue_name=QUEUE_NAME,
+                        limits={'memory': MINIRAY_MEMORY_GB},
+                        env={key: value},
+                        force_local=force_local) as executor:
+    future = executor.submit(os.getenv, key)
+    assert future.result(timeout=timeout_seconds) == value
+
+
 def test_as_completed():
   with miniray.Executor(job_name='miniray_test_as_completed',
                         priority=MINIRAY_PRIORITY,
