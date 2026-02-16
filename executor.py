@@ -386,8 +386,7 @@ def log(iterable: Iterable[Future], logger: Any = DEFAULT_LOGGER, desc: str = 'r
       error = extract_error(e.exception_type)
       statuses[error] += 1
       statuses_hosts[error].append(e.worker)
-      if error != "ColumnStoreException":
-        logger.error(f"FAILED TASK {e.job} [{e.worker}]\n{e.exception_desc}")
+      logger.error(f"FAILED TASK {e.job} [{e.worker}]\n{e.exception_desc}")
 
   logger.info("\n\n=== Miniray job summary ===")
   logger.info(f"Total segments: {sum(statuses.values())}")
