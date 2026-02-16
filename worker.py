@@ -17,7 +17,6 @@ import socket
 import hashlib
 import traceback
 import subprocess
-import urllib
 import grp
 import stat
 import shutil
