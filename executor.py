@@ -198,7 +198,6 @@ class Executor(BaseExecutor):
     self.result_queue_id = f'fq-{self.submit_queue_id}'
 
     self._futures: dict[str, list[Future]] = {}
-    self._task_payloads: dict[str, bytes] = {}
     self._retry_counts: dict[str, int] = {}
     self._submit_redis_master = StrictRedis(host=self.config.redis_host, port=6379, db=1, socket_keepalive=True)
     self._result_redis = StrictRedis(host=self.config.redis_host, port=6379, db=5, socket_keepalive=True)
@@ -350,7 +349,6 @@ class Executor(BaseExecutor):
       return
     self._submit_redis_master.hdel(get_tasks_key(self.submit_queue_id), header.task_uuid)
     futures = self._futures.pop(header.task_uuid)
-    self._task_payloads.pop(header.task_uuid, None)
     self._retry_counts.pop(header.task_uuid, None)
 
     if header.succeeded:
