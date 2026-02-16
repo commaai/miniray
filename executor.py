@@ -36,7 +36,7 @@ PENDING_TASK_SAFETY_TTL = 3 * 24 * 60 * 60
 DEFAULT_RESULT_PAYLOAD_TIMEOUT_SECONDS = 20 * 60
 USE_MAIN_RESULT_REDIS = bool(int(os.getenv("USE_MAIN_RESULT_REDIS", "0")))
 CACHE_ROOT = Path("/code.nfs/branches/caches")
-REMOTE_QUEUE = 'remote_v2'
+REMOTE_QUEUE = 'remote_v3'
 DEFAULT_LOGGER = StreamLogger('miniray', level=logging.INFO)
 
 MISSING_RESULT_PAYLOAD_ERROR = (
