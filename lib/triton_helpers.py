@@ -34,11 +34,11 @@ def check_triton_server_health(client: InferenceServerClient, timeout: int = 10)
   url = client._parsed_url
   try:
     urllib.request.urlopen(f"{url}/v2/health/live", timeout=timeout)
-  except urllib.error.URLError:
-    raise AssertionError("Triton server died or never started")
+  except urllib.error.URLError as e:
+    raise AssertionError("Triton server died or never started") from e
 
-def create_triton_client(url: str = TRITON_SERVER_ADDRESS, verbose: bool = False, network_timeout: float = 60.0) -> InferenceServerClient:
-  client = InferenceServerClient(url=url, verbose=verbose, network_timeout=network_timeout)
+def create_triton_client(url: str = TRITON_SERVER_ADDRESS, **kwargs) -> InferenceServerClient:
+  client = InferenceServerClient(url=url, **kwargs)
   try:
     assert client.is_server_live(), NOT_READY_MSG
   except ConnectionRefusedError:
