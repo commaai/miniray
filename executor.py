@@ -260,7 +260,7 @@ class Executor(BaseExecutor):
     task_uuid = str(uuid.uuid4())
     pickled_fn = cloudpickle.dumps(partial(_execute_batch, fn))
     task = self._pack_task('', pickled_fn, [args], kwargs, task_uuid)
-    self._submit_task([task])
+    self._submit_tasks([task])
     self._futures[task_uuid] = [future]
     return future
 
@@ -293,14 +293,25 @@ class Executor(BaseExecutor):
   def _writer_loop(self, submitted_queue: Queue[Optional[Future]], function_ptr: str, iterables: list[Iterable[Any]], chunksize: int) -> None:
     try:
       args_iterator = zip(*iterables, strict=True)
-      assert chunksize >= 1
-      while batch := list(islice(args_iterator, chunksize)):
-        task_uuid = str(uuid.uuid4())
-        futures: list[Future] = [Future() for _ in batch]
-        self._futures[task_uuid] = futures
+      is_batched = chunksize > 1
+      task_args: dict[str, Sequence[Any]]
+      while batch := list(islice(args_iterator, chunksize if is_batched else 1000)):
+        if is_batched:
+          # When chunksize > 1, we submit the entire batch as a single task
+          task_uuid = str(uuid.uuid4())
+          task_args = {task_uuid: batch}
+          futures: list[Future] = [Future() for _ in batch]
+          self._futures[task_uuid] = futures
+        else:
+          # Otherwise, we submit each item in the batch as a separate task
+          task_uuids = [str(uuid.uuid4()) for _ in batch]
+          task_args = dict(zip(task_uuids, batch))
+          futures = [Future() for _ in batch]
+          for future, task_uuid in zip(futures, task_uuids):
+            self._futures[task_uuid] = [future]
         for future in futures:
           submitted_queue.put(future)
-        self._submit_task([self._pack_task(function_ptr, b'', batch, {}, task_uuid)])
+        self._submit_tasks([self._pack_task(function_ptr, b'', args, {}, task_uuid) for task_uuid, args in task_args.items()])
 
       submitted_queue.put(None)  # Signal the end of the stream
     except Exception:
@@ -380,7 +391,7 @@ class Executor(BaseExecutor):
       for future in futures:
         future.set_exception(MinirayError(header.exception_type, header.exception_desc, header.job, header.worker))
 
-  def _submit_task(self, batch: list[tuple[str, bytes]]) -> None:
+  def _submit_tasks(self, batch: list[tuple[str, bytes]]) -> None:
     self._submit_redis_master.hsetex(get_tasks_key(self.submit_queue_id), mapping=dict(batch), ex=PENDING_TASK_SAFETY_TTL)
     uuids = [task_uuid for task_uuid, _ in batch]
     self._submit_redis_master.lpush(f'{self.submit_queue_id}', *uuids)
