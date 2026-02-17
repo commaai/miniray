@@ -19,7 +19,7 @@ from datetime import datetime
 from collections import Counter, defaultdict
 from concurrent.futures import Future, Executor as BaseExecutor, ProcessPoolExecutor, as_completed
 from functools import partial
-from itertools import islice, chain
+from itertools import batched, chain, islice
 from pathlib import Path
 from queue import Queue
 from redis import StrictRedis, ConnectionError as RedisConnectionError
@@ -251,7 +251,7 @@ class Executor(BaseExecutor):
 
       self._shutdown_reader_thread = True
       if wait and self._reader_thread is not None:
-          self._reader_thread.join()
+        self._reader_thread.join()
       self._submit_redis_master.delete(get_tasks_key(self.submit_queue_id), self.submit_queue_id, get_metadata_key(self.submit_queue_id))
 
   def submit(self, fn: Callable, /, *args, **kwargs) -> Future:
@@ -293,25 +293,18 @@ class Executor(BaseExecutor):
   def _writer_loop(self, submitted_queue: Queue[Optional[Future]], function_ptr: str, iterables: list[Iterable[Any]], chunksize: int) -> None:
     try:
       args_iterator = zip(*iterables, strict=True)
-      is_batched = chunksize > 1
-      task_args: dict[str, Sequence[Any]]
-      while batch := list(islice(args_iterator, chunksize if is_batched else 1000)):
-        if is_batched:
-          # When chunksize > 1, we submit the entire batch as a single task
+      assert chunksize >= 1
+      while args := list(islice(args_iterator, chunksize * max(1, (1000 // chunksize)))):  # up to max(1000, chunksize) tasks at a time
+        task_args, futures = {}, {}
+        for batch in batched(args, chunksize):
           task_uuid = str(uuid.uuid4())
-          task_args = {task_uuid: batch}
-          futures: list[Future] = [Future() for _ in batch]
-          self._futures[task_uuid] = futures
-        else:
-          # Otherwise, we submit each item in the batch as a separate task
-          task_uuids = [str(uuid.uuid4()) for _ in batch]
-          task_args = dict(zip(task_uuids, batch))
-          futures = [Future() for _ in batch]
-          for future, task_uuid in zip(futures, task_uuids):
-            self._futures[task_uuid] = [future]
-        for future in futures:
-          submitted_queue.put(future)
+          task_args[task_uuid] = batch
+          futures[task_uuid] = [Future() for _ in batch]
         self._submit_tasks([self._pack_task(function_ptr, b'', args, {}, task_uuid) for task_uuid, args in task_args.items()])
+        for task_uuid, batch_futures in futures.items():
+          for future in batch_futures:
+            submitted_queue.put(future)
+          self._futures[task_uuid] = batch_futures
 
       submitted_queue.put(None)  # Signal the end of the stream
     except Exception:
@@ -391,9 +384,9 @@ class Executor(BaseExecutor):
       for future in futures:
         future.set_exception(MinirayError(header.exception_type, header.exception_desc, header.job, header.worker))
 
-  def _submit_tasks(self, batch: list[tuple[str, bytes]]) -> None:
-    self._submit_redis_master.hsetex(get_tasks_key(self.submit_queue_id), mapping=dict(batch), ex=PENDING_TASK_SAFETY_TTL)
-    uuids = [task_uuid for task_uuid, _ in batch]
+  def _submit_tasks(self, tasks: list[tuple[str, bytes]]) -> None:
+    self._submit_redis_master.hsetex(get_tasks_key(self.submit_queue_id), mapping=dict(tasks), ex=PENDING_TASK_SAFETY_TTL)
+    uuids = [task_uuid for task_uuid, _ in tasks]
     self._submit_redis_master.lpush(f'{self.submit_queue_id}', *uuids)
 
 def log(iterable: Iterable[Future], logger: Any = DEFAULT_LOGGER, desc: str = 'running miniray tasks', **kwargs: Any) -> list[Any]:
