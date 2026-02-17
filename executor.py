@@ -183,11 +183,12 @@ class Executor(BaseExecutor):
       return LocalExecutor(env=env)
     return super().__new__(cls)
 
-  def __init__(self, config: Optional[JobConfig] = None, **kwargs) -> None:
+  def __init__(self, config: Optional[JobConfig] = None, cancel_futures_on_exit: bool = False, **kwargs) -> None:
     kwargs.pop('force_local', None)
     limits = kwargs.pop('limits', {})
     config = JobConfig() if config is None else config
     config = replace(config, **kwargs)
+    self.cancel_futures_on_exit = cancel_futures_on_exit
     if isinstance(limits, dict):
       limits = replace(config.limits, **limits)
     config = replace(config, limits=limits)
@@ -237,7 +238,7 @@ class Executor(BaseExecutor):
     return super().__enter__()
 
   def __exit__(self, exc_type, exc_val, exc_tb):
-    self.shutdown()
+    self.shutdown(cancel_futures=self.cancel_futures_on_exit)
     return False
 
   # API methods
