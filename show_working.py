@@ -3,16 +3,11 @@ import os
 import sys
 import json
 import redis
-import itertools
+from itertools import batched
 from typing import cast
 from miniray.executor import TaskRecord, TaskState
 
 REDIS_HOST = os.environ.get("REDIS_HOST", "redis.comma.internal")
-
-def batched(iterable, n):
-    iterator = iter(iterable)
-    while batch := tuple(itertools.islice(iterator, n)):
-        yield batch
 
 def show_working():
   client = redis.StrictRedis(host=REDIS_HOST, port=6379, db=1, decode_responses=True)
