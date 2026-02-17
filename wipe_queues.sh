@@ -8,22 +8,24 @@ then
 fi
 
 echo "-- tasks found for $identifier*: --"
-for key in $(redis-cli -h redis.comma.internal -n 4 keys '*')
+for key in $(redis-cli -h redis.comma.internal -n 1 keys '*')
 do
-  if [[ $key == *$identifier* ]]
+  if [[ $key == $identifier* ]]
   then
-    echo $key $(redis-cli -h redis.comma.internal -n 4 llen $key)
+    echo $key $(redis-cli -h redis.comma.internal -n 1 llen $key)
   fi
 done
 
 read -r -p "-- Are you sure to clear them? [y/N] --" response
 case "$response" in
   [yY]|[yY])
-    for key in $(redis-cli -h redis.comma.internal -n 4 keys '*')
+    for key in $(redis-cli -h redis.comma.internal -n 1 keys '*')
     do
       if [[ $key == *$identifier* ]]
       then
-        redis-cli -h redis.comma.internal -n 4 del $key
+        redis-cli -h redis.comma.internal -n 1 del $key
+        redis-cli -h redis.comma.internal -n 1 del "tasks:$key" &>/dev/null
+        redis-cli -h redis.comma.internal -n 1 del "job-metadata:$key" &>/dev/null
       fi
     done
     ;;
