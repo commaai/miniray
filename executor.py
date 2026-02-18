@@ -228,8 +228,10 @@ class Executor(BaseExecutor):
     self._submit_redis_master = StrictRedis(host=self.config.redis_host, port=6379, db=1, socket_keepalive=True)
     self._result_redis = StrictRedis(host=self.config.redis_host, port=6379, db=5, socket_keepalive=True)
     self._shutdown_lock = threading.Lock()
+    self._shutdown_writer_threads = False
     self._shutdown_reader_thread = False
     self._canceling_futures = False
+    self._writer_threads: list[threading.Thread] = []
     self._reader_thread: Optional[threading.Thread] = None
     self._last_lost_check: float = time.time()
 
@@ -246,6 +248,7 @@ class Executor(BaseExecutor):
 
 
   def __enter__(self):
+    self._shutdown_writer_threads = False
     self._shutdown_reader_thread = False
     self._reader_thread = threading.Thread(target=self._reader_loop, daemon=True)
     self._reader_thread.start()
@@ -262,6 +265,10 @@ class Executor(BaseExecutor):
 
   def shutdown(self, wait: bool = True, cancel_futures: bool = False):
     with self._shutdown_lock:
+      self._shutdown_writer_threads = True
+      for writer_thread in self._writer_threads:
+        writer_thread.join()
+
       self._canceling_futures = cancel_futures
       self._shutdown_reader_thread = True
       if wait and self._reader_thread is not None:
@@ -302,6 +309,7 @@ class Executor(BaseExecutor):
     submitted_queue: Queue[Optional[Future]] = Queue()
     writer_thread = threading.Thread(target=self._writer_loop, args=(submitted_queue, function_ptr, list(iterables), chunksize), daemon=True)
     writer_thread.start()
+    self._writer_threads.append(writer_thread)
     while future := submitted_queue.get():
       yield future
 
@@ -315,6 +323,8 @@ class Executor(BaseExecutor):
       args_iterator = zip(*iterables, strict=True)
       assert chunksize >= 1
       while args := list(islice(args_iterator, chunksize * max(1, (1000 // chunksize)))):  # up to max(1000, chunksize) tasks at a time
+        if self._shutdown_writer_threads:
+          break
         task_args, futures = {}, {}
         for batch in batched(args, chunksize):
           task_uuid = str(uuid.uuid4())
