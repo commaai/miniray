@@ -17,23 +17,26 @@ class MinirayTestClass:
   def get_miniray_output(self, x):
     return self.value + x
 
-
 def get_miniray_error():
   raise RuntimeError("Ruh roh!")
-
 
 def is_even(n):
   return n % 2 == 0
 
-
 def make_random_payload(size: int) -> bytes:
   return os.urandom(size)
-
 
 def slow_sleep(seconds: float) -> str:
   time.sleep(seconds)
   return "done"
 
+def get_executor(job_name: str) -> miniray.Executor:
+  return miniray.Executor(job_name=job_name,
+                          priority=MINIRAY_PRIORITY,
+                          queue_name=QUEUE_NAME,
+                          limits={'memory': MINIRAY_MEMORY_GB})
+
+# Tests
 
 def test_map_matches_local_and_threadpool():
   args = np.arange(100)
@@ -42,10 +45,7 @@ def test_map_matches_local_and_threadpool():
   with ThreadPoolExecutor(max_workers=8) as executor:
     results_threadpool = list(executor.map(is_even, args))
 
-  with miniray.Executor(job_name='miniray_test_basic',
-                        priority=MINIRAY_PRIORITY,
-                        queue_name=QUEUE_NAME,
-                        limits={'memory': MINIRAY_MEMORY_GB}) as executor:
+  with get_executor(job_name='miniray_test_basic') as executor:
     results_miniray = list(executor.map(is_even, args))
 
   for a, b, c in zip(results_loop, results_threadpool, results_miniray, strict=True):
@@ -53,10 +53,7 @@ def test_map_matches_local_and_threadpool():
 
 
 def test_submit_result():
-  with miniray.Executor(job_name='miniray_test_result',
-                        priority=MINIRAY_PRIORITY,
-                        queue_name=QUEUE_NAME,
-                        limits={'memory': MINIRAY_MEMORY_GB}) as executor:
+  with get_executor(job_name='miniray_test_result') as executor:
     future = executor.submit(is_even, 96)
     assert future.result() is True
 
@@ -79,20 +76,14 @@ def test_env_propagates_to_task_runtime(monkeypatch, force_local):
 
 
 def test_as_completed():
-  with miniray.Executor(job_name='miniray_test_as_completed',
-                        priority=MINIRAY_PRIORITY,
-                        queue_name=QUEUE_NAME,
-                        limits={'memory': MINIRAY_MEMORY_GB}) as executor:
+  with get_executor(job_name='miniray_test_as_completed') as executor:
     futures = [executor.submit(is_even, n) for n in range(10, 20)]
     results_completed = [future.result() for future in as_completed(futures)]
     assert sum(results_completed) == 5
 
 
 def test_map_large_batches():
-  with miniray.Executor(job_name='miniray_test_map_100k',
-                        priority=MINIRAY_PRIORITY,
-                        queue_name=QUEUE_NAME,
-                        limits={'memory': MINIRAY_MEMORY_GB}) as executor:
+  with get_executor(job_name='miniray_test_map_100k') as executor:
     futures_100k = list(executor.fmap(is_even, range(100000), chunksize=1000))
     results_100k = miniray.log(futures_100k)
     assert len(results_100k) == 100000
@@ -103,10 +94,7 @@ def test_large_payloads():
   payload_bytes = payload_mb * 1024 * 1024
   num_tasks = 10
 
-  with miniray.Executor(job_name='miniray_test_100mb_payload',
-                        priority=MINIRAY_PRIORITY,
-                        queue_name=QUEUE_NAME,
-                        limits={'memory': MINIRAY_MEMORY_GB}) as executor:
+  with get_executor(job_name='miniray_test_100mb_payload') as executor:
     futures_payload = list(executor.fmap(make_random_payload, [payload_bytes] * num_tasks, chunksize=1))
     results_payload = miniray.log(futures_payload, desc="Receiving 100MB payloads")
     assert len(results_payload) == num_tasks
@@ -128,24 +116,17 @@ def test_timeout():
 
 
 def test_class_method_submission():
-
     test1 = MinirayTestClass('test_value_1')
     test2 = MinirayTestClass('test_value_2')
 
-    with miniray.Executor(job_name='miniray_test_class_method',
-                          priority=MINIRAY_PRIORITY,
-                          queue_name=QUEUE_NAME,
-                          limits={'memory': MINIRAY_MEMORY_GB}) as executor:
+    with get_executor(job_name='miniray_test_class_method') as executor:
       for obj, expected in [(test1, 'test_value_1_foo'), (test2, 'test_value_2_foo')]:
         future = executor.submit(obj.get_miniray_output, '_foo')
         assert future.result() == expected
 
 
 def test_exception_propagation():
-  with miniray.Executor(job_name='miniray_test_exception_propagation',
-                        priority=MINIRAY_PRIORITY,
-                        queue_name=QUEUE_NAME,
-                        limits={'memory': MINIRAY_MEMORY_GB}) as executor:
+  with get_executor(job_name='miniray_test_exception_propagation') as executor:
     future = executor.submit(get_miniray_error)
     with pytest.raises(miniray.MinirayError) as excinfo:
       future.result()
