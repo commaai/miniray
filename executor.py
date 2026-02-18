@@ -18,7 +18,7 @@ from dataclasses import dataclass, asdict, field, replace
 from datetime import datetime
 from collections import Counter, defaultdict
 from concurrent.futures import Future, Executor as BaseExecutor, ProcessPoolExecutor, as_completed
-from functools import partial
+from functools import partial, cache
 from itertools import batched, chain, islice
 from pathlib import Path
 from queue import Queue
@@ -153,6 +153,10 @@ def _local_worker_init():
   if (seed := os.getenv("MINIRAY_LOCAL_SEED")) is not None:
     from miniray.lib.helpers import set_random_seeds
     set_random_seeds(int(seed))
+
+@cache
+def _get_redis_client(hostname: str) -> StrictRedis:
+  return StrictRedis(host=hostname, db=10)
 
 class LocalExecutor(ProcessPoolExecutor):
   def __init__(self, env: dict[str, str]):
@@ -383,7 +387,7 @@ class Executor(BaseExecutor):
 
     if header.succeeded:
       hostname, key = cloudpickle.loads(dat[1])
-      r = StrictRedis(host=hostname, db=10)
+      r = _get_redis_client(hostname)
       result_payload = cast(Optional[bytes], r.lpop(key))
       if result_payload is None:
         for future in futures:
