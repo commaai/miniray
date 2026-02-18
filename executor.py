@@ -215,6 +215,7 @@ class Executor(BaseExecutor):
     self._result_redis = StrictRedis(host=self.config.redis_host, port=6379, db=5, socket_keepalive=True)
     self._shutdown_lock = threading.Lock()
     self._shutdown_reader_thread = False
+    self._canceling_futures = False
     self._reader_thread: Optional[threading.Thread] = None
     self._last_lost_check: float = time.time()
 
@@ -244,14 +245,16 @@ class Executor(BaseExecutor):
 
   def shutdown(self, wait: bool = True, cancel_futures: bool = False):
     with self._shutdown_lock:
+      self._canceling_futures = cancel_futures
+      self._shutdown_reader_thread = True
+      if wait and self._reader_thread is not None:
+          self._reader_thread.join()
+
       if cancel_futures:
         for futures in self._futures.values():
           for future in futures:
             future.cancel()
 
-      self._shutdown_reader_thread = True
-      if wait and self._reader_thread is not None:
-        self._reader_thread.join()
       self._submit_redis_master.delete(get_tasks_key(self.submit_queue_id), self.submit_queue_id, get_metadata_key(self.submit_queue_id))
 
   def submit(self, fn: Callable, /, *args, **kwargs) -> Future:
@@ -313,7 +316,10 @@ class Executor(BaseExecutor):
       sys.exit(1)
 
   def _reader_loop(self) -> None:
-    while not self._shutdown_reader_thread or not all(future.done() for future in chain.from_iterable(self._futures.values())):
+    while (
+      not self._shutdown_reader_thread or
+      (not self._canceling_futures and not all(future.done() for future in chain.from_iterable(self._futures.values())))
+    ):
       try:
         if time.time() - self._last_lost_check > 10:
           self._check_lost_tasks()
