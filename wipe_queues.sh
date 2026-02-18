@@ -21,7 +21,7 @@ case "$response" in
   [yY]|[yY])
     for key in $(redis-cli -h redis.comma.internal -n 1 keys '*')
     do
-      if [[ $key == *$identifier* ]]
+      if [[ $key == $identifier* ]]
       then
         redis-cli -h redis.comma.internal -n 1 del $key
         redis-cli -h redis.comma.internal -n 1 del "tasks:$key" &>/dev/null
