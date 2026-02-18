@@ -149,14 +149,16 @@ def _wrap_result_local_redis(data: Any, timeout_seconds: int) -> tuple[str, str]
   pipe.execute()
   return (redis_result_host, key)
 
-def _local_worker_init(env: dict[str, str]):
-  os.environ.update(env)
+def _local_worker_init():
   if (seed := os.getenv("MINIRAY_LOCAL_SEED")) is not None:
     from miniray.lib.helpers import set_random_seeds
     set_random_seeds(int(seed))
 
 class LocalExecutor(ProcessPoolExecutor):
   def __init__(self, env: dict[str, str]):
+    # need to set env before spawn, because it imports stuff before initializer is run
+    self._saved_env = {k: os.environ.get(k) for k in env}
+    os.environ.update(env)
     ctx = mp.get_context("spawn")
     # separate processes per task to avoid leaking states (simulating a behaviour from distributed run)
     super().__init__(
@@ -164,8 +166,15 @@ class LocalExecutor(ProcessPoolExecutor):
       mp_context=ctx,
       max_tasks_per_child=1,
       initializer=_local_worker_init,
-      initargs=(env,),
     )
+
+  def shutdown(self, *args, **kwargs):
+    super().shutdown(*args, **kwargs)
+    for k, v in self._saved_env.items():
+      if v is None:
+        os.environ.pop(k, None)
+      else:
+        os.environ[k] = v
 
   def fmap(self, fn: Callable, *iterables: Iterable[Any], chunksize: int = 1) -> Iterator[Future]:
     for args in zip(*iterables, strict=True):
