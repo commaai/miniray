@@ -3,6 +3,7 @@ import os
 import sys
 import json
 import redis
+from collections import defaultdict
 from itertools import batched
 from typing import cast
 from miniray.executor import TaskRecord, TaskState
@@ -15,25 +16,24 @@ def show_working():
   if not jobs:
     sys.exit(0)
 
+  outputs = defaultdict(list)
   for i, job in enumerate(jobs):
-    lines = []
     for batch in batched(client.hscan_iter(job), 1000):
       records = {task_id: TaskRecord(*json.loads(task_value)) for task_id, task_value in batch}
       working = {task_id: record for task_id, record in records.items() if record.state == TaskState.WORKING}
       if working:
         ttls = cast(list[int], client.httl(job, *working.keys()))
         for record, ttl in zip(working.values(), ttls, strict=True):
-          lines.append(f"{record.worker:<24s} {record.executor:<24s} {ttl:8d}s remaining")
+          outputs[job].append(f"{record.worker:<24s} {record.executor:<24s} {ttl:8d}s remaining")
 
+  for i, (job, lines) in enumerate(outputs.items()):
     print()
     print(f"Job: {job.removeprefix('tasks:')} | Active tasks: {len(lines)}")
-    if lines:
-      print(f"{'Worker':<24s} {'Executor':<24s} {'TTL':>8s}")
-      for line in lines:
-        print(line)
+    print(f"{'Worker':<24s} {'Executor':<24s} {'TTL':>8s}")
+    for line in lines:
+      print(line)
     print()
-
-    if i < len(jobs) - 1:
+    if i < len(outputs) - 1:
       print('-' * 60)
 
 if __name__ == "__main__":
