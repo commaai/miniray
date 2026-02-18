@@ -152,22 +152,22 @@ def test_exception_propagation():
     assert 'RuntimeError: Ruh roh!' in str(excinfo.value)
 
 
-def test_cancel_futures_on_exit():
+def test_cancel_futures_on_shutdown():
   n_tasks = 20
   result = None
   with miniray.Executor(job_name='miniray_test_cancel_on_exit',
                         priority=MINIRAY_PRIORITY,
                         queue_name=QUEUE_NAME,
-                        limits={'memory': MINIRAY_MEMORY_GB},
-                        cancel_futures_on_exit=True) as executor:
+                        limits={'memory': MINIRAY_MEMORY_GB}) as executor:
     futures = [executor.submit(is_even, n) for n in range(n_tasks)]
     for future in as_completed(futures):
       result = future.result()
-      break  # exit early; remaining futures are cancelled on __exit__
+      executor.shutdown(cancel_futures=True)
+      break
 
   assert result is not None
   assert isinstance(result, bool)
-  assert all(f.done() for f in futures) # no future left pending
+  assert all(f.done() for f in futures)   # no future left pending
   assert any(f.cancelled() for f in futures)  # at least some were cancelled
 
 
