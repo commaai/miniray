@@ -17,7 +17,7 @@ def show_working():
     sys.exit(0)
 
   outputs = defaultdict(list)
-  for i, job in enumerate(jobs):
+  for job in jobs:
     for batch in batched(client.hscan_iter(job), 1000):
       records = {task_id: TaskRecord(*json.loads(task_value)) for task_id, task_value in batch}
       working = {task_id: record for task_id, record in records.items() if record.state == TaskState.WORKING}
