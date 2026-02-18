@@ -24,6 +24,7 @@ from pathlib import Path
 from queue import Queue
 from redis import StrictRedis, ConnectionError as RedisConnectionError
 from tqdm import tqdm
+from types import TracebackType
 from typing import Any, Callable, Iterable, Iterator, NamedTuple, Optional, Sequence, cast
 
 from miniray.lib.helpers import Limits, extract_error, StreamLogger
@@ -250,8 +251,11 @@ class Executor(BaseExecutor):
     self._reader_thread.start()
     return super().__enter__()
 
-  def __exit__(self, exc_type, exc_val, exc_tb):
-    self.shutdown()
+  def __exit__(self, exc_type: Optional[type[BaseException]], exc_val: Optional[BaseException], exc_tb: Optional[TracebackType]):
+    try:
+      self.shutdown()
+    except (Exception, KeyboardInterrupt):
+      self.shutdown(cancel_futures=True)
     return False
 
   # API methods
@@ -261,7 +265,7 @@ class Executor(BaseExecutor):
       self._canceling_futures = cancel_futures
       self._shutdown_reader_thread = True
       if wait and self._reader_thread is not None:
-          self._reader_thread.join()
+        self._reader_thread.join()
 
       if cancel_futures:
         for futures in self._futures.values():
