@@ -155,8 +155,22 @@ def _local_worker_init(env: dict[str, str]):
     from miniray.lib.helpers import set_random_seeds
     set_random_seeds(int(seed))
 
+# With spawn context, child processes re-import __main__ before the initializer runs.
+# This causes modules imported at the top level of __main__ (e.g. filereader.py) to
+# cache env vars before the initializer has a chance to set them. We prevent this by
+# stripping __main__ info from the spawn preparation data so the child starts clean.
+import multiprocessing.spawn as _mp_spawn
+_original_get_preparation_data = _mp_spawn.get_preparation_data
+
+def _get_preparation_data_no_main(name):
+  d = _original_get_preparation_data(name)
+  d.pop('init_main_from_name', None)
+  d.pop('init_main_from_path', None)
+  return d
+
 class LocalExecutor(ProcessPoolExecutor):
   def __init__(self, env: dict[str, str]):
+    _mp_spawn.get_preparation_data = _get_preparation_data_no_main
     ctx = mp.get_context("spawn")
     # separate processes per task to avoid leaking states (simulating a behaviour from distributed run)
     super().__init__(
@@ -166,6 +180,10 @@ class LocalExecutor(ProcessPoolExecutor):
       initializer=_local_worker_init,
       initargs=(env,),
     )
+
+  def shutdown(self, *args, **kwargs):
+    super().shutdown(*args, **kwargs)
+    _mp_spawn.get_preparation_data = _original_get_preparation_data
 
   def fmap(self, fn: Callable, *iterables: Iterable[Any], chunksize: int = 1) -> Iterator[Future]:
     for args in zip(*iterables, strict=True):
