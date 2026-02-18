@@ -316,7 +316,10 @@ class Executor(BaseExecutor):
       sys.exit(1)
 
   def _reader_loop(self) -> None:
-    while not self._shutdown_reader_thread or (not self._canceling_futures and not all(future.done() for future in chain.from_iterable(self._futures.values()))):
+    while (
+      not self._shutdown_reader_thread or
+      (not self._canceling_futures and not all(future.done() for future in chain.from_iterable(self._futures.values())))
+    ):
       try:
         if time.time() - self._last_lost_check > 10:
           self._check_lost_tasks()
