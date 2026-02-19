@@ -350,10 +350,13 @@ class Executor(BaseExecutor):
       try:
         if time.time() - self._last_lost_check > 10:
           self._check_lost_tasks()
-        results = cast(list[bytes], self._result_redis.lpop(self.result_queue_id, count=1000) or [])
-        for result in results:
-          self._unpack_result(result)
-          self._last_lost_check = time.time()
+        raw = cast(list[bytes], self._result_redis.lpop(self.result_queue_id, count=1000) or [])
+        results = self._unpack_results(raw)
+        for header, dat in results.values():
+          self._resolve_futures(header, dat)
+        if results:
+          self._submit_redis_master.hdel(get_tasks_key(self.submit_queue_id), *results.keys())
+        self._last_lost_check = time.time()
         time.sleep(0.1)
       except RedisConnectionError:
         print("[ERROR] Redis connection error in miniray reader thread. Retrying in 10 seconds...", file=sys.stderr)
@@ -390,17 +393,22 @@ class Executor(BaseExecutor):
     )
     return (task_uuid, json.dumps(record, ensure_ascii=False).encode('utf-8'))
 
-  def _unpack_result(self, res: bytes) -> None:
-    dat = res.split(b"\x00", 1)
-    header = MinirayResultHeader(*json.loads(dat[0]))
+  def _unpack_results(self, raw: list[bytes]) -> dict[str, tuple[MinirayResultHeader, bytes]]:
+    results = {}
+    for result in raw:
+      dat = result.split(b"\x00", 1)
+      header = MinirayResultHeader(*json.loads(dat[0]))
+      results[header.task_uuid] = (header, dat[1] if len(dat) > 1 else b'')
+    return results
+
+  def _resolve_futures(self, header: MinirayResultHeader, dat: bytes) -> None:
     if header.task_uuid not in self._futures:
       print(f"[ERROR] finished unstarted task: {header.task_uuid} [{header.worker}]", file=sys.stderr)
       return
-    self._submit_redis_master.hdel(get_tasks_key(self.submit_queue_id), header.task_uuid)
     futures = self._futures.pop(header.task_uuid)
 
     if header.succeeded:
-      hostname, key = cloudpickle.loads(dat[1])
+      hostname, key = cloudpickle.loads(dat)
       r = _get_redis_client(hostname)
       result_payload = cast(Optional[bytes], r.lpop(key))
       if result_payload is None:
