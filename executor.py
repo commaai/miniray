@@ -407,23 +407,30 @@ class Executor(BaseExecutor):
       return
     futures = self._futures.pop(header.task_uuid)
 
-    if header.succeeded:
-      hostname, key = cloudpickle.loads(dat)
-      r = _get_redis_client(hostname)
-      result_payload = cast(Optional[bytes], r.lpop(key))
-      if result_payload is None:
-        for future in futures:
-          future.set_exception(MinirayError("MinirayError", MISSING_RESULT_PAYLOAD_ERROR, header.job, header.worker))
+    try:
+      if header.succeeded:
+        hostname, key = cloudpickle.loads(dat)
+        r = _get_redis_client(hostname)
+        result_payload = cast(Optional[bytes], r.lpop(key))
+        if result_payload is None:
+          for future in futures:
+            future.set_exception(MinirayError("MinirayError", MISSING_RESULT_PAYLOAD_ERROR, header.job, header.worker))
+        else:
+          subtasks = cloudpickle.loads(result_payload)
+          for future, subtask in zip(futures, subtasks, strict=True):
+            if subtask.succeeded:
+              future.set_result(subtask.result)
+            else:
+              future.set_exception(MinirayError(subtask.exception_type, subtask.exception_desc, header.job, header.worker))
       else:
-        subtasks = cloudpickle.loads(result_payload)
-        for future, subtask in zip(futures, subtasks, strict=True):
-          if subtask.succeeded:
-            future.set_result(subtask.result)
-          else:
-            future.set_exception(MinirayError(subtask.exception_type, subtask.exception_desc, header.job, header.worker))
-    else:
+        for future in futures:
+          future.set_exception(MinirayError(header.exception_type, header.exception_desc, header.job, header.worker))
+    except RedisConnectionError:
       for future in futures:
-        future.set_exception(MinirayError(header.exception_type, header.exception_desc, header.job, header.worker))
+        future.set_exception(MinirayError("RedisConnectionError", "lost connection to redis while fetching result payload", header.job, header.worker))
+    except Exception as e:
+      for future in futures:
+        future.set_exception(e)
 
   def _submit_tasks(self, tasks: list[tuple[str, bytes]]) -> None:
     self._submit_redis_master.hsetex(get_tasks_key(self.submit_queue_id), mapping=dict(tasks), ex=PENDING_TASK_SAFETY_TTL)
