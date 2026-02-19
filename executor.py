@@ -19,7 +19,7 @@ from datetime import datetime
 from collections import Counter, defaultdict
 from concurrent.futures import Future, Executor as BaseExecutor, ProcessPoolExecutor, as_completed
 from functools import partial, cache
-from itertools import batched, chain, islice
+from itertools import batched, islice
 from pathlib import Path
 from queue import Queue
 from redis import StrictRedis, ConnectionError as RedisConnectionError
@@ -57,6 +57,10 @@ class MinirayError(Exception):
     self.job = job
     self.worker = worker
 
+
+class ShutdownMode(StrEnum):
+  GRACEFUL = "graceful"
+  FORCE = "force"
 
 class TaskState(StrEnum):
   PENDING = "pending"
@@ -229,8 +233,7 @@ class Executor(BaseExecutor):
     self._result_redis = StrictRedis(host=self.config.redis_host, port=6379, db=5, socket_keepalive=True)
     self._shutdown_lock = threading.Lock()
     self._shutdown_writer_threads = False
-    self._shutdown_reader_thread = False
-    self._canceling_futures = False
+    self._shutdown_reader_thread: Optional[ShutdownMode] = None
     self._writer_threads: list[threading.Thread] = []
     self._reader_thread: Optional[threading.Thread] = None
     self._last_lost_check: float = time.time()
@@ -249,7 +252,7 @@ class Executor(BaseExecutor):
 
   def __enter__(self):
     self._shutdown_writer_threads = False
-    self._shutdown_reader_thread = False
+    self._shutdown_reader_thread = None
     self._reader_thread = threading.Thread(target=self._reader_loop, daemon=True)
     self._reader_thread.start()
     return super().__enter__()
@@ -269,9 +272,8 @@ class Executor(BaseExecutor):
       for writer_thread in self._writer_threads:
         writer_thread.join()
 
-      self._canceling_futures = cancel_futures
-      self._shutdown_reader_thread = True
-      if wait and self._reader_thread is not None:
+      self._shutdown_reader_thread = ShutdownMode.FORCE if cancel_futures else ShutdownMode.GRACEFUL
+      if self._reader_thread is not None and (wait or cancel_futures):
         self._reader_thread.join()
 
       if cancel_futures:
@@ -343,10 +345,9 @@ class Executor(BaseExecutor):
       sys.exit(1)
 
   def _reader_loop(self) -> None:
-    while (
-      not self._shutdown_reader_thread or
-      (not self._canceling_futures and not all(future.done() for future in chain.from_iterable(self._futures.values())))
-    ):
+    while True:
+      if self._shutdown_reader_thread is ShutdownMode.FORCE or (self._shutdown_reader_thread is ShutdownMode.GRACEFUL and not self._futures):
+        break
       try:
         if time.time() - self._last_lost_check > 10:
           self._check_lost_tasks()
