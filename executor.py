@@ -327,16 +327,16 @@ class Executor(BaseExecutor):
       while args := list(islice(args_iterator, chunksize * max(1, (1000 // chunksize)))):  # up to max(1000, chunksize) tasks at a time
         if self._shutdown_writer_threads:
           break
-        task_args, futures = {}, {}
+        task_args, task_futures = {}, {}
         for batch in batched(args, chunksize):
           task_uuid = str(uuid.uuid4())
           task_args[task_uuid] = batch
-          futures[task_uuid] = [Future() for _ in batch]
+          task_futures[task_uuid] = [Future() for _ in batch]
         self._submit_tasks([self._pack_task(function_ptr, b'', args, {}, task_uuid) for task_uuid, args in task_args.items()])
-        for task_uuid, batch_futures in futures.items():
-          for future in batch_futures:
+        for task_uuid, futures in task_futures.items():
+          for future in futures:
             submitted_queue.put(future)
-          self._futures[task_uuid] = batch_futures
+          self._futures[task_uuid] = futures
 
       submitted_queue.put(None)  # Signal the end of the stream
     except Exception:
