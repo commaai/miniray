@@ -229,7 +229,7 @@ class Executor(BaseExecutor):
     self.submit_queue_id = f'{job_desc}-{self.config.queue_name}'
     self.result_queue_id = f'fq-{self.submit_queue_id}'
 
-    self._futures: dict[str, list[Future]] = {}
+    self._futures: dict[str, tuple[list[Future], bool]] = {}
     self._submit_redis_master = StrictRedis(host=self.config.redis_host, port=6379, db=1, socket_keepalive=True)
     self._result_redis = StrictRedis(host=self.config.redis_host, port=6379, db=5, socket_keepalive=True)
     self._shutdown_lock = threading.Lock()
@@ -278,7 +278,7 @@ class Executor(BaseExecutor):
         self._reader_thread.join()
 
       if cancel_futures:
-        for futures in self._futures.values():
+        for futures, _ in self._futures.values():
           for future in futures:
             future.cancel()
 
@@ -291,7 +291,7 @@ class Executor(BaseExecutor):
     pickled_fn = cloudpickle.dumps(partial(_execute_batch, fn))
     task = self._pack_task('', pickled_fn, [args], kwargs, task_uuid)
     self._submit_tasks([task])
-    self._futures[task_uuid] = [future]
+    self._futures[task_uuid] = ([future], True)
     return future
 
   def map(self, fn: Callable, *iterables: Iterable[Any], timeout: Optional[float] = None, chunksize: int = 1) -> Iterator[Any]:
@@ -333,11 +333,11 @@ class Executor(BaseExecutor):
           task_uuid = str(uuid.uuid4())
           task_args[task_uuid] = batch
           task_futures[task_uuid] = [Future() for _ in batch]
-        self._submit_tasks([self._pack_task(function_ptr, b'', args, {}, task_uuid) for task_uuid, args in task_args.items()])
-        for task_uuid, futures in task_futures.items():
-          for future in futures:
+          for future in task_futures[task_uuid]:
             submitted_queue.put(future)
-          self._futures[task_uuid] = futures
+        self._futures.update({task_uuid: (futures, False) for task_uuid, futures in task_futures.items()})  # mark as unsubmitted
+        self._submit_tasks([self._pack_task(function_ptr, b'', args, {}, task_uuid) for task_uuid, args in task_args.items()])
+        self._futures.update({task_uuid: (futures, True) for task_uuid, futures in task_futures.items()})  # mark as submitted
 
       submitted_queue.put(None)  # Signal the end of the stream
     except Exception:
@@ -373,8 +373,10 @@ class Executor(BaseExecutor):
       task_records = cast(list[Optional[bytes]], self._submit_redis_master.hmget(tasks_key, sampled_task_uuids))
 
       for task_uuid, record in zip(sampled_task_uuids, task_records, strict=True):
-        if record is None:
-          for future in self._futures.pop(task_uuid):
+        futures, submitted = self._futures[task_uuid]
+        if record is None and submitted:
+          self._futures.pop(task_uuid)
+          for future in futures:
             future.set_exception(MinirayError("RuntimeError", "task lost", "", ""))
 
   def _pack_task(self, function_ptr: str, pickled_fn: bytes, args: Sequence[Any], kwargs: dict[str, Any], task_uuid: str) -> tuple[str, bytes]:
@@ -407,7 +409,7 @@ class Executor(BaseExecutor):
     if header.task_uuid not in self._futures:
       print(f"[ERROR] finished unstarted task: {header.task_uuid} [{header.worker}]", file=sys.stderr)
       return
-    futures = self._futures.pop(header.task_uuid)
+    futures, _ = self._futures.pop(header.task_uuid)
 
     try:
       if header.succeeded:
