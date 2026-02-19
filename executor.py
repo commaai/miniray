@@ -17,9 +17,9 @@ from enum import StrEnum
 from dataclasses import dataclass, asdict, field, replace
 from datetime import datetime
 from collections import Counter, defaultdict
-from concurrent.futures import Future, Executor as BaseExecutor, ProcessPoolExecutor, as_completed
+from concurrent.futures import Future, Executor as BaseExecutor, ProcessPoolExecutor, InvalidStateError, as_completed
 from functools import partial, cache
-from itertools import batched, chain, islice
+from itertools import batched, islice
 from pathlib import Path
 from queue import Queue
 from redis import StrictRedis, ConnectionError as RedisConnectionError
@@ -230,7 +230,6 @@ class Executor(BaseExecutor):
     self._shutdown_lock = threading.Lock()
     self._shutdown_writer_threads = False
     self._shutdown_reader_thread = False
-    self._canceling_futures = False
     self._writer_threads: list[threading.Thread] = []
     self._reader_thread: Optional[threading.Thread] = None
     self._last_lost_check: float = time.time()
@@ -269,16 +268,15 @@ class Executor(BaseExecutor):
       for writer_thread in self._writer_threads:
         writer_thread.join()
 
-      self._canceling_futures = cancel_futures
       self._shutdown_reader_thread = True
-      if wait and self._reader_thread is not None:
-        self._reader_thread.join()
-
       if cancel_futures:
-        for futures in self._futures.values():
+        for futures in list(self._futures.values()):
           for future in futures:
             future.cancel()
+        self._futures.clear()
 
+      if wait and self._reader_thread is not None:
+        self._reader_thread.join()
       self._submit_redis_master.delete(get_tasks_key(self.submit_queue_id), self.submit_queue_id, get_metadata_key(self.submit_queue_id))
 
   def submit(self, fn: Callable, /, *args, **kwargs) -> Future:
@@ -343,10 +341,7 @@ class Executor(BaseExecutor):
       sys.exit(1)
 
   def _reader_loop(self) -> None:
-    while (
-      not self._shutdown_reader_thread or
-      (not self._canceling_futures and not all(future.done() for future in chain.from_iterable(self._futures.values())))
-    ):
+    while not self._shutdown_reader_thread or self._futures:
       try:
         if time.time() - self._last_lost_check > 10:
           self._check_lost_tasks()
@@ -365,14 +360,14 @@ class Executor(BaseExecutor):
 
   def _check_lost_tasks(self) -> None:
     self._last_lost_check = time.time()
-    if self._futures:
+    if task_uuids := list(self._futures.keys()):
       tasks_key = get_tasks_key(self.submit_queue_id)
-      sampled_task_uuids = random.sample(list(self._futures.keys()), k=min(10000, len(self._futures)))
+      sampled_task_uuids = random.sample(task_uuids, k=min(10000, len(task_uuids)))
       task_records = cast(list[Optional[bytes]], self._submit_redis_master.hmget(tasks_key, sampled_task_uuids))
 
       for task_uuid, record in zip(sampled_task_uuids, task_records, strict=True):
         if record is None:
-          for future in self._futures.pop(task_uuid):
+          for future in self._futures.pop(task_uuid, []):
             future.set_exception(MinirayError("RuntimeError", "task lost", "", ""))
 
   def _pack_task(self, function_ptr: str, pickled_fn: bytes, args: Sequence[Any], kwargs: dict[str, Any], task_uuid: str) -> tuple[str, bytes]:
@@ -402,10 +397,12 @@ class Executor(BaseExecutor):
     return results
 
   def _resolve_futures(self, header: MinirayResultHeader, dat: bytes) -> None:
-    if header.task_uuid not in self._futures:
-      print(f"[ERROR] finished unstarted task: {header.task_uuid} [{header.worker}]", file=sys.stderr)
+    try:
+      futures = self._futures.pop(header.task_uuid)
+    except KeyError:
+      if not self._shutdown_reader_thread:
+        print(f"[ERROR] finished unstarted task: {header.task_uuid} [{header.worker}]", file=sys.stderr)
       return
-    futures = self._futures.pop(header.task_uuid)
 
     try:
       if header.succeeded:
@@ -425,6 +422,9 @@ class Executor(BaseExecutor):
       else:
         for future in futures:
           future.set_exception(MinirayError(header.exception_type, header.exception_desc, header.job, header.worker))
+    except InvalidStateError:
+      if not self._shutdown_reader_thread:
+        raise
     except RedisConnectionError:
       for future in futures:
         future.set_exception(MinirayError("RedisConnectionError", "lost connection to redis while fetching result payload", header.job, header.worker))
