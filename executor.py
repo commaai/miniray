@@ -396,9 +396,9 @@ class Executor(BaseExecutor):
   def _unpack_results(self, raw: list[bytes]) -> dict[str, tuple[MinirayResultHeader, bytes]]:
     results = {}
     for result in raw:
-      header_data, result_data = result.split(b"\x00", 1)
-      header = MinirayResultHeader(*json.loads(header_data))
-      results[header.task_uuid] = (header, result_data)
+      dat = result.split(b"\x00", 1)
+      header = MinirayResultHeader(*json.loads(dat[0]))
+      results[header.task_uuid] = (header, dat[1] if len(dat) > 1 else b'')
     return results
 
   def _resolve_futures(self, header: MinirayResultHeader, dat: bytes) -> None:
