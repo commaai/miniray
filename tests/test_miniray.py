@@ -133,25 +133,6 @@ def test_exception_propagation():
     assert 'RuntimeError: Ruh roh!' in str(excinfo.value)
 
 
-def test_cancel_futures_on_shutdown():
-  n_tasks = 20
-  result = None
-  with miniray.Executor(job_name='miniray_test_cancel_on_exit',
-                        priority=MINIRAY_PRIORITY,
-                        queue_name=QUEUE_NAME,
-                        limits={'memory': MINIRAY_MEMORY_GB}) as executor:
-    futures = [executor.submit(is_even, n) for n in range(n_tasks)]
-    for future in as_completed(futures):
-      result = future.result()
-      executor.shutdown(cancel_futures=True)
-      break
-
-  assert result is not None
-  assert isinstance(result, bool)
-  assert all(f.done() for f in futures)   # no future left pending
-  assert any(f.cancelled() for f in futures)  # at least some were cancelled
-
-
 def test_memory_limit():
   memory_limit_gb = 0.5
   memory_limit_bytes = int(memory_limit_gb * 1024 * 1024 * 1024)
@@ -176,3 +157,33 @@ def test_memory_limit():
     with pytest.raises(miniray.MinirayError) as excinfo:
       future_over.result()
     assert excinfo.value.exception_type == "ChildProcessError<9>"
+
+
+def test_early_shutdown():
+  def it():
+    for _ in range(100):
+      yield from range(1000)
+      time.sleep(0.1)
+
+  with get_executor(job_name='miniray_test_early_shutdown_wait') as executor:
+    futures = list(executor.fmap(is_even, range(10)))
+    executor.shutdown(wait=True)
+  assert all(f.done() for f in futures)  # all tasks completed
+  assert all(isinstance(f.result(), bool) for f in futures)  # results are valid
+
+  with get_executor(job_name='miniray_test_early_shutdown_cancel_read') as executor:
+    futs = list(executor.fmap(is_even, range(10)))
+    futs2 = list(executor.fmap(is_even, range(10, 20)))
+    t0 = time.time()
+    executor.shutdown(wait=True, cancel_futures=True)
+  assert time.time() - t0 < 0.5
+  assert all(f.done() for f in futs + futs2)  # all tasks completed
+  assert any(f.cancelled() for f in futs + futs2)  # at least some were cancelled
+  assert all(t and not t.is_alive() for t in executor._writer_threads + [executor._reader_thread])
+
+  with get_executor(job_name='miniray_test_early_shutdown_cancel_submit') as executor:
+    executor.fmap(is_even, it(), chunksize=1000)
+    t0 = time.time()
+    executor.shutdown(wait=True, cancel_futures=True)
+  assert time.time() - t0 < 0.5
+  assert all(t and not t.is_alive() for t in executor._writer_threads + [executor._reader_thread])
