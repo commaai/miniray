@@ -5,6 +5,7 @@ import time
 import uuid
 import socket
 import base64
+import hashlib
 import logging
 import random
 import subprocess
@@ -305,7 +306,7 @@ class Executor(BaseExecutor):
 
     # Instead of sending the function along with every request, we cache it in redis and send the cache key in its place
     pickled_fn = cloudpickle.dumps(partial(_execute_batch, fn))
-    function_ptr = f'pickledfunc-{uuid.uuid4()}'
+    function_ptr = f'pickledfunc-{hashlib.sha256(pickled_fn).hexdigest()}'
     self._submit_redis_master.set(function_ptr, pickled_fn, ex=7*24*60*60)
 
     submitted_queue: Queue[Optional[Future]] = Queue()
