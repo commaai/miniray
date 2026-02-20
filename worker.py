@@ -508,6 +508,9 @@ def main():
 
   procs: dict[int, Optional[Task]] = dict.fromkeys(range(sum(rm.cpu_totals.values())))
 
+  if triton_client is not None:
+    check_triton_server_health(url=TRITON_SERVER_ADDRESS, retries=60)
+
   while not sigterm_handler.raised:
     r_master.set(ACTIVE_KEY, 1, ex=SLEEP_TIME_MAX+1)
     backoff.sleep()
