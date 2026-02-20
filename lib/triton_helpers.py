@@ -12,7 +12,7 @@ from functools import wraps
 from pathlib import Path
 from typing import Any, Callable, Optional, TypedDict
 from redis import StrictRedis
-from tenacity import retry, stop_after_attempt, wait_random
+from tenacity import retry, stop_after_attempt, stop_after_delay, wait_fixed, wait_random
 from tritonclient.http import InferenceServerClient
 
 
@@ -34,8 +34,10 @@ def check_triton_server_health(url: str, timeout: int = 10, scheme: str = "http"
     url = f"{scheme}://{url}"
   try:
     urllib.request.urlopen(f"{url}/v2/health/live", timeout=timeout)
-  except urllib.error.URLError as e:
+  except (urllib.error.URLError, ConnectionError) as e:
     raise AssertionError(CONNECTION_ERR_MSG.format(url=url)) from e
+
+wait_for_triton_server = retry(stop=stop_after_delay(60), wait=wait_fixed(2), reraise=True)(check_triton_server_health)
 
 @retry(stop=stop_after_attempt(3), wait=wait_random(1, 2), reraise=True)
 def get_triton_inference_stats(client: InferenceServerClient):

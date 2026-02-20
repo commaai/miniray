@@ -31,7 +31,7 @@ from miniray.lib.cgroup import cgroup_create, cgroup_set_subcontrollers, cgroup_
 from miniray.lib.sig_term_handler import SigTermHandler
 from miniray.lib.resource_manager import ResourceManager, ResourceLimitError
 from miniray.lib.worker_helpers import ExponentialBackoff
-from miniray.lib.triton_helpers import TRITON_SERVER_ADDRESS, check_triton_server_health
+from miniray.lib.triton_helpers import TRITON_SERVER_ADDRESS, check_triton_server_health, wait_for_triton_server
 from miniray.lib.system_helpers import get_cgroup_cpu_usage, get_cgroup_mem_usage, get_gpu_stats, get_gpu_mem_usage, get_gpu_utilization
 from miniray.lib.statsd_helpers import statsd
 from miniray.lib.helpers import Limits, desc, GB_TO_BYTES, TASK_TIMEOUT_GRACE_SECONDS, JOB_CACHE_SIZE
@@ -507,6 +507,9 @@ def main():
   os.nice(1)
 
   procs: dict[int, Optional[Task]] = dict.fromkeys(range(sum(rm.cpu_totals.values())))
+
+  if triton_client is not None:
+    wait_for_triton_server(url=TRITON_SERVER_ADDRESS)
 
   while not sigterm_handler.raised:
     r_master.set(ACTIVE_KEY, 1, ex=SLEEP_TIME_MAX+1)
