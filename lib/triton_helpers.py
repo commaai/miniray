@@ -12,7 +12,7 @@ from functools import wraps
 from pathlib import Path
 from typing import Any, Callable, Optional, TypedDict
 from redis import StrictRedis
-from tenacity import retry, stop_after_attempt, wait_random
+from tenacity import retry, stop_after_attempt, stop_after_delay, wait_fixed, wait_random
 from tritonclient.http import InferenceServerClient
 
 
@@ -29,18 +29,15 @@ Unable to connect to the triton server at {url}.
 IOConfig = TypedDict('IOConfig', {'name': str, 'data_type': str, 'dims': list[int]})
 ModelConfig = TypedDict('ModelConfig', {'input': list[IOConfig], 'output': list[IOConfig]})
 
-def check_triton_server_health(url: str, timeout: int = 10, retries: int = 0, retry_interval: int = 2, scheme: str = "http") -> None:
+def check_triton_server_health(url: str, timeout: int = 10, scheme: str = "http") -> None:
   if "://" not in url:
     url = f"{scheme}://{url}"
-  for attempt in range(retries + 1):
-    try:
-      urllib.request.urlopen(f"{url}/v2/health/live", timeout=timeout)
-      return
-    except (urllib.error.URLError, ConnectionError) as e:
-      if attempt < retries:
-        time.sleep(retry_interval)
-      else:
-        raise AssertionError(CONNECTION_ERR_MSG.format(url=url)) from e
+  try:
+    urllib.request.urlopen(f"{url}/v2/health/live", timeout=timeout)
+  except (urllib.error.URLError, ConnectionError) as e:
+    raise AssertionError(CONNECTION_ERR_MSG.format(url=url)) from e
+
+wait_for_triton_server = retry(stop=stop_after_delay(60), wait=wait_fixed(2), reraise=True)(check_triton_server_health)
 
 @retry(stop=stop_after_attempt(3), wait=wait_random(1, 2), reraise=True)
 def get_triton_inference_stats(client: InferenceServerClient):
