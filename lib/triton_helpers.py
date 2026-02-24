@@ -1,6 +1,5 @@
 import os
 import sys
-import glob
 import json
 import time
 import shutil
@@ -72,8 +71,8 @@ def unload_triton_model(client: InferenceServerClient, model: str):
   client.unload_model(model)
   try: shutil.rmtree(TRITON_MODEL_REPOSITORY / model)
   except FileNotFoundError: pass
-  for f in glob.glob(f"/dev/shm/{model}_*.parameters"):
-    Path(f).unlink(missing_ok=True)
+  for f in Path("/dev/shm").glob(f"{model}_*.parameters"):
+    f.unlink(missing_ok=True)
 
 def unload_triton_models(client: InferenceServerClient, model: Optional[str] = None):
   for model_stats in get_triton_inference_stats(client):

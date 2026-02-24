@@ -32,10 +32,10 @@ py-modules = []
 testpaths = ["tests"]
 
 [tool.ruff]
-lint.select = ["E", "F", "W", "PIE", "C4", "ISC", "RUF100", "A", "B", "TID251"]
+lint.select = ["E", "F", "W", "PIE", "C4", "ISC", "RUF100", "A", "B", "PTH", "TID251"]
 lint.ignore = ["E701"]
 line-length = 160
-target-version="py310"
+target-version="py312"
 exclude = ["miniray"]
 
 [tool.ty.src]

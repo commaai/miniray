@@ -46,8 +46,8 @@ MISSING_RESULT_PAYLOAD_ERROR = (
   " minutes behind. If your results are small, consider a larger chunksize. If your results are big, consider multiple miniray executors.")
 
 #TODO xx should not be referenced here
-XX_BASEDIR = os.path.abspath(os.path.join(os.path.dirname(os.path.realpath(__file__)), "../"))
-XX_BASEPATH = Path(XX_BASEDIR)
+XX_BASEPATH = Path(__file__).resolve().parent.parent
+XX_BASEDIR = str(XX_BASEPATH)
 
 
 class MinirayError(Exception):
@@ -215,7 +215,7 @@ class Executor(BaseExecutor):
     job_desc = f"{config.job_name}_{str(uuid.uuid4())[:8]}"
 
     if config.codedir is not None:
-      assert os.path.exists(config.codedir), f"codedir {config.codedir} does not exist"
+      assert Path(config.codedir).exists(), f"codedir {config.codedir} does not exist"
       assert config.use_local_codedir is False, "can't specify both codedir and use_local_codedir"
     elif config.use_local_codedir:
       config = replace(config, codedir=sync_local_codedir(job_desc))
