@@ -2,17 +2,18 @@ import os
 import sys
 import resource
 from time import process_time
+from pathlib import Path
 
 TASK_CGROUP = os.getenv("TASK_CGROUP", "")
 
 def get_cgroup_cpu_usage(cgroup):
-  with open(f'/sys/fs/cgroup/{cgroup}/cpu.stat') as f:
+  with Path(f'/sys/fs/cgroup/{cgroup}/cpu.stat').open() as f:
     usage_usec = next(line for line in f if line.startswith("usage_usec")).split()[1]
     cpu_seconds = int(usage_usec) / 1e6
   return cpu_seconds
 
 def get_cgroup_mem_usage(cgroup):
-  with open(f'/sys/fs/cgroup/{cgroup}/memory.peak') as f:
+  with Path(f'/sys/fs/cgroup/{cgroup}/memory.peak').open() as f:
     max_bytes = int(f.read())
   return max_bytes
 

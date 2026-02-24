@@ -6,6 +6,7 @@ import json
 import traceback
 import cloudpickle
 import wrapt
+from pathlib import Path
 
 # Tasks initially start as root so they can be moved into the appropriate cgroup
 os.setuid(int(os.getenv("TASK_UID", 1000)))
@@ -23,7 +24,7 @@ def torch_import_hook(torch):
 def worker_process():
   os.nice(18)
 
-  result_file = os.environ['RESULT_FILE']
+  result_file = Path(os.environ['RESULT_FILE'])
 
   try:
     pickle_buffer = io.BytesIO(sys.stdin.buffer.read())
@@ -35,7 +36,7 @@ def worker_process():
   except BaseException as e:
     error_info = (type(e).__name__, traceback.format_exc())
     binary_out = b'\x01' + json.dumps(error_info).encode()
-  with open(result_file, 'wb') as f:
+  with result_file.open('wb') as f:
     f.write(binary_out)
 
 

@@ -22,6 +22,7 @@ import stat
 import shutil
 import numpy as np
 from lru import LRU
+from pathlib import Path
 from redis import StrictRedis
 from typing import BinaryIO, Optional, cast
 from tritonclient.http import InferenceServerClient
@@ -47,41 +48,44 @@ REDIS_HOST = os.getenv('REDIS_HOST', 'redis.comma.internal')
 PIPELINE_QUEUE = os.getenv('PIPELINE_QUEUE', 'local'+"-"+HOST_NAME)   # override this in systemd
 SLEEP_TIME_MAX = int(os.getenv('SLEEP_TIME_MAX', '2'))
 
-EMPTY_DIR = "/tmp/empty" # Run worker_task.py from an empty directory so relative path lookups don't hit code.nfs
-SCRIPT_DIR = os.path.dirname(os.path.realpath(__file__))
+EMPTY_DIR = Path("/tmp/empty")  # Run worker_task.py from an empty directory so relative path lookups don't hit code.nfs
+SCRIPT_DIR = Path(__file__).resolve().parent
 CGROUP_NODE = "worker"
 CGROUP_CONTROLLERS = ["cpu", "cpuset", "memory"]
 WORKER_ID = HOST_NAME
 ACTIVE_KEY = f"active:{PIPELINE_QUEUE}:{WORKER_ID}"
 MINIRAY_TARGET_NAME = "<remote-function>"
 
-TMP_DIR_ROOT = os.path.join("/dev/shm/tmp", CGROUP_NODE)
+TMP_DIR_ROOT = Path("/dev/shm/tmp") / CGROUP_NODE
 # you need a really good reason to use a global directory shared across all tasks
 # (normally you should use the tmp directory that is cleaned up after every task)
-CUPY_CACHE_DIR = os.path.join(TMP_DIR_ROOT, "cupy")
+CUPY_CACHE_DIR = TMP_DIR_ROOT / "cupy"
 TRITON_SERVER_ENABLED = int(os.getenv('TRITON_SERVER_ENABLED', '0'))
 
 
 def setup_global_dirs():
-  os.makedirs(EMPTY_DIR, exist_ok=True)
-  os.chmod(EMPTY_DIR, 0o555)
+  EMPTY_DIR.mkdir(parents=True, exist_ok=True)
+  EMPTY_DIR.chmod(0o555)
 
-  if os.path.exists(TMP_DIR_ROOT):
+  if TMP_DIR_ROOT.exists():
     shutil.rmtree(TMP_DIR_ROOT)
-  os.makedirs(TMP_DIR_ROOT)
+  TMP_DIR_ROOT.mkdir(parents=True)
 
-  os.makedirs(CUPY_CACHE_DIR)
+  CUPY_CACHE_DIR.mkdir(parents=True)
   os.chown(CUPY_CACHE_DIR, TASK_UID, TASK_UID)
-  os.chmod(CUPY_CACHE_DIR, 0o755)
+  CUPY_CACHE_DIR.chmod(0o755)
 
-def create_tmp_dir(path, uid, gid):
-  if os.path.exists(path):
+  for fn in Path('/dev/shm/').glob('triton_python_backend_shm_region_*'):
+    fn.unlink()
+
+def create_tmp_dir(path: Path, uid, gid):
+  if path.exists():
     shutil.rmtree(path)
-  os.makedirs(path)
+  path.mkdir(parents=True)
   os.chown(path, uid, gid)
 
 def get_tmp_dir_for_task(alloc_id):
-  return os.path.join(TMP_DIR_ROOT, alloc_id)
+  return TMP_DIR_ROOT / alloc_id
 
 def cleanup_shm_by_gid(alloc_id, triton_client, gid):
   with os.scandir("/dev/shm") as it:
@@ -98,10 +102,10 @@ def cleanup_shm_by_gid(alloc_id, triton_client, gid):
     if stat.S_ISDIR(s.st_mode):
       shutil.rmtree(de)
     else:
-      os.unlink(de.path)
+      Path(de.path).unlink()
 
   tmp_dir = get_tmp_dir_for_task(alloc_id)
-  if os.path.exists(tmp_dir):
+  if tmp_dir.exists():
     shutil.rmtree(tmp_dir)
 
 def reap_process(proc):
@@ -124,9 +128,9 @@ class Task:
   alloc_id: Optional[str]
   task_gid: int
   cgroup_name: str
-  result_file: str
+  result_file: Path
   start_time: float
-  tmp_dir: str
+  tmp_dir: Path
   venv_dir: str
   pickled_fn: bytes
   pickled_args: bytes
@@ -182,7 +186,7 @@ class Task:
 
       self.alloc_id = f"proc{self.proc_index:0>3}"
       self.task_gid = grp.getgrnam(self.alloc_id).gr_gid
-      self.cgroup_name = os.path.join(CGROUP_NODE, self.alloc_id)
+      self.cgroup_name = f"{CGROUP_NODE}/{self.alloc_id}"
       mem_limit_bytes = int((self.limits.memory or 1) * GB_TO_BYTES)
       self.tmp_dir = get_tmp_dir_for_task(self.alloc_id)
 
@@ -194,7 +198,7 @@ class Task:
       cgroup_set_memory_limit(self.cgroup_name, mem_limit_bytes)
       create_tmp_dir(self.tmp_dir, TASK_UID, self.task_gid)
 
-      self.result_file = os.path.join(self.tmp_dir, "task_result")
+      self.result_file = self.tmp_dir / "task_result"
       return True
     except BaseException as e:
       traceback.print_exc()
@@ -216,30 +220,30 @@ class Task:
       p_env = {
         **os.environ,
         'NO_PROGRESS': '1',
-        'CUPY_CACHE_DIR': CUPY_CACHE_DIR,
+        'CUPY_CACHE_DIR': str(CUPY_CACHE_DIR),
         'CUDA_VISIBLE_DEVICES': ','.join(cuda_visible_devices),
         'USER': 'batman',
         'HOME': '/home/batman',
         'TASK_UID': str(TASK_UID),
         'TASK_CGROUP': self.cgroup_name,
-        'TMPDIR': self.tmp_dir,
-        'CACHE_ROOT': os.path.join(self.tmp_dir, "index_cache"),
-        'PARAMS_ROOT': os.path.join(self.tmp_dir, "params"),
-        'LOG_ROOT': os.path.join(self.tmp_dir, "media/0/realdata"),
-        'GNSS_CACHE_DIR': os.path.join(self.tmp_dir, "gnss_cache"),
+        'TMPDIR': str(self.tmp_dir),
+        'CACHE_ROOT': str(self.tmp_dir / "index_cache"),
+        'PARAMS_ROOT': str(self.tmp_dir / "params"),
+        'LOG_ROOT': str(self.tmp_dir / "media/0/realdata"),
+        'GNSS_CACHE_DIR': str(self.tmp_dir / "gnss_cache"),
         'CDDIS_BASE_URL': "http://gnss-cache.comma.internal:8082/gnss-data",
         'CDDIS_HOURLY_BASE_URL': "http://gnss-cache.comma.internal:8082/gnss-data-hourly",
         'ENABLE_MODEL_CACHE': str(int(not TRITON_SERVER_ENABLED)),
-        'RESULT_FILE': self.result_file,
+        'RESULT_FILE': str(self.result_file),
         'DISABLE_FILEREADER_CACHE': '1',
         **self.job_metadata.env,
       }
-      python3_exe = os.path.join(self.venv_dir, "bin/python3")
+      python3_exe = str(Path(self.venv_dir) / "bin/python3")
 
-      p_args = [python3_exe, os.path.join(SCRIPT_DIR, "lib/worker_task.py")]
+      p_args = [python3_exe, str(SCRIPT_DIR / "lib/worker_task.py")]
       if DEBUG: print("[worker]", " ".join(p_args))
 
-      self.proc = subprocess.Popen(p_args, user=0, group=self.task_gid, extra_groups=task_extra_groups, cwd=EMPTY_DIR, env=p_env,
+      self.proc = subprocess.Popen(p_args, user=0, group=self.task_gid, extra_groups=task_extra_groups, cwd=str(EMPTY_DIR), env=p_env,
                                    start_new_session=True, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
       cgroup_add_pid(self.cgroup_name, self.proc.pid)
       assert self.proc.stdin is not None
@@ -283,7 +287,7 @@ class Task:
 
     # Read result file
     try:
-      with open(self.result_file, 'rb') as f:
+      with self.result_file.open('rb') as f:
         self._task_result = f.read()
     except FileNotFoundError:
       self._task_result = b''
@@ -465,11 +469,11 @@ def sig_callback(signal):
   print(f"[worker] cleaning up on signal: {signal} ...")
 
 def ensure_venv(job: str, codedir: str, venv_cache: LRU):
-  if job not in venv_cache and os.path.exists(codedir):
+  if job not in venv_cache and Path(codedir).exists():
     venv_dir = str(sync_venv_cache(codedir, TASK_UID, job))
     venv_cache[job] = venv_dir
     cleanup_venvs(TASK_UID, keep_venvs=list(venv_cache.keys()))
-  assert job in venv_cache, f"Failed to find venv in cache, {codedir} exists: {os.path.exists(codedir)}"
+  assert job in venv_cache, f"Failed to find venv in cache, {codedir} exists: {Path(codedir).exists()}"
 
 
 def main():

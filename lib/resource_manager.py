@@ -1,11 +1,11 @@
 from __future__ import annotations
-import os
 import time
 import traceback
 import types
 import resource
 import threading
 import pynvml
+from pathlib import Path
 from ctypes import _Pointer
 from dataclasses import dataclass
 
@@ -186,10 +186,10 @@ class ResourceManager():
 
   def _get_cpu_info_by_node(self):
     cpu_info = {}
-    for d in os.listdir('/sys/devices/system/node/'):
-      if d.startswith('node'):
-        numa_node = int(d[4:])
-        with open(f"/sys/devices/system/node/node{numa_node}/cpumap", "r") as f:
+    for entry in Path("/sys/devices/system/node").iterdir():
+      if entry.name.startswith('node'):
+        numa_node = int(entry.name[4:])
+        with (entry / "cpumap").open("r") as f:
           cpu_bit_mask = f.read().strip().replace(",", "")
           bit_count = bin(int(cpu_bit_mask, 16)).count("1")
           cpu_info[numa_node] = bit_count
@@ -200,8 +200,8 @@ class ResourceManager():
     MemTotal:       65855368 kB
     MemAvailable:   63456920 kB
     """
-    meminfo_fn = f"/sys/devices/system/node/node{numa_node}/meminfo"
-    with open(meminfo_fn,'r') as f:
+    meminfo_fn = Path(f"/sys/devices/system/node/node{numa_node}/meminfo")
+    with meminfo_fn.open('r') as f:
       for line in f:
         if f"{k}:" in line:
           # convert kb to bytes
@@ -210,9 +210,9 @@ class ResourceManager():
 
   def _get_mem_info_by_node(self, mem_limit_multiplier):
     mem_info = {}
-    for d in os.listdir('/sys/devices/system/node/'):
-      if d.startswith('node'):
-        numa_node = int(d[4:])
+    for entry in Path("/sys/devices/system/node").iterdir():
+      if entry.name.startswith('node'):
+        numa_node = int(entry.name[4:])
         mem_info[numa_node] = int(self._get_mem_info_bytes(numa_node, "MemTotal") * mem_limit_multiplier)
     return mem_info
 
