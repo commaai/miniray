@@ -40,7 +40,6 @@ from miniray.lib.uv import sync_venv_cache, cleanup_venvs
 from miniray.executor import MinirayResultHeader, JobMetadata, TaskRecord, TaskState, get_metadata_key, get_tasks_key
 
 
-
 HOST_NAME = socket.gethostname()
 TASK_UID = int(os.getenv("TASK_UID", "1000"))
 DEBUG = os.getenv("DEBUG_WORKER", None)
@@ -74,9 +73,6 @@ def setup_global_dirs():
   CUPY_CACHE_DIR.mkdir(parents=True)
   os.chown(CUPY_CACHE_DIR, TASK_UID, TASK_UID)
   CUPY_CACHE_DIR.chmod(0o755)
-
-  for fn in Path('/dev/shm/').glob('triton_python_backend_shm_region_*'):
-    fn.unlink()
 
 def create_tmp_dir(path: Path, uid, gid):
   if path.exists():

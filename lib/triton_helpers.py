@@ -95,15 +95,21 @@ def kill_triton_backend_stubs(gpu_bus_ids: Optional[list[str]] = None):
       try: os.kill(int(pid), signal.SIGKILL)
       except ProcessLookupError: pass
 
+# NOTE: This function must also run as root, since the triton_python_backend_shm_region files are created directly by the triton server
+def unlink_triton_shm_files() -> None:
+  for f in Path("/dev/shm").glob("triton_python_backend_shm_region_*"):
+    f.unlink(missing_ok=True)
+
 def get_triton_container_id() -> str:
   container_ids = subprocess.check_output(["docker", "ps", "--format", "{{.ID}}", "--filter", "name=tritonserver"]).decode('utf-8').strip()
   if not container_ids:
     raise RuntimeError("No tritonserver container found")
   return container_ids.split('\n')[0]
 
-def cleanup_triton(triton_client, gpu_bus_ids):
-  unload_triton_models(triton_client)
+def cleanup_triton(client: InferenceServerClient, gpu_bus_ids: list[str]) -> None:
+  unload_triton_models(client)
   kill_triton_backend_stubs(gpu_bus_ids)
+  unlink_triton_shm_files()
 
 
 if __name__ == '__main__':
