@@ -9,11 +9,10 @@ N_RETRIES = 5
 
 
 def parse_uv_sync_stderr(stderr):
-  if stderr is None:
-    return ''
-  errs = [err for err in stderr.decode('utf-8').split('\n') if err.startswith('error')] # filter out infos and warnings
-  err = "\n".join(errs)
-  return err
+  if stderr is None: return ''
+  stderr = stderr.decode('utf-8')
+  errs = [line for line in stderr.split('\n') if line.startswith('error')] # filter out infos and warnings
+  return '\n'.join(errs) if len(errs) else stderr
 
 def base_venv_path(user_id: int):
   return Path(pwd.getpwuid(user_id).pw_dir) / ".job_venvs"
