@@ -28,7 +28,7 @@ from tqdm import tqdm
 from types import TracebackType
 from typing import Any, Callable, Iterable, Iterator, NamedTuple, Optional, Sequence, cast
 
-from miniray.lib.helpers import Limits, extract_error, StreamLogger
+from miniray.lib.helpers import Limits, extract_error, get_stream_logger
 
 MAX_ARG_STRLEN = 131071  # max length for unix string arguments, see https://stackoverflow.com/a/29802900
 REDIS_HOST = os.getenv('REDIS_HOST', 'redis.comma.internal')
@@ -39,7 +39,7 @@ DEFAULT_RESULT_PAYLOAD_TIMEOUT_SECONDS = 20 * 60
 USE_MAIN_RESULT_REDIS = bool(int(os.getenv("USE_MAIN_RESULT_REDIS", "0")))
 CACHE_ROOT = Path("/code.nfs/branches/caches")
 REMOTE_QUEUE = 'remote_v3'
-DEFAULT_LOGGER = StreamLogger('miniray', level=logging.INFO)
+DEFAULT_LOGGER = get_stream_logger('miniray', level=logging.INFO)
 
 MISSING_RESULT_PAYLOAD_ERROR = (
   f"Did not find payload on worker redis. Results may be piling up and reader has fallen more than {DEFAULT_RESULT_PAYLOAD_TIMEOUT_SECONDS/60:.1f}"

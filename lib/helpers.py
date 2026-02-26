@@ -43,7 +43,7 @@ def get_logger(name, level=None):
   logger.propagate = False
   return logger
 
-def StreamLogger(name, level=None):
+def get_stream_logger(name, level=None):
   logger = get_logger(name, level=level)
   if not logger.hasHandlers():
     logger.addHandler(logging.StreamHandler(sys.stdout))

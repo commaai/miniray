@@ -379,12 +379,12 @@ class Task:
 # we want to normalize by x such that sum(max(1 / N, weights / x)) = 1.
 # For example: if we have weights [1, 100, 1000] and N = 10, we find x = 1250
 # to get weights = [0.1, 0.1, 0.8], which satisfies all(W >= 1 / N) and sum(W) == 1.
-def get_job_intervals(raw_weights: list[int], N: int) -> list[float]:
-  weights = all_weights = np.array(raw_weights[:N])  # we have N workers, so we can only schedule a maximum of N jobs at once
+def get_job_intervals(raw_weights: list[int], n_workers: int) -> list[float]:
+  weights = all_weights = np.array(raw_weights[:n_workers])  # we have N workers, so we can only schedule a maximum of N jobs at once
   x = 0
-  while sum(weights) / N > x + 1e-7:  # small epsilon to fix rounding errors
-    x = sum(weights) / N  # set x to its lower bound
-    N -= sum(weights / x < 1)  # any weights less than 1 / N will be clamped, so remove these weights from both N and weights and keep looping
+  while sum(weights) / n_workers > x + 1e-7:  # small epsilon to fix rounding errors
+    x = sum(weights) / n_workers  # set x to its lower bound
+    n_workers -= sum(weights / x < 1)  # any weights less than 1 / N will be clamped, so remove these weights from both N and weights and keep looping
     weights = weights[weights / x >= 1]
 
   weights = np.maximum(1, all_weights / x)
@@ -401,10 +401,10 @@ def get_globally_scheduled_job(r_master: StrictRedis, jobs: list[str], job_metad
   if not jobs or active_key not in active_workers:
     return None
 
-  P = active_workers.index(active_key) / len(active_workers)  # P is a point in [0, 1)
+  p = active_workers.index(active_key) / len(active_workers)  # p is a point in [0, 1)
   job_weights = [job_metadatas[j].priority for j in jobs]
   job_intervals = get_job_intervals(job_weights, len(active_workers))
-  job_index = next(i for i,end in enumerate(job_intervals) if end >= P + 1e-7)
+  job_index = next(i for i,end in enumerate(job_intervals) if end >= p + 1e-7)
   return jobs[job_index]
 
 def get_randomly_scheduled_job(jobs: list[str], job_metadatas: LRU[str, JobMetadata]) -> Optional[str]:

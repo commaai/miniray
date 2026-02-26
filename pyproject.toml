@@ -32,7 +32,7 @@ py-modules = []
 testpaths = ["tests"]
 
 [tool.ruff]
-lint.select = ["E", "F", "W", "PIE", "C4", "ISC", "RUF100", "A", "B", "PTH", "TID251"]
+lint.select = ["A", "B", "E", "F", "N", "W", "PIE", "C4", "ISC", "RUF100", "PTH", "TID251"]
 lint.ignore = ["E701"]
 line-length = 160
 target-version="py312"
