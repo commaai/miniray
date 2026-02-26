@@ -417,6 +417,17 @@ def get_randomly_scheduled_job(jobs: list[str], job_metadatas: LRU[str, JobMetad
   job = random.choices(jobs, weights=job_weights, k=1)[0]
   return job
 
+def get_time_until_next_timeout(procs: dict[int, Optional[Task]], now: Optional[float] = None) -> float:
+  if now is None:
+    now = time.time()
+
+  timeout_remaining = float('inf')
+  for proc in procs.values():
+    if proc is not None:
+      deadline = proc.start_time + proc.limits.timeout_seconds
+      timeout_remaining = min(timeout_remaining, deadline - now)
+  return timeout_remaining
+
 def update_job_metadatas(r_master: StrictRedis, jobs: list[str], job_metadatas: LRU[str, JobMetadata]):
   for job in jobs:
     if job not in job_metadatas:
@@ -522,17 +533,24 @@ def main():
     update_job_metadatas(r_master, jobs, job_metadatas)
     jobs = [j for j in jobs if not job_metadatas[j].limits.get('node_whitelist') or HOST_NAME in job_metadatas[j].limits['node_whitelist']]
     current_gpu_job = get_globally_scheduled_job(r_master, jobs, job_metadatas)
+
+    # Always process task completions first for every process.
     for i, proc in procs.items():
-      # check if task is done and handle completion
       if proc and proc.check_done():
         proc.finish()
         procs[i] = None
 
-      # if still working skip
+    # Only start new tasks when the nearest timeout is still safely outside the grace period.
+    if get_time_until_next_timeout(procs) <= TASK_TIMEOUT_GRACE_SECONDS:
+      continue
+
+    for i, proc in procs.items():
       if proc is not None:
         continue
 
-      # schedule new task if slot is free
+      if get_time_until_next_timeout(procs) <= TASK_TIMEOUT_GRACE_SECONDS:
+        break
+
       task = None
       if current_gpu_job is not None:
         task = get_task(rm, r_master, r_results, current_gpu_job, job_metadatas, venvs, i, triton_client)
