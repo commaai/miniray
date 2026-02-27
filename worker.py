@@ -532,6 +532,7 @@ def main():
         if proc and proc.check_done():
           proc.finish()
           procs[i] = None
+          backoff.reset()
 
         # If running behind focus on finishing
         # TODO just make starting faster
