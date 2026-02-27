@@ -417,17 +417,6 @@ def get_randomly_scheduled_job(jobs: list[str], job_metadatas: LRU[str, JobMetad
   job = random.choices(jobs, weights=job_weights, k=1)[0]
   return job
 
-def get_time_until_next_timeout(procs: dict[int, Optional[Task]], now: Optional[float] = None) -> float:
-  if now is None:
-    now = time.time()
-
-  timeout_remaining = float('inf')
-  for proc in procs.values():
-    if proc is not None:
-      deadline = proc.start_time + proc.limits.timeout_seconds
-      timeout_remaining = min(timeout_remaining, deadline - now)
-  return timeout_remaining
-
 def update_job_metadatas(r_master: StrictRedis, jobs: list[str], job_metadatas: LRU[str, JobMetadata]):
   for job in jobs:
     if job not in job_metadatas:
