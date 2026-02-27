@@ -534,22 +534,22 @@ def main():
     jobs = [j for j in jobs if not job_metadatas[j].limits.get('node_whitelist') or HOST_NAME in job_metadatas[j].limits['node_whitelist']]
     current_gpu_job = get_globally_scheduled_job(r_master, jobs, job_metadatas)
 
-    # Always process task completions first for every process.
+    proc_loop_start = time.perf_counter()
     for i, proc in procs.items():
+      if time.perf_counter() - proc_loop_start <= TASK_TIMEOUT_GRACE_SECONDS:
+        raise RuntimeError("Did not loop over processes fast enough, cannot garantuee task integrity")
+
       if proc and proc.check_done():
         proc.finish()
         procs[i] = None
 
-    # Only start new tasks when the nearest timeout is still safely outside the grace period.
-    if get_time_until_next_timeout(procs) <= TASK_TIMEOUT_GRACE_SECONDS:
-      continue
-
-    for i, proc in procs.items():
-      if proc is not None:
+      # If running behind focus on finishing
+      # TODO just make starting faster
+      if time.perf_counter() - proc_loop_start <= TASK_TIMEOUT_GRACE_SECONDS/2:
         continue
 
-      if get_time_until_next_timeout(procs) <= TASK_TIMEOUT_GRACE_SECONDS:
-        break
+      if proc is not None:
+        continue
 
       task = None
       if current_gpu_job is not None:
