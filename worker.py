@@ -112,7 +112,7 @@ def reap_process(proc):
     if not hasattr(proc, 'sigterm_sent'):
       os.killpg(proc.pid, signal.SIGTERM)
       proc.sigterm_sent = time.time()
-    elif proc.sigterm_sent + 30 > time.time():
+    elif proc.sigterm_sent + 20 < time.time():  # slurm sends SIGKILL after 30s, so we must finish before that
       os.killpg(proc.pid, signal.SIGKILL)
     return False
   except (ChildProcessError, ProcessLookupError):
