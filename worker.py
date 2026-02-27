@@ -35,7 +35,7 @@ from miniray.lib.worker_helpers import ExponentialBackoff
 from miniray.lib.triton_helpers import TRITON_SERVER_ADDRESS, check_triton_server_health, wait_for_triton_server
 from miniray.lib.system_helpers import get_cgroup_cpu_usage, get_cgroup_mem_usage, get_gpu_stats, get_gpu_mem_usage, get_gpu_utilization
 from miniray.lib.statsd_helpers import statsd
-from miniray.lib.helpers import Limits, desc, GB_TO_BYTES, TASK_TIMEOUT_GRACE_SECONDS, JOB_CACHE_SIZE
+from miniray.lib.helpers import Limits, desc, GB_TO_BYTES, MAX_WORKER_LOOP_SECONDS, TASK_TIMEOUT_GRACE_SECONDS, JOB_CACHE_SIZE
 from miniray.lib.uv import sync_venv_cache, cleanup_venvs
 from miniray.executor import MinirayResultHeader, JobMetadata, TaskRecord, TaskState, get_metadata_key, get_tasks_key
 
@@ -464,7 +464,7 @@ def get_task(resource_manager: ResourceManager, r_master: StrictRedis,
   record = TaskRecord(*json.loads(task_data))
 
   # Transition pending -> working with TTL = timeout + grace
-  ttl = int(limits.timeout_seconds + TASK_TIMEOUT_GRACE_SECONDS)
+  ttl = int(limits.timeout_seconds + MAX_WORKER_LOOP_TIME + TASK_TIMEOUT_GRACE_TIME)
   working_record = record._replace(state=TaskState.WORKING, worker=WORKER_ID, started_at=time.time())
   r_master.hsetex(tasks_key, record.uuid, json.dumps(working_record), ex=ttl)
   resource_manager.rekey(temp_key, record.uuid)
@@ -536,7 +536,7 @@ def main():
 
     proc_loop_start = time.perf_counter()
     for i, proc in procs.items():
-      if time.perf_counter() - proc_loop_start <= TASK_TIMEOUT_GRACE_SECONDS:
+      if time.perf_counter() - proc_loop_start <= MAX_WORKER_LOOP_SECONDS:
         raise RuntimeError("Did not loop over processes fast enough, cannot garantuee task integrity")
 
       if proc and proc.check_done():
@@ -545,7 +545,7 @@ def main():
 
       # If running behind focus on finishing
       # TODO just make starting faster
-      if time.perf_counter() - proc_loop_start <= TASK_TIMEOUT_GRACE_SECONDS/2:
+      if time.perf_counter() - proc_loop_start <= MAX_WORKER_LOOP_SECONDS/2:
         continue
 
       if proc is not None:

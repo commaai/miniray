@@ -9,6 +9,7 @@ GB_TO_BYTES = 1024 ** 3
 
 # Worker configuration constants
 TASK_TIMEOUT_GRACE_SECONDS = 10
+MAX_WORKER_LOOP_SECONDS = 10
 JOB_CACHE_SIZE = 1024
 JOB_BLOCK_SECONDS = 60 * 5  # 5 minutes
 
