@@ -511,13 +511,8 @@ def main():
   if triton_client is not None:
     wait_for_triton_server(url=TRITON_SERVER_ADDRESS)
 
-  _crash_after = float(os.environ.get('_WORKER_CRASH_AFTER_SECS', 0))
-  _worker_start = time.perf_counter()
-
   try:
     while not sigterm_handler.raised:
-      if _crash_after and time.perf_counter() - _worker_start > _crash_after:
-        raise RuntimeError(f"_WORKER_CRASH_AFTER_SECS={_crash_after}")
       r_master.set(ACTIVE_KEY, 1, ex=SLEEP_TIME_MAX+1)
       backoff.sleep()
 
