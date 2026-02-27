@@ -511,51 +511,60 @@ def main():
   if triton_client is not None:
     wait_for_triton_server(url=TRITON_SERVER_ADDRESS)
 
-  while not sigterm_handler.raised:
-    r_master.set(ACTIVE_KEY, 1, ex=SLEEP_TIME_MAX+1)
-    backoff.sleep()
+  _crash_after = float(os.environ.get('_WORKER_CRASH_AFTER_SECS', 0))
+  _worker_start = time.monotonic()
 
-    if triton_client is not None:
-      check_triton_server_health(url=TRITON_SERVER_ADDRESS)
+  try:
+    while not sigterm_handler.raised:
+      if _crash_after and time.monotonic() - _worker_start > _crash_after:
+        raise RuntimeError(f"_WORKER_CRASH_AFTER_SECS={_crash_after}")
+      r_master.set(ACTIVE_KEY, 1, ex=SLEEP_TIME_MAX+1)
+      backoff.sleep()
 
-    jobs = sorted(key.decode() for key in cast(list[bytes], r_master.keys(f"*{PIPELINE_QUEUE}")) if b":" not in key)
-    update_job_metadatas(r_master, jobs, job_metadatas)
-    jobs = [j for j in jobs if not job_metadatas[j].limits.get('node_whitelist') or HOST_NAME in job_metadatas[j].limits['node_whitelist']]
-    current_gpu_job = get_globally_scheduled_job(r_master, jobs, job_metadatas)
+      if triton_client is not None:
+        check_triton_server_health(url=TRITON_SERVER_ADDRESS)
 
-    proc_loop_start = time.perf_counter()
-    for i, proc in procs.items():
-      if time.perf_counter() - proc_loop_start > MAX_WORKER_LOOP_SECONDS:
-        raise RuntimeError("Did not loop over processes fast enough, cannot garantuee task integrity")
+      jobs = sorted(key.decode() for key in cast(list[bytes], r_master.keys(f"*{PIPELINE_QUEUE}")) if b":" not in key)
+      update_job_metadatas(r_master, jobs, job_metadatas)
+      jobs = [j for j in jobs if not job_metadatas[j].limits.get('node_whitelist') or HOST_NAME in job_metadatas[j].limits['node_whitelist']]
+      current_gpu_job = get_globally_scheduled_job(r_master, jobs, job_metadatas)
 
-      if proc and proc.check_done():
-        proc.finish()
-        procs[i] = None
+      proc_loop_start = time.perf_counter()
+      for i, proc in procs.items():
+        if time.perf_counter() - proc_loop_start > MAX_WORKER_LOOP_SECONDS:
+          raise RuntimeError("Did not loop over processes fast enough, cannot garantuee task integrity")
 
-      # If running behind focus on finishing
-      # TODO just make starting faster
-      if time.perf_counter() - proc_loop_start > MAX_WORKER_LOOP_SECONDS/2:
-        continue
+        if proc and proc.check_done():
+          proc.finish()
+          procs[i] = None
 
-      if proc is not None:
-        continue
+        # If running behind focus on finishing
+        # TODO just make starting faster
+        if time.perf_counter() - proc_loop_start > MAX_WORKER_LOOP_SECONDS/2:
+          continue
 
-      task = None
-      if current_gpu_job is not None:
-        task = get_task(rm, r_master, r_results, current_gpu_job, job_metadatas, venvs, i, triton_client)
-      if task is None:
-        job = get_randomly_scheduled_job(jobs, job_metadatas)
-        if job is not None:
-          task = get_task(rm, r_master, r_results, job, job_metadatas, venvs, i, triton_client)
-      if task is None:
-        continue
+        if proc is not None:
+          continue
 
-      print(f"[worker] starting miniray task from job {task.job} on proc{i}")
-      if task.init() and task.start():
-        procs[i] = task
-        backoff.reset()
-      else:
-        task.finish()
+        task = None
+        if current_gpu_job is not None:
+          task = get_task(rm, r_master, r_results, current_gpu_job, job_metadatas, venvs, i, triton_client)
+        if task is None:
+          job = get_randomly_scheduled_job(jobs, job_metadatas)
+          if job is not None:
+            task = get_task(rm, r_master, r_results, job, job_metadatas, venvs, i, triton_client)
+        if task is None:
+          continue
+
+        print(f"[worker] starting miniray task from job {task.job} on proc{i}")
+        if task.init() and task.start():
+          procs[i] = task
+          backoff.reset()
+        else:
+          task.finish()
+  except Exception as e:
+    print(f"[worker] fatal error, draining tasks: {e}")
+    traceback.print_exc()
 
   # send sigterm to all remaining processes
   for proc in procs.values():
