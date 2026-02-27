@@ -111,8 +111,8 @@ def reap_process(proc):
       pid, _ = os.waitpid(-proc.pid, os.WNOHANG)
     if not hasattr(proc, 'sigterm_sent'):
       os.killpg(proc.pid, signal.SIGTERM)
-      proc.sigterm_sent = time.time()
-    elif proc.sigterm_sent + 20 < time.time():  # slurm sends SIGKILL after 30s, so we must finish before that
+      proc.sigterm_sent = time.perf_counter()
+    elif proc.sigterm_sent + 20 < time.perf_counter():  # slurm sends SIGKILL after 30s, so we must finish before that
       os.killpg(proc.pid, signal.SIGKILL)
     return False
   except (ChildProcessError, ProcessLookupError):
@@ -160,7 +160,7 @@ class Task:
     return self.task.uuid
 
   def init(self) -> bool:
-    self.start_time = time.time()
+    self.start_time = time.perf_counter()
     try:
       if not self.job_metadata.valid:
         raise ValueError("Invalid JobMetadata, key was probably missing")
@@ -260,7 +260,7 @@ class Task:
     if self._done:
       return True
 
-    self._timed_out = time.time() > self.start_time + self.limits.timeout_seconds
+    self._timed_out = time.perf_counter() > self.start_time + self.limits.timeout_seconds
 
     # Wait for the process to terminate
     if self.proc.returncode is None:
@@ -305,7 +305,7 @@ class Task:
     return True
 
   def finish(self, ignore_errors=False):
-    task_run_time = time.time() - self.start_time
+    task_run_time = time.perf_counter() - self.start_time
     if self.proc is not None:
       task_gpu_stats = get_gpu_stats(self.proc.pid, [gpu.handle for gpu in self.rm.gpus])
       task_cpu_time = get_cgroup_cpu_usage(self.cgroup_name)
@@ -512,11 +512,11 @@ def main():
     wait_for_triton_server(url=TRITON_SERVER_ADDRESS)
 
   _crash_after = float(os.environ.get('_WORKER_CRASH_AFTER_SECS', 0))
-  _worker_start = time.monotonic()
+  _worker_start = time.perf_counter()
 
   try:
     while not sigterm_handler.raised:
-      if _crash_after and time.monotonic() - _worker_start > _crash_after:
+      if _crash_after and time.perf_counter() - _worker_start > _crash_after:
         raise RuntimeError(f"_WORKER_CRASH_AFTER_SECS={_crash_after}")
       r_master.set(ACTIVE_KEY, 1, ex=SLEEP_TIME_MAX+1)
       backoff.sleep()
