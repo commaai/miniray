@@ -111,8 +111,8 @@ def reap_process(proc):
       pid, _ = os.waitpid(-proc.pid, os.WNOHANG)
     if not hasattr(proc, 'sigterm_sent'):
       os.killpg(proc.pid, signal.SIGTERM)
-      proc.sigterm_sent = time.time()
-    elif proc.sigterm_sent + 30 > time.time():
+      proc.sigterm_sent = time.perf_counter()
+    elif proc.sigterm_sent + 20 < time.perf_counter():  # slurm sends SIGKILL after 30s, so we must finish before that
       os.killpg(proc.pid, signal.SIGKILL)
     return False
   except (ChildProcessError, ProcessLookupError):
@@ -160,7 +160,7 @@ class Task:
     return self.task.uuid
 
   def init(self) -> bool:
-    self.start_time = time.time()
+    self.start_time = time.perf_counter()
     try:
       if not self.job_metadata.valid:
         raise ValueError("Invalid JobMetadata, key was probably missing")
@@ -260,7 +260,7 @@ class Task:
     if self._done:
       return True
 
-    self._timed_out = time.time() > self.start_time + self.limits.timeout_seconds
+    self._timed_out = time.perf_counter() > self.start_time + self.limits.timeout_seconds
 
     # Wait for the process to terminate
     if self.proc.returncode is None:
@@ -305,7 +305,7 @@ class Task:
     return True
 
   def finish(self, ignore_errors=False):
-    task_run_time = time.time() - self.start_time
+    task_run_time = time.perf_counter() - self.start_time
     if self.proc is not None:
       task_gpu_stats = get_gpu_stats(self.proc.pid, [gpu.handle for gpu in self.rm.gpus])
       task_cpu_time = get_cgroup_cpu_usage(self.cgroup_name)
@@ -511,51 +511,55 @@ def main():
   if triton_client is not None:
     wait_for_triton_server(url=TRITON_SERVER_ADDRESS)
 
-  while not sigterm_handler.raised:
-    r_master.set(ACTIVE_KEY, 1, ex=SLEEP_TIME_MAX+1)
-    backoff.sleep()
+  try:
+    while not sigterm_handler.raised:
+      r_master.set(ACTIVE_KEY, 1, ex=SLEEP_TIME_MAX+1)
+      backoff.sleep()
 
-    if triton_client is not None:
-      check_triton_server_health(url=TRITON_SERVER_ADDRESS)
+      if triton_client is not None:
+        check_triton_server_health(url=TRITON_SERVER_ADDRESS)
 
-    jobs = sorted(key.decode() for key in cast(list[bytes], r_master.keys(f"*{PIPELINE_QUEUE}")) if b":" not in key)
-    update_job_metadatas(r_master, jobs, job_metadatas)
-    jobs = [j for j in jobs if not job_metadatas[j].limits.get('node_whitelist') or HOST_NAME in job_metadatas[j].limits['node_whitelist']]
-    current_gpu_job = get_globally_scheduled_job(r_master, jobs, job_metadatas)
+      jobs = sorted(key.decode() for key in cast(list[bytes], r_master.keys(f"*{PIPELINE_QUEUE}")) if b":" not in key)
+      update_job_metadatas(r_master, jobs, job_metadatas)
+      jobs = [j for j in jobs if not job_metadatas[j].limits.get('node_whitelist') or HOST_NAME in job_metadatas[j].limits['node_whitelist']]
+      current_gpu_job = get_globally_scheduled_job(r_master, jobs, job_metadatas)
 
-    proc_loop_start = time.perf_counter()
-    for i, proc in procs.items():
-      if time.perf_counter() - proc_loop_start > MAX_WORKER_LOOP_SECONDS:
-        raise RuntimeError("Did not loop over processes fast enough, cannot garantuee task integrity")
+      proc_loop_start = time.perf_counter()
+      for i, proc in procs.items():
+        if time.perf_counter() - proc_loop_start > MAX_WORKER_LOOP_SECONDS:
+          raise RuntimeError("Did not loop over processes fast enough, cannot garantuee task integrity")
 
-      if proc and proc.check_done():
-        proc.finish()
-        procs[i] = None
+        if proc and proc.check_done():
+          proc.finish()
+          procs[i] = None
 
-      # If running behind focus on finishing
-      # TODO just make starting faster
-      if time.perf_counter() - proc_loop_start > MAX_WORKER_LOOP_SECONDS/2:
-        continue
+        # If running behind focus on finishing
+        # TODO just make starting faster
+        if time.perf_counter() - proc_loop_start > MAX_WORKER_LOOP_SECONDS/2:
+          continue
 
-      if proc is not None:
-        continue
+        if proc is not None:
+          continue
 
-      task = None
-      if current_gpu_job is not None:
-        task = get_task(rm, r_master, r_results, current_gpu_job, job_metadatas, venvs, i, triton_client)
-      if task is None:
-        job = get_randomly_scheduled_job(jobs, job_metadatas)
-        if job is not None:
-          task = get_task(rm, r_master, r_results, job, job_metadatas, venvs, i, triton_client)
-      if task is None:
-        continue
+        task = None
+        if current_gpu_job is not None:
+          task = get_task(rm, r_master, r_results, current_gpu_job, job_metadatas, venvs, i, triton_client)
+        if task is None:
+          job = get_randomly_scheduled_job(jobs, job_metadatas)
+          if job is not None:
+            task = get_task(rm, r_master, r_results, job, job_metadatas, venvs, i, triton_client)
+        if task is None:
+          continue
 
-      print(f"[worker] starting miniray task from job {task.job} on proc{i}")
-      if task.init() and task.start():
-        procs[i] = task
-        backoff.reset()
-      else:
-        task.finish()
+        print(f"[worker] starting miniray task from job {task.job} on proc{i}")
+        if task.init() and task.start():
+          procs[i] = task
+          backoff.reset()
+        else:
+          task.finish()
+  except Exception as e:
+    print(f"[worker] fatal error, draining tasks: {e}")
+    traceback.print_exc()
 
   # send sigterm to all remaining processes
   for proc in procs.values():
