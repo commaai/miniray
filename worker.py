@@ -232,6 +232,7 @@ class Task:
         'ENABLE_MODEL_CACHE': str(int(not TRITON_SERVER_ENABLED)),
         'RESULT_FILE': str(self.result_file),
         'DISABLE_FILEREADER_CACHE': '1',
+        'PWD': str(EMPTY_DIR),
         **self.job_metadata.env,
       }
       python3_exe = str(Path(self.venv_dir) / "bin/python3")
