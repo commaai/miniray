@@ -517,27 +517,38 @@ def main():
       r_master.set(ACTIVE_KEY, 1, ex=SLEEP_TIME_MAX+1)
       backoff.sleep()
 
+      worker_loop_start = time.perf_counter()
+      timings = {'triton': 0, 'redis_sched': 0, 'reap': 0, 'get_task': 0, 'start_task': 0}
+
+      t0 = time.perf_counter()
       if triton_client is not None:
         check_triton_server_health(url=TRITON_SERVER_ADDRESS)
+      timings['triton'] = time.perf_counter() - t0
 
+      t0 = time.perf_counter()
       jobs = sorted(key.decode() for key in cast(list[bytes], r_master.keys(f"*{PIPELINE_QUEUE}")) if b":" not in key)
       update_job_metadatas(r_master, jobs, job_metadatas)
       jobs = [j for j in jobs if not job_metadatas[j].limits.get('node_whitelist') or HOST_NAME in job_metadatas[j].limits['node_whitelist']]
       current_gpu_job = get_globally_scheduled_job(r_master, jobs, job_metadatas)
+      timings['redis_sched'] = time.perf_counter() - t0
 
-      proc_loop_start = time.perf_counter()
       for i, proc in procs.items():
-        if time.perf_counter() - proc_loop_start > MAX_WORKER_LOOP_SECONDS:
+        if time.perf_counter() - worker_loop_start > MAX_WORKER_LOOP_SECONDS:
+          print(f"[worker] loop breakdown: " +
+                ", ".join(f"{k}={v:.2f}s" for k, v in sorted(timings.items(), key=lambda x: -x[1]) if v > 0.01))
           raise RuntimeError("Did not loop over processes fast enough, cannot garantuee task integrity")
 
-        if proc and proc.check_done():
-          proc.finish()
-          procs[i] = None
-          backoff.reset()
+        if proc:
+          t0 = time.perf_counter()
+          if proc.check_done():
+            proc.finish()
+            procs[i] = None
+            backoff.reset()
+          timings['reap'] += time.perf_counter() - t0
 
         # If running behind focus on finishing
         # TODO just make starting faster
-        if time.perf_counter() - proc_loop_start > MAX_WORKER_LOOP_SECONDS/2:
+        if time.perf_counter() - worker_loop_start > MAX_WORKER_LOOP_SECONDS/2:
           continue
 
         if proc is not None:
@@ -545,20 +556,26 @@ def main():
 
         task = None
         if current_gpu_job is not None:
+          t0 = time.perf_counter()
           task = get_task(rm, r_master, r_results, current_gpu_job, job_metadatas, venvs, i, triton_client)
+          timings['get_task'] += time.perf_counter() - t0
         if task is None:
           job = get_randomly_scheduled_job(jobs, job_metadatas)
           if job is not None:
+            t0 = time.perf_counter()
             task = get_task(rm, r_master, r_results, job, job_metadatas, venvs, i, triton_client)
+            timings['get_task'] += time.perf_counter() - t0
         if task is None:
           continue
 
         print(f"[worker] starting miniray task from job {task.job} on proc{i}")
+        t0 = time.perf_counter()
         if task.init() and task.start():
           procs[i] = task
           backoff.reset()
         else:
           task.finish()
+        timings['start_task'] += time.perf_counter() - t0
   except Exception as e:
     print(f"[worker] fatal error, draining tasks: {e}")
     traceback.print_exc()
