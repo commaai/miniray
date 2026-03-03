@@ -358,7 +358,6 @@ class Executor(BaseExecutor):
           self._resolve_futures(header, dat)
         if results:
           self._submit_redis_master.hdel(get_tasks_key(self.submit_queue_id), *results.keys())
-          self._last_lost_check = time.time()
         time.sleep(0.1)
       except RedisConnectionError:
         print("[ERROR] Redis connection error in miniray reader thread. Retrying in 10 seconds...", file=sys.stderr)
@@ -369,7 +368,7 @@ class Executor(BaseExecutor):
     self._last_lost_check = time.time()
     if self._futures:
       tasks_key = get_tasks_key(self.submit_queue_id)
-      sampled_task_uuids = random.sample(list(self._futures.keys()), k=min(10000, len(self._futures)))
+      sampled_task_uuids = random.sample(list(self._futures.keys()), k=min(1000, len(self._futures)))
       task_records = cast(list[Optional[bytes]], self._submit_redis_master.hmget(tasks_key, sampled_task_uuids))
 
       for task_uuid, record in zip(sampled_task_uuids, task_records, strict=True):
