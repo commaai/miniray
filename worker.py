@@ -520,10 +520,9 @@ def main():
       worker_loop_start = time.perf_counter()
       timings = {'triton': 0, 'redis_sched': 0, 'reap': 0, 'get_task': 0, 'start_task': 0}
 
-      t0 = time.perf_counter()
       if triton_client is not None:
         check_triton_server_health(url=TRITON_SERVER_ADDRESS)
-      timings['triton'] = time.perf_counter() - t0
+      timings['triton'] = time.perf_counter() - worker_loop_start
 
       t0 = time.perf_counter()
       jobs = sorted(key.decode() for key in cast(list[bytes], r_master.keys(f"*{PIPELINE_QUEUE}")) if b":" not in key)
