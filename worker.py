@@ -534,7 +534,7 @@ def main():
 
       for i, proc in procs.items():
         if time.perf_counter() - worker_loop_start > MAX_WORKER_LOOP_SECONDS:
-          print(f"[worker] loop breakdown: " +
+          print("[worker] loop breakdown: " +
                 ", ".join(f"{k}={v:.2f}s" for k, v in sorted(timings.items(), key=lambda x: -x[1]) if v > 0.01))
           raise RuntimeError("Did not loop over processes fast enough, cannot garantuee task integrity")
 
