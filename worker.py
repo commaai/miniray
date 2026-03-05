@@ -276,11 +276,14 @@ class Task:
         return False  # still waiting
 
     # Collect stdout/stderr
-    stdout, stderr = self.proc.communicate()
-    if stdout:
-      print(stdout.decode())
-    if stderr:
-      print(stderr.decode())
+    try:
+      stdout, stderr = self.proc.communicate(timeout=5)
+      if stdout:
+        print(stdout.decode())
+      if stderr:
+        print(stderr.decode())
+    except subprocess.TimeoutExpired:
+      print('Task proc communicate timed out, might be a zombie?')
 
     # Read result file
     try:
