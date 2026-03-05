@@ -324,7 +324,8 @@ class Executor(BaseExecutor):
 
   # Worker threads
 
-  def _writer_loop(self, submitted_queue: Queue[Optional[Future]], function_ptr: str, iterables: list[Iterable[Any]], chunksize: int, timeout_seconds: float) -> None:
+  def _writer_loop(self, submitted_queue: Queue[Optional[Future]], function_ptr: str,
+                   iterables: list[Iterable[Any]], chunksize: int, timeout_seconds: float) -> None:
     try:
       args_iterator = zip(*iterables, strict=True)
       assert chunksize >= 1
@@ -381,7 +382,8 @@ class Executor(BaseExecutor):
           for future in futures:
             future.set_exception(MinirayError("RuntimeError", "task lost", "", ""))
 
-  def _pack_task(self, function_ptr: str, pickled_fn: bytes, args: Sequence[Any], kwargs: dict[str, Any], task_uuid: str, timeout_seconds: float) -> tuple[str, bytes]:
+  def _pack_task(self, function_ptr: str, pickled_fn: bytes, args: Sequence[Any],
+                 kwargs: dict[str, Any], task_uuid: str, timeout_seconds: float) -> tuple[str, bytes]:
     pickled_args = cloudpickle.dumps((args, kwargs))
     if len(pickled_fn) + len(pickled_args) > MAX_ARG_STRLEN:
       raise RuntimeError(f"Can't send target, size ({len(pickled_fn) + len(pickled_args)}) exceeds max allowed length ({MAX_ARG_STRLEN})")
