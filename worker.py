@@ -36,7 +36,7 @@ from miniray.lib.triton_helpers import TRITON_SERVER_ADDRESS, check_triton_serve
 from miniray.lib.system_helpers import get_cgroup_cpu_usage, get_cgroup_mem_usage, get_gpu_stats, get_gpu_mem_usage, get_gpu_utilization
 from miniray.lib.statsd_helpers import statsd
 from miniray.lib.helpers import Limits, desc, GB_TO_BYTES, MAX_WORKER_LOOP_SECONDS, TASK_TIMEOUT_GRACE_SECONDS, JOB_CACHE_SIZE
-from miniray.lib.uv import sync_venv_cache, cleanup_venvs
+from miniray.lib.uv import VenvManager
 from miniray.executor import MinirayResultHeader, JobMetadata, TaskRecord, TaskState, get_metadata_key, get_tasks_key
 
 
@@ -133,7 +133,7 @@ class Task:
 
   def __init__(self, task: TaskRecord, limits: Limits, proc_index: int,
                resource_manager: ResourceManager, r_master: StrictRedis, r_results: StrictRedis,
-               job_metadata: JobMetadata, venv_cache: LRU[str, str], triton_client):
+               job_metadata: JobMetadata, venv_cache: VenvManager, triton_client):
     self.task = task
     self.limits = limits
     self.proc_index = proc_index
@@ -166,10 +166,7 @@ class Task:
       if not self.job_metadata.valid:
         raise ValueError("Invalid JobMetadata, key was probably missing")
 
-      t0 = time.perf_counter()
-      ensure_venv(self.job, self.job_metadata.codedir, self.venv_cache)
       self.venv_dir = self.venv_cache[self.job]
-      self.init_timings["venv"] = time.perf_counter() - t0
 
       # Fetch function if needed
       t0 = time.perf_counter()
@@ -440,7 +437,7 @@ def update_job_metadatas(r_master: StrictRedis, jobs: list[str], job_metadatas: 
         job_metadatas[job] = JobMetadata(False, 1, "", "", Limits().asdict(), {})
 
 def get_task(resource_manager: ResourceManager, r_master: StrictRedis,
-             r_results: StrictRedis, job: str, job_metadatas: LRU[str, JobMetadata], venvs: LRU,
+             r_results: StrictRedis, job: str, job_metadatas: LRU[str, JobMetadata], venvs: VenvManager,
              proc_index: int, triton_client) -> Optional[Task]:
   limits = Limits(**job_metadatas[job].limits)
   temp_key = f"{job}-pending"
@@ -477,14 +474,6 @@ def get_task(resource_manager: ResourceManager, r_master: StrictRedis,
 def sig_callback(signal):
   print(f"[worker] cleaning up on signal: {signal} ...")
 
-def ensure_venv(job: str, codedir: str, venv_cache: LRU):
-  if job not in venv_cache and Path(codedir).exists():
-    venv_dir = str(sync_venv_cache(codedir, TASK_UID, job))
-    venv_cache[job] = venv_dir
-    cleanup_venvs(TASK_UID, keep_venvs=list(venv_cache.keys()))
-  assert job in venv_cache, f"Failed to find venv in cache, {codedir} exists: {Path(codedir).exists()}"
-
-
 def main():
   setup_global_dirs()
 
@@ -492,7 +481,7 @@ def main():
   triton_client = InferenceServerClient(TRITON_SERVER_ADDRESS, verbose=False) if TRITON_SERVER_ENABLED else None
   rm = ResourceManager(triton_client=triton_client)
 
-  venvs: LRU[str, str] = LRU(JOB_CACHE_SIZE)
+  venvs = VenvManager(TASK_UID, JOB_CACHE_SIZE)
   job_metadatas: LRU[str, JobMetadata] = LRU(JOB_CACHE_SIZE)
 
   print(f"[worker] REDIS:                 {REDIS_HOST}")
@@ -545,6 +534,11 @@ def main():
       current_gpu_job = get_globally_scheduled_job(r_master, jobs, job_metadatas)
       timings['redis_sched'] = time.perf_counter() - t0
 
+      # Sync venvs for new jobs (non-blocking)
+      for job in jobs:
+        venvs.sync(job, job_metadatas[job].codedir)
+      venvs.poll()
+
       for i, proc in procs.items():
         if time.perf_counter() - worker_loop_start > MAX_WORKER_LOOP_SECONDS:
           start_breakdown = ", ".join(f"{k}={v:.2f}s" for k, v in sorted(last_init_timings.items(), key=lambda x: -x[1])) if last_init_timings else "n/a"
@@ -570,12 +564,13 @@ def main():
           continue
 
         task = None
-        if current_gpu_job is not None:
+        if current_gpu_job is not None and current_gpu_job in venvs:
           t0 = time.perf_counter()
           task = get_task(rm, r_master, r_results, current_gpu_job, job_metadatas, venvs, i, triton_client)
           timings['get_task'] += time.perf_counter() - t0
         if task is None:
-          job = get_randomly_scheduled_job(jobs, job_metadatas)
+          ready_jobs = [j for j in jobs if j in venvs]
+          job = get_randomly_scheduled_job(ready_jobs, job_metadatas)
           if job is not None:
             t0 = time.perf_counter()
             task = get_task(rm, r_master, r_results, job, job_metadatas, venvs, i, triton_client)
