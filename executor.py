@@ -240,16 +240,20 @@ class Executor(BaseExecutor):
     self._last_lost_check: float = time.time()
 
     self.executor = socket.gethostname()
-    job_metadata = JobMetadata(
-      True,
-      self.config.priority,
-      self.codedir,
-      self.executor,
-      self.config.limits.asdict(),
-      self.config.env,
-    )
-    self._submit_redis_master.set(get_metadata_key(self.submit_queue_id), json.dumps(job_metadata), ex=7*24*60*60)
+    self.update_job_metadata()
 
+  def update_job_metadata(self, **kwargs):
+    job_metadata_kwargs = {
+      'valid': True,
+      'priority': self.config.priority,
+      'codedir': self.codedir,
+      'executor': self.executor,
+      'limits': self.config.limits.asdict(),
+      'env': self.config.env
+    }
+    job_metadata_kwargs.update(kwargs)
+    job_metadata = JobMetadata(**job_metadata_kwargs)
+    self._submit_redis_master.set(get_metadata_key(self.submit_queue_id), json.dumps(job_metadata), ex=7*24*60*60)
 
   def __enter__(self):
     self._shutdown_writer_threads = False
@@ -303,6 +307,10 @@ class Executor(BaseExecutor):
 
   def fmap(self, fn: Callable, *iterables: Iterable[Any], chunksize: int = 1) -> Iterator[Future]:
     assert not self._shutdown_reader_thread, "Cannot submit new tasks after shutdown has started"
+
+    scaled_limits = {**self.config.limits.asdict()}
+    scaled_limits['timeout_seconds'] *= chunksize
+    self.update_job_metadata(limits=scaled_limits)
 
     # Instead of sending the function along with every request, we cache it in redis and send the cache key in its place
     pickled_fn = cloudpickle.dumps(partial(_execute_batch, fn))
