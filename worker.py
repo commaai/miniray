@@ -261,7 +261,7 @@ class Task:
     if self._done:
       return True
 
-    self._timed_out = time.perf_counter() > self.start_time + self.limits.timeout_seconds
+    self._timed_out = time.perf_counter() > self.start_time + self.task.timeout_seconds
 
     # Wait for the process to terminate
     if self.proc.returncode is None:
@@ -291,7 +291,7 @@ class Task:
 
     # Determine result/error state
     if self._timed_out:
-      self._error = ("TimeoutError", f"TimeoutError: task timed out after {self.limits.timeout_seconds} seconds")
+      self._error = ("TimeoutError", f"TimeoutError: task timed out after {self.task.timeout_seconds} seconds")
     elif self.proc.returncode != 0 and exiting:
       self._error = ("WorkerShutdown", "task killed due to worker shutdown")
     elif self.proc.returncode != 0:
@@ -345,7 +345,7 @@ class Task:
       uuid=self.task_uuid, job=self.job, executor=self.task.executor, function_ptr=self.task.function_ptr,
       pickled_fn='', pickled_args='',
       state=TaskState.DONE, worker=WORKER_ID,
-      submitted_at=0.0, started_at=self.start_time,
+      submitted_at=0.0, started_at=self.start_time, timeout_seconds=self.task.timeout_seconds,
     )
     self.r_master.hsetex(tasks_key, self.task_uuid, json.dumps(done_record), ex=3600)
 
@@ -454,7 +454,7 @@ def get_task(resource_manager: ResourceManager, r_master: StrictRedis,
   record = TaskRecord(*json.loads(task_data))
 
   # Transition pending -> working with TTL = timeout + grace
-  ttl = int(limits.timeout_seconds + MAX_WORKER_LOOP_SECONDS + TASK_TIMEOUT_GRACE_SECONDS)
+  ttl = int(record.timeout_seconds + MAX_WORKER_LOOP_SECONDS + TASK_TIMEOUT_GRACE_SECONDS)
   working_record = record._replace(state=TaskState.WORKING, worker=WORKER_ID, started_at=time.time())
   r_master.hsetex(tasks_key, record.uuid, json.dumps(working_record), ex=ttl)
   resource_manager.rekey(temp_key, record.uuid)

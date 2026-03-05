@@ -79,6 +79,7 @@ class TaskRecord(NamedTuple):
   worker: str
   submitted_at: float
   started_at: float
+  timeout_seconds: float
 
 class JobMetadata(NamedTuple):
   valid: bool
@@ -289,20 +290,22 @@ class Executor(BaseExecutor):
     future: Future = Future()
     task_uuid = str(uuid.uuid4())
     pickled_fn = cloudpickle.dumps(partial(_execute_batch, fn))
-    task = self._pack_task('', pickled_fn, [args], kwargs, task_uuid)
+    timeout_seconds = self.config.limits.timeout_seconds
+    task = self._pack_task('', pickled_fn, [args], kwargs, task_uuid, timeout_seconds)
     self._submit_tasks([task])
     self._futures[task_uuid] = ([future], True)
     return future
 
   def map(self, fn: Callable, *iterables: Iterable[Any], timeout: Optional[float] = None, chunksize: int = 1) -> Iterator[Any]:
     if timeout is not None:
-      raise NotImplementedError("Timeout arg is not supported. Use `fmap` instead to get a timeout per task.")
+      raise NotImplementedError("Timeout arg is not supported.")
     # submit all tasks first, then resolve the results lazily
     futures = list(self.fmap(fn, *iterables, chunksize=chunksize))
     return (future.result() for future in futures)
 
   def fmap(self, fn: Callable, *iterables: Iterable[Any], chunksize: int = 1) -> Iterator[Future]:
     assert not self._shutdown_reader_thread, "Cannot submit new tasks after shutdown has started"
+    timeout_seconds = self.config.limits.timeout_seconds * chunksize
 
     # Instead of sending the function along with every request, we cache it in redis and send the cache key in its place
     pickled_fn = cloudpickle.dumps(partial(_execute_batch, fn))
@@ -310,7 +313,7 @@ class Executor(BaseExecutor):
     self._submit_redis_master.set(function_ptr, pickled_fn, ex=7*24*60*60)
 
     submitted_queue: Queue[Optional[Future]] = Queue()
-    writer_thread = threading.Thread(target=self._writer_loop, args=(submitted_queue, function_ptr, list(iterables), chunksize), daemon=True)
+    writer_thread = threading.Thread(target=self._writer_loop, args=(submitted_queue, function_ptr, list(iterables), chunksize, timeout_seconds), daemon=True)
     writer_thread.start()
     self._writer_threads.append(writer_thread)
     while future := submitted_queue.get():
@@ -321,7 +324,7 @@ class Executor(BaseExecutor):
 
   # Worker threads
 
-  def _writer_loop(self, submitted_queue: Queue[Optional[Future]], function_ptr: str, iterables: list[Iterable[Any]], chunksize: int) -> None:
+  def _writer_loop(self, submitted_queue: Queue[Optional[Future]], function_ptr: str, iterables: list[Iterable[Any]], chunksize: int, timeout_seconds: float) -> None:
     try:
       args_iterator = zip(*iterables, strict=True)
       assert chunksize >= 1
@@ -336,7 +339,7 @@ class Executor(BaseExecutor):
           for future in task_futures[task_uuid]:
             submitted_queue.put(future)
         self._futures.update({task_uuid: (futures, False) for task_uuid, futures in task_futures.items()})  # mark as unsubmitted
-        self._submit_tasks([self._pack_task(function_ptr, b'', args, {}, task_uuid) for task_uuid, args in task_args.items()])
+        self._submit_tasks([self._pack_task(function_ptr, b'', args, {}, task_uuid, timeout_seconds) for task_uuid, args in task_args.items()])
         self._futures.update({task_uuid: (futures, True) for task_uuid, futures in task_futures.items()})  # mark as submitted
 
       submitted_queue.put(None)  # Signal the end of the stream
@@ -378,7 +381,7 @@ class Executor(BaseExecutor):
           for future in futures:
             future.set_exception(MinirayError("RuntimeError", "task lost", "", ""))
 
-  def _pack_task(self, function_ptr: str, pickled_fn: bytes, args: Sequence[Any], kwargs: dict[str, Any], task_uuid: str) -> tuple[str, bytes]:
+  def _pack_task(self, function_ptr: str, pickled_fn: bytes, args: Sequence[Any], kwargs: dict[str, Any], task_uuid: str, timeout_seconds: float) -> tuple[str, bytes]:
     pickled_args = cloudpickle.dumps((args, kwargs))
     if len(pickled_fn) + len(pickled_args) > MAX_ARG_STRLEN:
       raise RuntimeError(f"Can't send target, size ({len(pickled_fn) + len(pickled_args)}) exceeds max allowed length ({MAX_ARG_STRLEN})")
@@ -393,6 +396,7 @@ class Executor(BaseExecutor):
       worker='',
       submitted_at=time.time(),
       started_at=0.0,
+      timeout_seconds=timeout_seconds,
     )
     return (task_uuid, json.dumps(record, ensure_ascii=False).encode('utf-8'))
 
