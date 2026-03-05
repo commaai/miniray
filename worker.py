@@ -496,6 +496,7 @@ def main():
   print(f"[worker] SMALL GPU RAM:         {sum(gpu.memory for gpu in rm.small_gpus)/1e9:.2f} GB")
   print(f"[worker] TRITON_SERVER_ENABLED: {TRITON_SERVER_ENABLED}")
 
+  fatal_error = None
   cgroup_create(CGROUP_NODE)
   cgroup_set_subcontrollers(CGROUP_NODE, CGROUP_CONTROLLERS)
   cgroup_set_memory_limit(CGROUP_NODE, sum(rm.mem_totals.values()))
@@ -579,21 +580,25 @@ def main():
           task.finish()
         timings['start_task'] += time.perf_counter() - t0
   except Exception as e:
-    print(f"[worker] fatal error, draining tasks: {e}")
-    traceback.print_exc()
+    fatal_error = e
+  finally:
+    # send sigterm to all remaining processes
+    for proc in procs.values():
+      if proc and proc.proc:
+        os.killpg(proc.proc.pid, signal.SIGTERM)
 
-  # send sigterm to all remaining processes
-  for proc in procs.values():
-    if proc and proc.proc:
-      os.killpg(proc.proc.pid, signal.SIGTERM)
+    # wait for tasks to finish
+    while any(procs.values()):
+      for i, proc in procs.items():
+        if proc and proc.check_done(exiting=True):
+          proc.finish(ignore_errors=True)
+          procs[i] = None
+      time.sleep(1)
 
-  # wait for tasks to finish
-  while any(procs.values()):
-    for i, proc in procs.items():
-      if proc and proc.check_done(exiting=True):
-        proc.finish(ignore_errors=True)
-        procs[i] = None
-    time.sleep(1)
+    if fatal_error is not None:
+      raise fatal_error
+    else:
+      print(f"[worker] exited due to signal: {sigterm_handler.raised}")
 
 
 if __name__ == '__main__':
