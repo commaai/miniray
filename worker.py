@@ -277,7 +277,7 @@ class Task:
 
     # Collect stdout/stderr
     try:
-      stdout, stderr = proc.communicate(timeout=5)
+      stdout, stderr = self.proc.communicate(timeout=5)
       if stdout:
         print(stdout.decode())
       if stderr:
