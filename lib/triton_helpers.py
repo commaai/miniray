@@ -19,22 +19,13 @@ TRITON_REDIS_HOST = os.getenv('TRITON_REDIS_HOST', '127.0.0.1')
 TRITON_SERVER_ADDRESS = os.getenv('TRITON_SERVER_ADDRESS', '127.0.0.1:8000')
 TRITON_MODEL_REPOSITORY = Path(os.getenv('TRITON_MODEL_REPOSITORY', '/dev/shm/model-repository'))
 
-CONNECTION_ERR_MSG = """
-Unable to connect to the triton server at {url}.
- - If this occurs on your workstation, make sure the triton server is active.
- - If this occurs on a worker, it may indicate that the server has crashed.
-""".strip()
-
 IOConfig = TypedDict('IOConfig', {'name': str, 'data_type': str, 'dims': list[int]})
 ModelConfig = TypedDict('ModelConfig', {'input': list[IOConfig], 'output': list[IOConfig]})
 
 def check_triton_server_health(url: str, timeout: int = 10, scheme: str = "http") -> None:
   if "://" not in url:
     url = f"{scheme}://{url}"
-  try:
-    urllib.request.urlopen(f"{url}/v2/health/live", timeout=timeout)
-  except (urllib.error.URLError, ConnectionError) as e:
-    raise AssertionError(CONNECTION_ERR_MSG.format(url=url)) from e
+  urllib.request.urlopen(f"{url}/v2/health/live", timeout=timeout)
 
 wait_for_triton_server = retry(stop=stop_after_delay(60), wait=wait_fixed(2), reraise=True)(check_triton_server_health)
 

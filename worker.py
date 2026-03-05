@@ -150,6 +150,7 @@ class Task:
     self._timed_out = False
     self._task_result = b''
     self._error = None
+    self.init_timings = {}
 
   @property
   def job(self):
@@ -165,10 +166,13 @@ class Task:
       if not self.job_metadata.valid:
         raise ValueError("Invalid JobMetadata, key was probably missing")
 
+      t0 = time.perf_counter()
       ensure_venv(self.job, self.job_metadata.codedir, self.venv_cache)
       self.venv_dir = self.venv_cache[self.job]
+      self.init_timings["venv"] = time.perf_counter() - t0
 
       # Fetch function if needed
+      t0 = time.perf_counter()
       if self.task.function_ptr:
         pickled_fn = cast(Optional[bytes], self.r_master.get(self.task.function_ptr))
         if pickled_fn is None:
@@ -179,6 +183,7 @@ class Task:
       else:
         self.pickled_fn = base64.b64decode(self.task.pickled_fn)
       self.pickled_args = base64.b64decode(self.task.pickled_args)
+      self.init_timings["fetch"] = time.perf_counter() - t0
 
       self.alloc_id = f"proc{self.proc_index:0>3}"
       self.task_gid = grp.getgrnam(self.alloc_id).gr_gid
@@ -189,10 +194,12 @@ class Task:
       self.numa_node = self.rm.get_numa_node(self.task_uuid)
       self.big_gpu_id, self.small_gpu_id = self.rm.get_gpu_ids(self.task_uuid)
 
+      t0 = time.perf_counter()
       cgroup_create(self.cgroup_name)
       cgroup_set_numa_nodes(self.cgroup_name, [self.numa_node])
       cgroup_set_memory_limit(self.cgroup_name, mem_limit_bytes)
       create_tmp_dir(self.tmp_dir, TASK_UID, self.task_gid)
+      self.init_timings["cgroup"] = time.perf_counter() - t0
 
       self.result_file = self.tmp_dir / "task_result"
       return True
@@ -240,6 +247,7 @@ class Task:
       p_args = [python3_exe, str(SCRIPT_DIR / "lib/worker_task.py")]
       if DEBUG: print("[worker]", " ".join(p_args))
 
+      t0 = time.perf_counter()
       self.proc = subprocess.Popen(p_args, user=0, group=self.task_gid, extra_groups=task_extra_groups, cwd=str(EMPTY_DIR), env=p_env,
                                    start_new_session=True, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
       cgroup_add_pid(self.cgroup_name, self.proc.pid)
@@ -249,6 +257,7 @@ class Task:
       stdin.write(self.pickled_args)
       stdin.close()
       self.proc.stdin = None
+      self.init_timings["popen"] = time.perf_counter() - t0
       return True
     except BaseException as e:
       traceback.print_exc()
@@ -496,6 +505,7 @@ def main():
   print(f"[worker] SMALL GPU RAM:         {sum(gpu.memory for gpu in rm.small_gpus)/1e9:.2f} GB")
   print(f"[worker] TRITON_SERVER_ENABLED: {TRITON_SERVER_ENABLED}")
 
+  fatal_error = None
   cgroup_create(CGROUP_NODE)
   cgroup_set_subcontrollers(CGROUP_NODE, CGROUP_CONTROLLERS)
   cgroup_set_memory_limit(CGROUP_NODE, sum(rm.mem_totals.values()))
@@ -521,6 +531,7 @@ def main():
       backoff.sleep()
 
       worker_loop_start = time.perf_counter()
+      last_init_timings = {}
       timings = {'triton': 0, 'redis_sched': 0, 'reap': 0, 'get_task': 0, 'start_task': 0}
 
       if triton_client is not None:
@@ -536,8 +547,10 @@ def main():
 
       for i, proc in procs.items():
         if time.perf_counter() - worker_loop_start > MAX_WORKER_LOOP_SECONDS:
+          start_breakdown = ", ".join(f"{k}={v:.2f}s" for k, v in sorted(last_init_timings.items(), key=lambda x: -x[1])) if last_init_timings else "n/a"
           print("[worker] loop breakdown: " +
-                ", ".join(f"{k}={v:.2f}s" for k, v in sorted(timings.items(), key=lambda x: -x[1]) if v > 0.01))
+                ", ".join(f"{k}={v:.2f}s" for k, v in sorted(timings.items(), key=lambda x: -x[1]) if v > 0.01) +
+                f" | last start_task: {start_breakdown}")
           raise RuntimeError("Did not loop over processes fast enough, cannot garantuee task integrity")
 
         if proc:
@@ -578,22 +591,27 @@ def main():
         else:
           task.finish()
         timings['start_task'] += time.perf_counter() - t0
+        last_init_timings = task.init_timings
   except Exception as e:
-    print(f"[worker] fatal error, draining tasks: {e}")
-    traceback.print_exc()
+    fatal_error = e
+  finally:
+    # send sigterm to all remaining processes
+    for proc in procs.values():
+      if proc and proc.proc:
+        os.killpg(proc.proc.pid, signal.SIGTERM)
 
-  # send sigterm to all remaining processes
-  for proc in procs.values():
-    if proc and proc.proc:
-      os.killpg(proc.proc.pid, signal.SIGTERM)
+    # wait for tasks to finish
+    while any(procs.values()):
+      for i, proc in procs.items():
+        if proc and proc.check_done(exiting=True):
+          proc.finish(ignore_errors=True)
+          procs[i] = None
+      time.sleep(1)
 
-  # wait for tasks to finish
-  while any(procs.values()):
-    for i, proc in procs.items():
-      if proc and proc.check_done(exiting=True):
-        proc.finish(ignore_errors=True)
-        procs[i] = None
-    time.sleep(1)
+    if fatal_error is not None:
+      raise fatal_error
+    else:
+      print(f"[worker] exited due to signal: {sigterm_handler.raised}")
 
 
 if __name__ == '__main__':
