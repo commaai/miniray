@@ -20,6 +20,7 @@ import subprocess
 import grp
 import stat
 import shutil
+from concurrent.futures import ThreadPoolExecutor, Future
 import numpy as np
 from lru import LRU
 from pathlib import Path
@@ -166,11 +167,6 @@ class Task:
       if not self.job_metadata.valid:
         raise ValueError("Invalid JobMetadata, key was probably missing")
 
-      t0 = time.perf_counter()
-      ensure_venv(self.job, self.job_metadata.codedir, self.venv_cache)
-      self.venv_dir = self.venv_cache[self.job]
-      self.init_timings["venv"] = time.perf_counter() - t0
-
       # Fetch function if needed
       t0 = time.perf_counter()
       if self.task.function_ptr:
@@ -242,7 +238,7 @@ class Task:
         'PWD': str(EMPTY_DIR),
         **self.job_metadata.env,
       }
-      python3_exe = str(Path(self.venv_dir) / "bin/python3")
+      python3_exe = str(Path(self.venv_cache[self.job]) / "bin/python3")
 
       p_args = [python3_exe, str(SCRIPT_DIR / "lib/worker_task.py")]
       if DEBUG: print("[worker]", " ".join(p_args))
@@ -477,12 +473,18 @@ def get_task(resource_manager: ResourceManager, r_master: StrictRedis,
 def sig_callback(signal):
   print(f"[worker] cleaning up on signal: {signal} ...")
 
-def ensure_venv(job: str, codedir: str, venv_cache: LRU):
-  if job not in venv_cache and Path(codedir).exists():
-    venv_dir = str(sync_venv_cache(codedir, TASK_UID, job))
-    venv_cache[job] = venv_dir
+def ensure_venv(job: str, codedir: str, venv_cache: LRU, pending: dict, executor: ThreadPoolExecutor):
+  if job in venv_cache:
+    return
+  if job in pending:
+    if not pending[job].done():
+      return
+    venv_cache[job] = str(pending.pop(job).result())
     cleanup_venvs(TASK_UID, keep_venvs=list(venv_cache.keys()))
-  assert job in venv_cache, f"Failed to find venv in cache, {codedir} exists: {Path(codedir).exists()}"
+    return
+  if len(pending) == 0 and Path(codedir).exists():
+    assert Path(codedir).exists(),  f"Codedir, {codedir} doesn't exist"
+    pending[job] = executor.submit(sync_venv_cache, codedir, TASK_UID, job)
 
 
 def main():
@@ -493,6 +495,8 @@ def main():
   rm = ResourceManager(triton_client=triton_client)
 
   venvs: LRU[str, str] = LRU(JOB_CACHE_SIZE)
+  venv_executor = ThreadPoolExecutor(max_workers=1)
+  pending_venv_syncs: dict[str, Future] = {}
   job_metadatas: LRU[str, JobMetadata] = LRU(JOB_CACHE_SIZE)
 
   print(f"[worker] REDIS:                 {REDIS_HOST}")
@@ -532,7 +536,7 @@ def main():
 
       worker_loop_start = time.perf_counter()
       last_init_timings = {}
-      timings = {'triton': 0, 'redis_sched': 0, 'reap': 0, 'get_task': 0, 'start_task': 0}
+      timings = {'triton': 0.0, 'redis_sched': 0.0, 'reap': 0.0, 'get_task': 0.0, 'start_task': 0.0}
 
       if triton_client is not None:
         check_triton_server_health(url=TRITON_SERVER_ADDRESS)
@@ -544,6 +548,9 @@ def main():
       jobs = [j for j in jobs if not job_metadatas[j].limits.get('node_whitelist') or HOST_NAME in job_metadatas[j].limits['node_whitelist']]
       current_gpu_job = get_globally_scheduled_job(r_master, jobs, job_metadatas)
       timings['redis_sched'] = time.perf_counter() - t0
+
+      for job in jobs:
+        ensure_venv(job, job_metadatas[job].codedir, venvs, pending_venv_syncs, venv_executor)
 
       for i, proc in procs.items():
         if time.perf_counter() - worker_loop_start > MAX_WORKER_LOOP_SECONDS:
@@ -570,12 +577,13 @@ def main():
           continue
 
         task = None
-        if current_gpu_job is not None:
+        if current_gpu_job is not None and current_gpu_job in venvs:
           t0 = time.perf_counter()
           task = get_task(rm, r_master, r_results, current_gpu_job, job_metadatas, venvs, i, triton_client)
           timings['get_task'] += time.perf_counter() - t0
         if task is None:
-          job = get_randomly_scheduled_job(jobs, job_metadatas)
+          ready_jobs = [j for j in jobs if j in venvs]
+          job = get_randomly_scheduled_job(ready_jobs, job_metadatas)
           if job is not None:
             t0 = time.perf_counter()
             task = get_task(rm, r_master, r_results, job, job_metadatas, venvs, i, triton_client)
