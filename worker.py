@@ -496,7 +496,7 @@ def ensure_venv(job: str, codedir: str, venv_cache: LRU, pending: dict):
     print(f"[worker] venv sync retry {retries}/{N_RETRIES} for {job}: {stderr}")
     pending[job] = (start_venv_sync(codedir, TASK_UID, job), retries)
     return
-  if Path(codedir).exists():
+  if not pending and Path(codedir).exists():
     pending[job] = (start_venv_sync(codedir, TASK_UID, job), 0)
 
 
