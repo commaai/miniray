@@ -473,18 +473,21 @@ def get_task(resource_manager: ResourceManager, r_master: StrictRedis,
 def sig_callback(signal):
   print(f"[worker] cleaning up on signal: {signal} ...")
 
+def sync_venv_cache_and_cleanup(job: str, codedir: str, venv_cache: LRU):
+  venv_path = str(sync_venv_cache(codedir, TASK_UID, job))
+  cleanup_venvs(TASK_UID, keep_venvs=list(venv_cache.keys())+[job,])
+  return venv_path
+
 def ensure_venv(job: str, codedir: str, venv_cache: LRU, pending: dict, executor: ThreadPoolExecutor):
   if job in venv_cache:
-    return
-  if job in pending:
-    if not pending[job].done():
-      return
-    venv_cache[job] = str(pending.pop(job).result())
-    cleanup_venvs(TASK_UID, keep_venvs=list(venv_cache.keys()))
-    return
-  if len(pending) == 0 and Path(codedir).exists():
+    pass
+  elif job in pending and not pending[job].done():
+    pass
+  elif job in pending and pending[job].done():
+    venv_cache[job] = pending.pop(job).result()
+  elif len(pending) == 0: # sync and cleanup is not thread-safe, can only do one at a time
     assert Path(codedir).exists(),  f"Codedir, {codedir} doesn't exist"
-    pending[job] = executor.submit(sync_venv_cache, codedir, TASK_UID, job)
+    pending[job] = executor.submit(sync_venv_cache_and_cleanup, job, codedir, venv_cache)
 
 
 def main():
