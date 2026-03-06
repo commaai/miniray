@@ -167,8 +167,6 @@ class Task:
       if not self.job_metadata.valid:
         raise ValueError("Invalid JobMetadata, key was probably missing")
 
-      self.venv_dir = self.venv_cache[self.job]
-
       # Fetch function if needed
       t0 = time.perf_counter()
       if self.task.function_ptr:
@@ -240,7 +238,7 @@ class Task:
         'PWD': str(EMPTY_DIR),
         **self.job_metadata.env,
       }
-      python3_exe = str(Path(self.venv_dir) / "bin/python3")
+      python3_exe = str(Path(self.venv_cache[self.job]) / "bin/python3")
 
       p_args = [python3_exe, str(SCRIPT_DIR / "lib/worker_task.py")]
       if DEBUG: print("[worker]", " ".join(p_args))
@@ -479,17 +477,14 @@ def ensure_venv(job: str, codedir: str, venv_cache: LRU, pending: dict, executor
   if job in venv_cache:
     return
   if job in pending:
-    fut = pending[job]
-    if not fut.done():
+    if not pending[job].done():
       return
     del pending[job]
-    try:
-      venv_cache[job] = str(fut.result())
-      cleanup_venvs(TASK_UID, keep_venvs=list(venv_cache.keys()))
-    except Exception as e:
-      print(f"[worker] venv sync failed for {job}: {e}")
+    venv_cache[job] = str(pending[job].result())
+    cleanup_venvs(TASK_UID, keep_venvs=list(venv_cache.keys()))
     return
-  if not pending and Path(codedir).exists():
+  if len(pending) == 0 and Path(codedir).exists():
+    assert Path(codedir).exists(),  f"Codedir, {codedir} doesn't exist"
     pending[job] = executor.submit(sync_venv_cache, codedir, TASK_UID, job)
 
 
@@ -542,7 +537,7 @@ def main():
 
       worker_loop_start = time.perf_counter()
       last_init_timings = {}
-      timings = {'triton': 0, 'redis_sched': 0, 'reap': 0, 'get_task': 0, 'start_task': 0}
+      timings = {'triton': 0.0, 'redis_sched': 0.0, 'reap': 0.0, 'get_task': 0.0, 'start_task': 0.0}
 
       if triton_client is not None:
         check_triton_server_health(url=TRITON_SERVER_ADDRESS)
