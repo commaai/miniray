@@ -38,15 +38,6 @@ def sync_venv_cache(codedir: Union[str, Path], user_id: int, venv_name: str):
   raise ValueError(f"Failed syncing venv={venv_dir} to {codedir} {N_RETRIES} times \n" + "\n".join(errs))
 
 
-def start_venv_sync(codedir: Union[str, Path], user_id: int, venv_name: str) -> subprocess.Popen:
-  venv_dir = base_venv_path(user_id) / venv_name
-  sync_cmd = ['uv', 'sync', '--project', str(codedir), '--frozen']
-  if os.getenv('CI'):
-    sync_cmd += ['--link-mode', 'symlink'] # hardlinking is slow in docker
-  return subprocess.Popen(sync_cmd, env={**os.environ, 'UV_PROJECT_ENVIRONMENT': str(venv_dir)},
-                          user=user_id, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-
-
 def cleanup_venvs(user_id: int, keep_venvs: list[str]):
   base_dir = base_venv_path(user_id)
   if not base_dir.exists():

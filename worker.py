@@ -20,6 +20,7 @@ import subprocess
 import grp
 import stat
 import shutil
+from concurrent.futures import ThreadPoolExecutor, Future
 import numpy as np
 from lru import LRU
 from pathlib import Path
@@ -36,7 +37,7 @@ from miniray.lib.triton_helpers import TRITON_SERVER_ADDRESS, check_triton_serve
 from miniray.lib.system_helpers import get_cgroup_cpu_usage, get_cgroup_mem_usage, get_gpu_stats, get_gpu_mem_usage, get_gpu_utilization
 from miniray.lib.statsd_helpers import statsd
 from miniray.lib.helpers import Limits, desc, GB_TO_BYTES, MAX_WORKER_LOOP_SECONDS, TASK_TIMEOUT_GRACE_SECONDS, JOB_CACHE_SIZE
-from miniray.lib.uv import start_venv_sync, cleanup_venvs, base_venv_path, parse_uv_sync_stderr, N_RETRIES
+from miniray.lib.uv import sync_venv_cache, cleanup_venvs
 from miniray.executor import MinirayResultHeader, JobMetadata, TaskRecord, TaskState, get_metadata_key, get_tasks_key
 
 
@@ -474,30 +475,22 @@ def get_task(resource_manager: ResourceManager, r_master: StrictRedis,
 def sig_callback(signal):
   print(f"[worker] cleaning up on signal: {signal} ...")
 
-def ensure_venv(job: str, codedir: str, venv_cache: LRU, pending: dict):
+def ensure_venv(job: str, codedir: str, venv_cache: LRU, pending: dict, executor: ThreadPoolExecutor):
   if job in venv_cache:
     return
   if job in pending:
-    proc, retries = pending[job]
-    if proc.poll() is None:
+    fut = pending[job]
+    if not fut.done():
       return
     del pending[job]
-    if proc.returncode == 0:
-      venv_cache[job] = str(base_venv_path(TASK_UID) / job)
+    try:
+      venv_cache[job] = str(fut.result())
       cleanup_venvs(TASK_UID, keep_venvs=list(venv_cache.keys()))
-      return
-    stderr = parse_uv_sync_stderr(proc.stderr.read())
-    retries += 1
-    if retries >= N_RETRIES:
-      print(f"[worker] venv sync failed for {job} after {N_RETRIES} retries: {stderr}")
-      return
-    if retries >= 3:
-      shutil.rmtree(base_venv_path(TASK_UID) / job, ignore_errors=True)
-    print(f"[worker] venv sync retry {retries}/{N_RETRIES} for {job}: {stderr}")
-    pending[job] = (start_venv_sync(codedir, TASK_UID, job), retries)
+    except Exception as e:
+      print(f"[worker] venv sync failed for {job}: {e}")
     return
   if not pending and Path(codedir).exists():
-    pending[job] = (start_venv_sync(codedir, TASK_UID, job), 0)
+    pending[job] = executor.submit(sync_venv_cache, codedir, TASK_UID, job)
 
 
 def main():
@@ -508,7 +501,8 @@ def main():
   rm = ResourceManager(triton_client=triton_client)
 
   venvs: LRU[str, str] = LRU(JOB_CACHE_SIZE)
-  pending_venv_syncs: dict[str, tuple[subprocess.Popen, int]] = {}
+  venv_executor = ThreadPoolExecutor(max_workers=1)
+  pending_venv_syncs: dict[str, Future] = {}
   job_metadatas: LRU[str, JobMetadata] = LRU(JOB_CACHE_SIZE)
 
   print(f"[worker] REDIS:                 {REDIS_HOST}")
@@ -562,7 +556,7 @@ def main():
       timings['redis_sched'] = time.perf_counter() - t0
 
       for job in jobs:
-        ensure_venv(job, job_metadatas[job].codedir, venvs, pending_venv_syncs)
+        ensure_venv(job, job_metadatas[job].codedir, venvs, pending_venv_syncs, venv_executor)
 
       for i, proc in procs.items():
         if time.perf_counter() - worker_loop_start > MAX_WORKER_LOOP_SECONDS:
