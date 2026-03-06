@@ -479,8 +479,7 @@ def ensure_venv(job: str, codedir: str, venv_cache: LRU, pending: dict, executor
   if job in pending:
     if not pending[job].done():
       return
-    del pending[job]
-    venv_cache[job] = str(pending[job].result())
+    venv_cache[job] = str(pending.pop(job).result())
     cleanup_venvs(TASK_UID, keep_venvs=list(venv_cache.keys()))
     return
   if len(pending) == 0 and Path(codedir).exists():
