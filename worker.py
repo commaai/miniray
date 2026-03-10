@@ -260,8 +260,6 @@ class Task:
         return False  # still waiting
       self.proc.returncode = returncode
 
-    # Kill everything in the cgroup (catches processes that escaped the
-    # process group via setsid), then collect stdout/stderr
     cgroup_kill(self.cgroup_name)
     try:
       stdout, stderr = self.proc.communicate(timeout=1)

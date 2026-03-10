@@ -194,13 +194,6 @@ def test_early_shutdown():
 
 
 def test_zombie_processes_cause_worker_loop_timeout():
-  """When tasks fork children that inherit stdout/stderr pipes and outlive the
-  main process, the worker must reap them fast enough to stay under
-  MAX_WORKER_LOOP_SECONDS. cgroup_kill before communicate ensures orphans are
-  dead and pipes are closed before we try to read them."""
-
-  # Task forks a child that inherits stdout/stderr pipes and stays alive.
-  # Parent exits immediately, orphaning the child.
   script = (
     "import os, time\n"
     "pid = os.fork()\n"
@@ -224,13 +217,8 @@ def test_zombie_processes_cause_worker_loop_timeout():
   for proc in procs:
     proc.wait()
 
-  # Simulate the worker loop's check_done path on all 256 procs.
-  # In production cgroup_kill handles the killing; here we use SIGKILL
-  # to the orphan's own session as a stand-in (cgroup_kill is strictly
-  # more powerful since it catches everything in the cgroup).
   loop_start = time.perf_counter()
   for proc in procs:
-    # cgroup_kill stand-in: kill the process group
     try:
       os.killpg(proc.pid, signal.SIGKILL)
     except ProcessLookupError:
@@ -241,6 +229,5 @@ def test_zombie_processes_cause_worker_loop_timeout():
       pass
   loop_elapsed = time.perf_counter() - loop_start
 
-  # Must stay under MAX_WORKER_LOOP_SECONDS even with 256 zombie procs
   assert loop_elapsed < MAX_WORKER_LOOP_SECONDS, \
     f"Reaping {NUM_PROCS} zombie procs took {loop_elapsed:.1f}s, exceeds {MAX_WORKER_LOOP_SECONDS}s limit"
