@@ -478,16 +478,16 @@ def sync_venv_cache_and_cleanup(job: str, codedir: str, venv_cache: LRU):
   cleanup_venvs(TASK_UID, keep_venvs=list(venv_cache.keys())+[job,])
   return venv_path
 
-def ensure_venv(job: str, codedir: str, venv_cache: LRU, pending: dict, executor: ThreadPoolExecutor):
-  if job in venv_cache:
-    pass
-  elif job in pending and not pending[job].done():
-    pass
-  elif job in pending and pending[job].done():
-    venv_cache[job] = pending.pop(job).result()
-  elif len(pending) == 0: # sync and cleanup is not thread-safe, can only do one at a time
-    assert Path(codedir).exists(),  f"Codedir, {codedir} doesn't exist"
-    pending[job] = executor.submit(sync_venv_cache_and_cleanup, job, codedir, venv_cache)
+def ensure_venvs(jobs: str, codedir: str, venv_cache: LRU, pending: dict, executor: ThreadPoolExecutor):
+  for job in pending:
+    if pending[job].done():
+      venv_cache[job] = pending.pop(job).result()
+  for job in jobs:
+    if job in venv_cache:
+      pass
+    elif len(pending) == 0: # sync and cleanup is not thread-safe, can only do one at a time
+      assert Path(codedir).exists(),  f"Codedir, {codedir} doesn't exist"
+      pending[job] = executor.submit(sync_venv_cache_and_cleanup, job, codedir, venv_cache)
 
 
 def main():
@@ -552,10 +552,7 @@ def main():
       current_gpu_job = get_globally_scheduled_job(r_master, jobs, job_metadatas)
       timings['redis_sched'] = time.perf_counter() - t0
 
-      # need to check pending venvs too so futures don't hang forever
-      jobs_check_venv = jobs + list(pending_venv_syncs.keys())
-      for job in jobs_check_venv:
-        ensure_venv(job, job_metadatas[job].codedir, venvs, pending_venv_syncs, venv_executor)
+      ensure_venvs(jobs, job_metadatas[job].codedir, venvs, pending_venv_syncs, venv_executor)
 
       for i, proc in procs.items():
         if time.perf_counter() - worker_loop_start > MAX_WORKER_LOOP_SECONDS:
