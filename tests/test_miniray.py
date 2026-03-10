@@ -202,10 +202,10 @@ def test_zombie_processes_cause_worker_loop_timeout():
     "    os._exit(0)\n"
   )
 
-  NUM_PROCS = 256
+  num_procs = 256
 
   procs = []
-  for _ in range(NUM_PROCS):
+  for _ in range(num_procs):
     proc = subprocess.Popen(
       [sys.executable, '-c', script],
       start_new_session=True,
@@ -230,4 +230,4 @@ def test_zombie_processes_cause_worker_loop_timeout():
   loop_elapsed = time.perf_counter() - loop_start
 
   assert loop_elapsed < MAX_WORKER_LOOP_SECONDS, \
-    f"Reaping {NUM_PROCS} zombie procs took {loop_elapsed:.1f}s, exceeds {MAX_WORKER_LOOP_SECONDS}s limit"
+    f"Reaping {num_procs} zombie procs took {loop_elapsed:.1f}s, exceeds {MAX_WORKER_LOOP_SECONDS}s limit"
