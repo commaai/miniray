@@ -30,6 +30,13 @@ def slow_sleep(seconds: float) -> str:
   time.sleep(seconds)
   return "done"
 
+def spawn_zombie():
+  pid = os.fork()
+  if pid == 0:
+    time.sleep(300)
+    os._exit(0)
+  return "done"
+
 def get_executor(job_name: str) -> miniray.Executor:
   return miniray.Executor(job_name=job_name,
                           priority=MINIRAY_PRIORITY,
@@ -187,3 +194,10 @@ def test_early_shutdown():
     executor.shutdown(wait=True, cancel_futures=True)
   assert time.time() - t0 < 0.5
   assert all(t and not t.is_alive() for t in executor._writer_threads + [executor._reader_thread])
+
+
+def test_zombie_processes():
+  with get_executor(job_name='miniray_test_zombie') as executor:
+    futures = [executor.submit(spawn_zombie) for _ in range(256)]
+    results = [f.result() for f in futures]
+  assert all(r == "done" for r in results)

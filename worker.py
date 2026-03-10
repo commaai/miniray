@@ -105,21 +105,6 @@ def cleanup_shm_by_gid(alloc_id, triton_client, gid):
   if tmp_dir.exists():
     shutil.rmtree(tmp_dir)
 
-def reap_process(proc):
-  try:
-    pid = -1
-    while pid != 0:
-      pid, _ = os.waitpid(-proc.pid, os.WNOHANG)
-    if not hasattr(proc, 'sigterm_sent'):
-      os.killpg(proc.pid, signal.SIGTERM)
-      proc.sigterm_sent = time.perf_counter()
-    elif proc.sigterm_sent + 20 < time.perf_counter():  # slurm sends SIGKILL after 30s, so we must finish before that
-      os.killpg(proc.pid, signal.SIGKILL)
-    return False
-  except (ChildProcessError, ProcessLookupError):
-    return True  # all processes have exited
-
-
 class Task:
   proc: Optional[subprocess.Popen]
   alloc_id: Optional[str]
@@ -275,14 +260,9 @@ class Task:
         return False  # still waiting
       self.proc.returncode = returncode
 
-    # Kill the process group and wait for it to terminate
-    if self.proc.returncode is not None or self._timed_out:
-      if not reap_process(self.proc):
-        return False  # still waiting
-
-    # Collect stdout/stderr
+    cgroup_kill(self.cgroup_name)
     try:
-      stdout, stderr = self.proc.communicate(timeout=5)
+      stdout, stderr = self.proc.communicate(timeout=1)
       if stdout:
         print(stdout.decode())
       if stderr:
