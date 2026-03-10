@@ -8,7 +8,7 @@ import pytest
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import miniray
-from miniray.worker import reap_process
+from miniray.worker import reap_process, close_proc_pipes
 from miniray.lib.helpers import MAX_WORKER_LOOP_SECONDS
 
 MINIRAY_PRIORITY = 1000
@@ -198,19 +198,21 @@ def test_zombie_processes_cause_worker_loop_timeout():
   """When tasks fork children that inherit stdout/stderr pipes and outlive the
   main process, the worker must reap them fast enough to stay under
   MAX_WORKER_LOOP_SECONDS. Currently communicate(timeout=5) blocks per-task,
-  so 13+ zombies blow past the 60s budget."""
+  so with 256 procs this blows past the 60s budget."""
 
   # Task forks a child that inherits stdout/stderr pipes and stays alive.
-  # Parent exits immediately, orphaning the child.
+  # Parent exits immediately, orphaning the child. The child calls setsid()
+  # to escape the process group, so killpg can't reach it either.
   script = (
     "import os, time\n"
     "pid = os.fork()\n"
     "if pid == 0:\n"
+    "    os.setsid()\n"
     "    time.sleep(300)\n"
     "    os._exit(0)\n"
   )
 
-  NUM_PROCS = 13  # 13 * 5s communicate timeout = 65s > MAX_WORKER_LOOP_SECONDS
+  NUM_PROCS = 256
 
   procs = []
   for _ in range(NUM_PROCS):
@@ -225,24 +227,13 @@ def test_zombie_processes_cause_worker_loop_timeout():
   for proc in procs:
     proc.wait()
 
-  # Simulate the worker loop: reap + communicate for each process,
-  # exactly as check_done does (worker.py:278-291)
+  # Simulate the worker loop's check_done path on all 256 procs
   loop_start = time.perf_counter()
   for proc in procs:
     reap_process(proc)
-    try:
-      proc.communicate(timeout=5)
-    except subprocess.TimeoutExpired:
-      pass
+    close_proc_pipes(proc)
   loop_elapsed = time.perf_counter() - loop_start
 
-  # Cleanup: kill orphans (still in their parent's process group)
-  for proc in procs:
-    try:
-      os.killpg(proc.pid, signal.SIGKILL)
-    except ProcessLookupError:
-      pass
-
-  # The worker loop must complete within MAX_WORKER_LOOP_SECONDS
+  # Must stay under MAX_WORKER_LOOP_SECONDS even with 256 zombie procs
   assert loop_elapsed < MAX_WORKER_LOOP_SECONDS, \
     f"Reaping {NUM_PROCS} zombie procs took {loop_elapsed:.1f}s, exceeds {MAX_WORKER_LOOP_SECONDS}s limit"

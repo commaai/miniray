@@ -119,6 +119,26 @@ def reap_process(proc):
   except (ChildProcessError, ProcessLookupError):
     return True  # all processes have exited
 
+def close_proc_pipes(proc):
+  """Kill any orphaned processes in the group and close pipes without blocking.
+  We avoid communicate() because orphans holding pipes open would block for the
+  full timeout, and with enough tasks that pushes the worker loop past
+  MAX_WORKER_LOOP_SECONDS."""
+  try:
+    os.killpg(proc.pid, signal.SIGKILL)
+  except (ProcessLookupError, PermissionError):
+    pass
+  for pipe in (proc.stdout, proc.stderr):
+    if pipe:
+      try:
+        os.set_blocking(pipe.fileno(), False)
+        data = pipe.read()
+        if data:
+          print(data.decode())
+      except Exception:
+        pass
+      pipe.close()
+
 
 class Task:
   proc: Optional[subprocess.Popen]
@@ -280,15 +300,7 @@ class Task:
       if not reap_process(self.proc):
         return False  # still waiting
 
-    # Collect stdout/stderr
-    try:
-      stdout, stderr = self.proc.communicate(timeout=5)
-      if stdout:
-        print(stdout.decode())
-      if stderr:
-        print(stderr.decode())
-    except subprocess.TimeoutExpired:
-      print('Task proc communicate timed out, might be a zombie?')
+    close_proc_pipes(self.proc)
 
     # Read result file
     try:
