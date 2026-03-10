@@ -487,7 +487,7 @@ def ensure_venv(job: str, codedir: str, venv_cache: LRU, pending: dict, executor
     venv_cache[job] = pending.pop(job).result()
   elif len(pending) == 0: # sync and cleanup is not thread-safe, can only do one at a time
     assert Path(codedir).exists(),  f"Codedir, {codedir} doesn't exist"
-    pending[job] = executor.submit(sync_venv_cache_and_cleanup, job, codedir, venv_cache)
+    pending[job] = executor.submit(sync_venv_cache_and_cleanup, job, codedir, venv_cache, timeout=600)
 
 
 def main():
@@ -551,8 +551,10 @@ def main():
       jobs = [j for j in jobs if not job_metadatas[j].limits.get('node_whitelist') or HOST_NAME in job_metadatas[j].limits['node_whitelist']]
       current_gpu_job = get_globally_scheduled_job(r_master, jobs, job_metadatas)
       timings['redis_sched'] = time.perf_counter() - t0
-
-      for job in jobs:
+      
+      # need to check pending venvs too so futures don't hang forever
+      jobs_check_venv = jobs + list(pending_venv_syncs.keys())
+      for job in jobs_check_venv:
         ensure_venv(job, job_metadatas[job].codedir, venvs, pending_venv_syncs, venv_executor)
 
       for i, proc in procs.items():
