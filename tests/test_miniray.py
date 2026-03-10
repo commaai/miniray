@@ -200,13 +200,11 @@ def test_zombie_processes_cause_worker_loop_timeout():
   dead and pipes are closed before we try to read them."""
 
   # Task forks a child that inherits stdout/stderr pipes and stays alive.
-  # Parent exits immediately, orphaning the child. The child calls setsid()
-  # to escape the process group, so killpg can't reach it either.
+  # Parent exits immediately, orphaning the child.
   script = (
     "import os, time\n"
     "pid = os.fork()\n"
     "if pid == 0:\n"
-    "    os.setsid()\n"
     "    time.sleep(300)\n"
     "    os._exit(0)\n"
   )
@@ -232,9 +230,9 @@ def test_zombie_processes_cause_worker_loop_timeout():
   # more powerful since it catches everything in the cgroup).
   loop_start = time.perf_counter()
   for proc in procs:
-    # cgroup_kill stand-in: kill the orphan's session
+    # cgroup_kill stand-in: kill the process group
     try:
-      os.kill(-proc.pid, signal.SIGKILL)
+      os.killpg(proc.pid, signal.SIGKILL)
     except ProcessLookupError:
       pass
     try:

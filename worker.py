@@ -264,7 +264,7 @@ class Task:
     # process group via setsid), then collect stdout/stderr
     cgroup_kill(self.cgroup_name)
     try:
-      stdout, stderr = self.proc.communicate(timeout=5)
+      stdout, stderr = self.proc.communicate(timeout=1)
       if stdout:
         print(stdout.decode())
       if stderr:
