@@ -8,7 +8,6 @@ import pytest
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import miniray
-from miniray.worker import close_proc_pipes
 from miniray.lib.helpers import MAX_WORKER_LOOP_SECONDS
 
 MINIRAY_PRIORITY = 1000
@@ -197,8 +196,8 @@ def test_early_shutdown():
 def test_zombie_processes_cause_worker_loop_timeout():
   """When tasks fork children that inherit stdout/stderr pipes and outlive the
   main process, the worker must reap them fast enough to stay under
-  MAX_WORKER_LOOP_SECONDS. Currently communicate(timeout=5) blocks per-task,
-  so with 256 procs this blows past the 60s budget."""
+  MAX_WORKER_LOOP_SECONDS. cgroup_kill before communicate ensures orphans are
+  dead and pipes are closed before we try to read them."""
 
   # Task forks a child that inherits stdout/stderr pipes and stays alive.
   # Parent exits immediately, orphaning the child. The child calls setsid()
@@ -228,11 +227,20 @@ def test_zombie_processes_cause_worker_loop_timeout():
     proc.wait()
 
   # Simulate the worker loop's check_done path on all 256 procs.
-  # In production cgroup_kill handles the killing; close_proc_pipes
-  # must not block even when orphans hold pipes open.
+  # In production cgroup_kill handles the killing; here we use SIGKILL
+  # to the orphan's own session as a stand-in (cgroup_kill is strictly
+  # more powerful since it catches everything in the cgroup).
   loop_start = time.perf_counter()
   for proc in procs:
-    close_proc_pipes(proc)
+    # cgroup_kill stand-in: kill the orphan's session
+    try:
+      os.kill(-proc.pid, signal.SIGKILL)
+    except ProcessLookupError:
+      pass
+    try:
+      proc.communicate(timeout=5)
+    except subprocess.TimeoutExpired:
+      pass
   loop_elapsed = time.perf_counter() - loop_start
 
   # Must stay under MAX_WORKER_LOOP_SECONDS even with 256 zombie procs

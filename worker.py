@@ -105,21 +105,6 @@ def cleanup_shm_by_gid(alloc_id, triton_client, gid):
   if tmp_dir.exists():
     shutil.rmtree(tmp_dir)
 
-def close_proc_pipes(proc):
-  """Close stdout/stderr pipes without blocking. Non-blocking so orphaned
-  child processes holding pipes open can't stall the worker loop."""
-  for pipe in (proc.stdout, proc.stderr):
-    if pipe:
-      try:
-        os.set_blocking(pipe.fileno(), False)
-        data = pipe.read()
-        if data:
-          print(data.decode())
-      except Exception:
-        pass
-      pipe.close()
-
-
 class Task:
   proc: Optional[subprocess.Popen]
   alloc_id: Optional[str]
@@ -276,9 +261,16 @@ class Task:
       self.proc.returncode = returncode
 
     # Kill everything in the cgroup (catches processes that escaped the
-    # process group via setsid) and close pipes without blocking
+    # process group via setsid), then collect stdout/stderr
     cgroup_kill(self.cgroup_name)
-    close_proc_pipes(self.proc)
+    try:
+      stdout, stderr = self.proc.communicate(timeout=5)
+      if stdout:
+        print(stdout.decode())
+      if stderr:
+        print(stderr.decode())
+    except subprocess.TimeoutExpired:
+      print('Task proc communicate timed out, might be a zombie?')
 
     # Read result file
     try:
