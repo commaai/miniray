@@ -1,10 +1,15 @@
 import os
+import sys
 import time
+import signal
+import subprocess
 import numpy as np
 import pytest
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import miniray
+from miniray.worker import reap_process
+from miniray.lib.helpers import MAX_WORKER_LOOP_SECONDS
 
 MINIRAY_PRIORITY = 1000
 MINIRAY_MEMORY_GB = 0.4
@@ -187,3 +192,57 @@ def test_early_shutdown():
     executor.shutdown(wait=True, cancel_futures=True)
   assert time.time() - t0 < 0.5
   assert all(t and not t.is_alive() for t in executor._writer_threads + [executor._reader_thread])
+
+
+def test_zombie_processes_cause_worker_loop_timeout():
+  """When tasks fork children that inherit stdout/stderr pipes and outlive the
+  main process, the worker must reap them fast enough to stay under
+  MAX_WORKER_LOOP_SECONDS. Currently communicate(timeout=5) blocks per-task,
+  so 13+ zombies blow past the 60s budget."""
+
+  # Task forks a child that inherits stdout/stderr pipes and stays alive.
+  # Parent exits immediately, orphaning the child.
+  script = (
+    "import os, time\n"
+    "pid = os.fork()\n"
+    "if pid == 0:\n"
+    "    time.sleep(300)\n"
+    "    os._exit(0)\n"
+  )
+
+  NUM_PROCS = 13  # 13 * 5s communicate timeout = 65s > MAX_WORKER_LOOP_SECONDS
+
+  procs = []
+  for _ in range(NUM_PROCS):
+    proc = subprocess.Popen(
+      [sys.executable, '-c', script],
+      start_new_session=True,
+      stdout=subprocess.PIPE,
+      stderr=subprocess.PIPE,
+    )
+    procs.append(proc)
+
+  for proc in procs:
+    proc.wait()
+
+  # Simulate the worker loop: reap + communicate for each process,
+  # exactly as check_done does (worker.py:278-291)
+  loop_start = time.perf_counter()
+  for proc in procs:
+    reap_process(proc)
+    try:
+      proc.communicate(timeout=5)
+    except subprocess.TimeoutExpired:
+      pass
+  loop_elapsed = time.perf_counter() - loop_start
+
+  # Cleanup: kill orphans (still in their parent's process group)
+  for proc in procs:
+    try:
+      os.killpg(proc.pid, signal.SIGKILL)
+    except ProcessLookupError:
+      pass
+
+  # The worker loop must complete within MAX_WORKER_LOOP_SECONDS
+  assert loop_elapsed < MAX_WORKER_LOOP_SECONDS, \
+    f"Reaping {NUM_PROCS} zombie procs took {loop_elapsed:.1f}s, exceeds {MAX_WORKER_LOOP_SECONDS}s limit"
