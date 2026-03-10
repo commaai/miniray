@@ -8,7 +8,7 @@ import pytest
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import miniray
-from miniray.worker import reap_process, close_proc_pipes
+from miniray.worker import close_proc_pipes
 from miniray.lib.helpers import MAX_WORKER_LOOP_SECONDS
 
 MINIRAY_PRIORITY = 1000
@@ -227,10 +227,11 @@ def test_zombie_processes_cause_worker_loop_timeout():
   for proc in procs:
     proc.wait()
 
-  # Simulate the worker loop's check_done path on all 256 procs
+  # Simulate the worker loop's check_done path on all 256 procs.
+  # In production cgroup_kill handles the killing; close_proc_pipes
+  # must not block even when orphans hold pipes open.
   loop_start = time.perf_counter()
   for proc in procs:
-    reap_process(proc)
     close_proc_pipes(proc)
   loop_elapsed = time.perf_counter() - loop_start
 

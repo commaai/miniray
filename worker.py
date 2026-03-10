@@ -105,29 +105,9 @@ def cleanup_shm_by_gid(alloc_id, triton_client, gid):
   if tmp_dir.exists():
     shutil.rmtree(tmp_dir)
 
-def reap_process(proc):
-  try:
-    pid = -1
-    while pid != 0:
-      pid, _ = os.waitpid(-proc.pid, os.WNOHANG)
-    if not hasattr(proc, 'sigterm_sent'):
-      os.killpg(proc.pid, signal.SIGTERM)
-      proc.sigterm_sent = time.perf_counter()
-    elif proc.sigterm_sent + 20 < time.perf_counter():  # slurm sends SIGKILL after 30s, so we must finish before that
-      os.killpg(proc.pid, signal.SIGKILL)
-    return False
-  except (ChildProcessError, ProcessLookupError):
-    return True  # all processes have exited
-
 def close_proc_pipes(proc):
-  """Kill any orphaned processes in the group and close pipes without blocking.
-  We avoid communicate() because orphans holding pipes open would block for the
-  full timeout, and with enough tasks that pushes the worker loop past
-  MAX_WORKER_LOOP_SECONDS."""
-  try:
-    os.killpg(proc.pid, signal.SIGKILL)
-  except (ProcessLookupError, PermissionError):
-    pass
+  """Close stdout/stderr pipes without blocking. Non-blocking so orphaned
+  child processes holding pipes open can't stall the worker loop."""
   for pipe in (proc.stdout, proc.stderr):
     if pipe:
       try:
@@ -295,11 +275,9 @@ class Task:
         return False  # still waiting
       self.proc.returncode = returncode
 
-    # Kill the process group and wait for it to terminate
-    if self.proc.returncode is not None or self._timed_out:
-      if not reap_process(self.proc):
-        return False  # still waiting
-
+    # Kill everything in the cgroup (catches processes that escaped the
+    # process group via setsid) and close pipes without blocking
+    cgroup_kill(self.cgroup_name)
     close_proc_pipes(self.proc)
 
     # Read result file
