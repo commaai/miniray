@@ -1,7 +1,10 @@
 #!/usr/bin/env python
 import os
+import json
 import redis
+from typing import cast
 from miniray import REMOTE_QUEUE
+from miniray.executor import JobMetadata, get_metadata_key
 
 REDIS_HOST = os.environ.get("REDIS_HOST", "redis.comma.internal")
 REDIS_DB = int(os.environ.get("REDIS_DB", "1"))
@@ -11,6 +14,13 @@ all_keys = list(client.scan_iter(match="*"))
 
 queue_keys = [k for k in all_keys if k.endswith(f"-{REMOTE_QUEUE}")]
 other_keys = [k for k in all_keys if not k.endswith(f"-{REMOTE_QUEUE}")]
+
+def get_job_info(key: str) -> str:
+  raw = client.get(get_metadata_key(key))
+  if raw:
+    metadata = JobMetadata(*json.loads(cast(str, raw)))
+    return f" | Priority: {metadata.priority} | Executor: {metadata.executor}"
+  return ""
 
 def print_queue(title: str, items: list[str]) -> None:
   print(title)
@@ -24,7 +34,7 @@ def print_queue(title: str, items: list[str]) -> None:
   for i, key in enumerate(items):
     t, length = results[2 * i], results[2 * i + 1]
     if t == "list":
-      print(f"{key} {length}")
+      print(f"{key} {length}{get_job_info(key)}")
 
 print_queue(f"pending tasks for {REMOTE_QUEUE}:", queue_keys)
 if other_keys:
