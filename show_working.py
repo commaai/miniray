@@ -31,7 +31,7 @@ def show_working():
     job_id = job.removeprefix('tasks:')
     raw = client.get(get_metadata_key(job_id))
     if raw:
-      metadata = JobMetadata(*json.loads(raw))
+      metadata = JobMetadata(*json.loads(cast(str, raw)))
       job_priorities[job] = metadata.priority
 
   for i, (job, lines) in enumerate(outputs.items()):
