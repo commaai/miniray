@@ -6,7 +6,7 @@ import redis
 from collections import defaultdict
 from itertools import batched
 from typing import cast
-from miniray.executor import TaskRecord, TaskState
+from miniray.executor import JobMetadata, TaskRecord, TaskState, get_metadata_key
 
 REDIS_HOST = os.environ.get("REDIS_HOST", "redis.comma.internal")
 
@@ -26,9 +26,19 @@ def show_working():
         for record, ttl in zip(working.values(), ttls, strict=True):
           outputs[job].append(f"{record.worker:<24s} {record.executor:<24s} {ttl:8d}s remaining")
 
+  job_priorities: dict[str, int] = {}
+  for job in outputs:
+    job_id = job.removeprefix('tasks:')
+    raw = client.get(get_metadata_key(job_id))
+    if raw:
+      metadata = JobMetadata(*json.loads(raw))
+      job_priorities[job] = metadata.priority
+
   for i, (job, lines) in enumerate(outputs.items()):
+    job_id = job.removeprefix('tasks:')
+    priority_str = f" | Priority: {job_priorities[job]}" if job in job_priorities else ""
     print()
-    print(f"Job: {job.removeprefix('tasks:')} | Active tasks: {len(lines)}")
+    print(f"Job: {job_id} | Active tasks: {len(lines)}{priority_str}")
     print(f"{'Worker':<24s} {'Executor':<24s} {'TTL':>8s}")
     for line in lines:
       print(line)
