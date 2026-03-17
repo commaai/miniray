@@ -416,7 +416,7 @@ def update_job_metadatas(r_master: StrictRedis, jobs: list[str], job_metadatas: 
         job_metadatas[job] = JobMetadata(False, 1, "", "", Limits().asdict(), {})
 
 def get_task(resource_manager: ResourceManager, r_master: StrictRedis,
-             r_results: StrictRedis, job: str, job_metadatas: LRU[str, JobMetadata], venvs: LRU,
+             r_results: StrictRedis, r_claimed: StrictRedis, job: str, job_metadatas: LRU[str, JobMetadata], venvs: LRU,
              proc_index: int, triton_client) -> Optional[Task]:
   limits = Limits(**job_metadatas[job].limits)
   temp_key = f"{job}-pending"
@@ -447,7 +447,7 @@ def get_task(resource_manager: ResourceManager, r_master: StrictRedis,
   r_master.hsetex(tasks_key, record.uuid, json.dumps(working_record), ex=ttl)
 
   # Only used to find lost tasks
-  r_master.set(f"claimed:{record.uuid}", WORKER_ID, ex=2*60*60)
+  r_claimed.set(f"claimed:{record.uuid}", WORKER_ID, ex=2*60*60)
 
   resource_manager.rekey(temp_key, record.uuid)
 
@@ -509,6 +509,7 @@ def main():
 
   r_master = StrictRedis(host=REDIS_HOST, port=6379, db=1)
   r_results = StrictRedis(host=REDIS_HOST, port=6379, db=5)
+  r_claimed = StrictRedis(host=REDIS_HOST, port=6379, db=2)
 
   os.nice(1)
 
@@ -566,14 +567,14 @@ def main():
         task = None
         if current_gpu_job is not None and current_gpu_job in venvs:
           t0 = time.perf_counter()
-          task = get_task(rm, r_master, r_results, current_gpu_job, job_metadatas, venvs, i, triton_client)
+          task = get_task(rm, r_master, r_results, r_claimed, current_gpu_job, job_metadatas, venvs, i, triton_client)
           timings['get_task'] += time.perf_counter() - t0
         if task is None:
           ready_jobs = [j for j in jobs if j in venvs]
           job = get_randomly_scheduled_job(ready_jobs, job_metadatas)
           if job is not None:
             t0 = time.perf_counter()
-            task = get_task(rm, r_master, r_results, job, job_metadatas, venvs, i, triton_client)
+            task = get_task(rm, r_master, r_results, r_claimed, job, job_metadatas, venvs, i, triton_client)
             timings['get_task'] += time.perf_counter() - t0
         if task is None:
           continue
