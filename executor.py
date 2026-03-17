@@ -232,6 +232,7 @@ class Executor(BaseExecutor):
     self._futures: dict[str, tuple[list[Future], bool]] = {}
     self._submit_redis_master = StrictRedis(host=self.config.redis_host, port=6379, db=1, socket_keepalive=True)
     self._result_redis = StrictRedis(host=self.config.redis_host, port=6379, db=5, socket_keepalive=True)
+    self._claimed_redis = StrictRedis(host=self.config.redis_host, port=6379, db=2, socket_keepalive=True)
     self._shutdown_lock = threading.Lock()
     self._shutdown_writer_threads = False
     self._shutdown_reader_thread: Optional[ShutdownMode] = None
@@ -375,7 +376,7 @@ class Executor(BaseExecutor):
         futures, submitted = self._futures[task_uuid]
         if record is None and submitted:
           self._futures.pop(task_uuid)
-          claimed = cast(Optional[bytes], self._submit_redis_master.get(f"claimed:{task_uuid}"))
+          claimed = cast(Optional[bytes], self._claimed_redis.get(f"claimed:{task_uuid}"))
           for future in futures:
             future.set_exception(MinirayError("RuntimeError", "task lost", self.submit_queue_id, claimed.decode() if claimed else ""))
 
