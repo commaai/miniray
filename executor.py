@@ -371,15 +371,15 @@ class Executor(BaseExecutor):
       sampled_task_uuids = random.sample(list(self._futures.keys()), k=min(1000, len(self._futures)))
       task_records = cast(list[Optional[bytes]], self._submit_redis_master.hmget(tasks_key, sampled_task_uuids))
 
-      lost_task_uuids = [task_uuid for task_uuid, record in zip(sampled_task_uuids, task_records, strict=True)
-                         if record is None and self._futures[task_uuid][1]]
-      claimed_workers = cast(list[Optional[bytes]], self._submit_redis_master.mget([f"claimed:{t}" for t in lost_task_uuids])) if lost_task_uuids else []
+      claimed_workers = cast(list[Optional[bytes]], self._submit_redis_master.mget([f"claimed:{t}" for t in sampled_task_uuids]))
 
-      for task_uuid, claimed_worker in zip(lost_task_uuids, claimed_workers, strict=True):
-        futures, _ = self._futures.pop(task_uuid)
-        worker = claimed_worker.decode() if claimed_worker else ""
-        for future in futures:
-          future.set_exception(MinirayError("RuntimeError", "task lost", self.submit_queue_id, worker))
+      for task_uuid, record, claimed in zip(sampled_task_uuids, task_records, claimed_workers, strict=True):
+        futures, submitted = self._futures[task_uuid]
+        if record is None and submitted:
+          self._futures.pop(task_uuid)
+          worker = claimed.decode() if claimed else ""
+          for future in futures:
+            future.set_exception(MinirayError("RuntimeError", "task lost", self.submit_queue_id, worker))
 
   def _pack_task(self, function_ptr: str, pickled_fn: bytes, args: Sequence[Any], kwargs: dict[str, Any], task_uuid: str) -> tuple[str, bytes]:
     pickled_args = cloudpickle.dumps((args, kwargs))
