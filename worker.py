@@ -445,6 +445,10 @@ def get_task(resource_manager: ResourceManager, r_master: StrictRedis,
   ttl = int(limits.timeout_seconds + MAX_WORKER_LOOP_SECONDS + TASK_TIMEOUT_GRACE_SECONDS)
   working_record = record._replace(state=TaskState.WORKING, worker=WORKER_ID, started_at=time.time())
   r_master.hsetex(tasks_key, record.uuid, json.dumps(working_record), ex=ttl)
+
+  # Write a claim record so the executor can identify which worker picked up a lost task
+  r_master.set(f"claimed:{record.uuid}", WORKER_ID, ex=2*60*60)
+
   resource_manager.rekey(temp_key, record.uuid)
 
   return Task(record, limits, proc_index, resource_manager, r_master, r_results, job_metadatas[job], venvs, triton_client)
