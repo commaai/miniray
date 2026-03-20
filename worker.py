@@ -447,7 +447,7 @@ def get_task(resource_manager: ResourceManager, r_master: StrictRedis,
   r_master.hsetex(tasks_key, record.uuid, json.dumps(working_record), ex=ttl)
 
   # Only used to find lost tasks
-  r_claimed.set(f"claimed:{record.uuid}", WORKER_ID, ex=2*60*60)
+  r_claimed.set(f"claimed:{record.uuid}", WORKER_ID, ex=4*60*60)
 
   resource_manager.rekey(temp_key, record.uuid)
 

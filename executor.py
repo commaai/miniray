@@ -378,7 +378,7 @@ class Executor(BaseExecutor):
           self._futures.pop(task_uuid)
           claimed = cast(Optional[bytes], self._claimed_redis.get(f"claimed:{task_uuid}"))
           for future in futures:
-            future.set_exception(MinirayError("RuntimeError", "task lost", self.submit_queue_id, claimed.decode() if claimed else ""))
+            future.set_exception(MinirayError("RuntimeError", f"task lost ({task_uuid})", self.submit_queue_id, claimed.decode() if claimed else ""))
 
   def _pack_task(self, function_ptr: str, pickled_fn: bytes, args: Sequence[Any], kwargs: dict[str, Any], task_uuid: str) -> tuple[str, bytes]:
     pickled_args = cloudpickle.dumps((args, kwargs))
