@@ -1,9 +1,6 @@
 import os
 import time
-from itertools import count
 from pathlib import Path
-
-CGROUP_DELETE_RETRIES = 5
 
 def _get_cgroup_path(name: str | Path) -> Path:
   return Path("/sys/fs/cgroup") / name
@@ -20,14 +17,21 @@ def _validate_permissions(cgroup_path: Path):
     raise Exception(f"VALIDATION FAILED: cgroup {cgroup_path} not owned by {user_id}")
 
 
-def cgroup_delete(name: str | Path, recursive: bool=False) -> None:
+def cgroup_delete(name: str | Path, recursive: bool=False, retries: int=5) -> None:
   cgroup_path = _get_cgroup_path(name)
   if cgroup_path.is_dir():
     if recursive:
       for de in cgroup_path.iterdir():
         if de.is_dir():
-          cgroup_delete(Path(name) / de.name, recursive)
-    cgroup_path.rmdir()
+          cgroup_delete(Path(name) / de.name, recursive, retries)
+    for attempt in range(retries):
+      try:
+        cgroup_path.rmdir()
+        return
+      except OSError as e:
+        if e.errno != 16 or attempt >= retries - 1:
+          raise
+        time.sleep(1)
 
 
 def cgroup_create(name: str) -> None:
@@ -81,12 +85,4 @@ def cgroup_clear_all_children(name: str) -> None:
   cgroup_kill(name)
   for de in cgroup_path.iterdir():
     if de.is_dir():
-      child_cgroup = Path(name) / de.name
-      for attempt in count():
-        try:
-          cgroup_delete(child_cgroup, recursive=True)
-          break
-        except OSError as e:
-          if e.errno != 16 or attempt >= CGROUP_DELETE_RETRIES:  # errno 16 = device or resource busy, try again
-            raise
-          time.sleep(1)
+      cgroup_delete(Path(name) / de.name, recursive=True)
