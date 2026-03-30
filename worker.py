@@ -465,14 +465,17 @@ def sync_venv_cache_and_cleanup(job: str, codedir: str, venv_cache: LRU):
 def ensure_venvs(jobs: list[str], job_metadatas: LRU[str, JobMetadata], venv_cache: LRU, pending: dict, executor: ThreadPoolExecutor):
   for job in list(pending):
     if pending[job].done():
-      venv_cache[job] = pending.pop(job).result()
+      try:
+        venv_cache[job] = pending.pop(job).result()
+      except Exception as e:
+        job_metadatas[job] = job_metadatas[job]._replace(valid=False)
+        venv_cache[job] = ""
+        print(f"[worker] venv sync failed for job {job}: {e}")
   for job in jobs:
     if job in venv_cache:
       pass
     elif len(pending) == 0: # sync and cleanup is not thread-safe, can only do one at a time
-      codedir = job_metadatas[job].codedir
-      assert Path(codedir).exists(),  f"Codedir, {codedir} doesn't exist"
-      pending[job] = executor.submit(sync_venv_cache_and_cleanup, job, codedir, venv_cache)
+      pending[job] = executor.submit(sync_venv_cache_and_cleanup, job, job_metadatas[job].codedir, venv_cache)
 
 
 def main():

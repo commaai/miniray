@@ -1,5 +1,6 @@
 import os
 import time
+from pathlib import Path
 import numpy as np
 import pytest
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -201,3 +202,26 @@ def test_zombie_processes():
     futures = [executor.submit(spawn_zombie) for _ in range(256)]
     results = [f.result() for f in futures]
   assert all(r == "done" for r in results)
+
+
+def test_nonexistent_codedir():
+  """Tasks submitted with a codedir that doesn't exist on the worker should fail, not crash the worker."""
+  import tempfile
+  tmpdir = tempfile.mkdtemp()
+  executor = miniray.Executor(job_name='miniray_test_bad_codedir',
+                              priority=MINIRAY_PRIORITY,
+                              queue_name=QUEUE_NAME,
+                              codedir=tmpdir,
+                              limits={'memory': MINIRAY_MEMORY_GB})
+  executor.__enter__()
+  try:
+    Path(tmpdir).rmdir()  # remove so it doesn't exist when the worker tries to use it
+    future = executor.submit(is_even, 42)
+    with pytest.raises(miniray.MinirayError):
+      future.result(timeout=60)
+  finally:
+    executor.shutdown(cancel_futures=True)
+
+  # verify the worker is still alive after handling the bad codedir
+  with get_executor(job_name='miniray_test_bad_codedir_recovery') as executor:
+    assert executor.submit(is_even, 96).result() is True
