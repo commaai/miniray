@@ -34,7 +34,7 @@ def get_triton_inference_stats(client: InferenceServerClient):
   return client.get_inference_statistics()['model_stats']
 
 @retry(stop=stop_after_attempt(3), wait=wait_random(1, 2), reraise=True)
-def load_triton_model(client: InferenceServerClient, model: str, config: dict[str, Any]):
+def load_triton_model(client: InferenceServerClient, model: str, config: ModelConfig):
   return client.load_model(model, config=json.dumps(config))
 
 def setup_triton_model(func: Callable[..., ModelConfig]):
