@@ -132,8 +132,7 @@ class Task:
 
     self.proc: Optional[subprocess.Popen] = None
     self.alloc_id: Optional[str] = None
-    self._done = False
-    self._finished = False
+    self._reaped = False
     self._timed_out = False
     self._task_result = b''
     self._error = None
@@ -158,7 +157,6 @@ class Task:
       if self.task.function_ptr:
         pickled_fn = cast(Optional[bytes], self.r_master.get(self.task.function_ptr))
         if pickled_fn is None:
-          self._done = True
           self._error = ("CacheMissError", f"Cached function {self.task.function_ptr} not found in redis")
           return False
         self.pickled_fn = pickled_fn
@@ -187,7 +185,6 @@ class Task:
       return True
     except BaseException as e:
       traceback.print_exc()
-      self._done = True
       self._error = (type(e).__name__, traceback.format_exc())
       return False
 
@@ -243,14 +240,11 @@ class Task:
       return True
     except BaseException as e:
       traceback.print_exc()
-      self._done = True
       self._error = (type(e).__name__, traceback.format_exc())
       return False
 
   def _reap(self, exiting=False) -> bool:
     assert self.proc
-    if self._done:
-      return True
 
     self._timed_out = time.perf_counter() > self.start_time + self.limits.timeout_seconds
 
@@ -291,13 +285,16 @@ class Task:
     elif self.proc.returncode == 0:
       self._error = ("NoResultError", "Task completed but produced no result")
 
-    self._done = True
     return True
 
   def check_done(self, exiting=False) -> bool:
-    if not self._reap(exiting):
-      return False
-    self._finish(exiting)
+    if not self._reaped:
+      if self._reap(exiting):
+        self._reaped = True
+        self._finish(exiting)
+      else:
+        return False
+
     if self.alloc_id is None:
       return True
     try:
@@ -309,10 +306,6 @@ class Task:
       return exiting
 
   def _finish(self, exiting=False):
-    if self._finished:
-      return
-    self._finished = True
-
     task_run_time = time.perf_counter() - self.start_time
     if self.proc is not None:
       task_gpu_stats = get_gpu_stats(self.proc.pid, [gpu.handle for gpu in self.rm.gpus])
