@@ -132,7 +132,7 @@ class Task:
 
     self.proc: Optional[subprocess.Popen] = None
     self.alloc_id: Optional[str] = None
-    self._done = False
+    self._reaped = False
     self._timed_out = False
     self._task_result = b''
     self._error = None
@@ -157,7 +157,6 @@ class Task:
       if self.task.function_ptr:
         pickled_fn = cast(Optional[bytes], self.r_master.get(self.task.function_ptr))
         if pickled_fn is None:
-          self._done = True
           self._error = ("CacheMissError", f"Cached function {self.task.function_ptr} not found in redis")
           return False
         self.pickled_fn = pickled_fn
@@ -186,7 +185,6 @@ class Task:
       return True
     except BaseException as e:
       traceback.print_exc()
-      self._done = True
       self._error = (type(e).__name__, traceback.format_exc())
       return False
 
@@ -242,14 +240,11 @@ class Task:
       return True
     except BaseException as e:
       traceback.print_exc()
-      self._done = True
       self._error = (type(e).__name__, traceback.format_exc())
       return False
 
-  def check_done(self, exiting=False) -> bool:
+  def _reap(self, exiting=False) -> bool:
     assert self.proc
-    if self._done:
-      return True
 
     self._timed_out = time.perf_counter() > self.start_time + self.limits.timeout_seconds
 
@@ -290,10 +285,27 @@ class Task:
     elif self.proc.returncode == 0:
       self._error = ("NoResultError", "Task completed but produced no result")
 
-    self._done = True
     return True
 
-  def finish(self, ignore_errors=False):
+  def check_done(self, exiting=False) -> bool:
+    if not self._reaped:
+      if self._reap(exiting):
+        self._reaped = True
+        self._finish(exiting)
+      else:
+        return False
+
+    if self.alloc_id is None:
+      return True
+    try:
+      cgroup_kill(self.cgroup_name)
+      cgroup_delete(self.cgroup_name, recursive=True)
+      return True
+    except Exception as e:
+      print(f"[worker] {self.cgroup_name} cgroup cleanup failed: {desc(e)}")
+      return exiting
+
+  def _finish(self, exiting=False):
     task_run_time = time.perf_counter() - self.start_time
     if self.proc is not None:
       task_gpu_stats = get_gpu_stats(self.proc.pid, [gpu.handle for gpu in self.rm.gpus])
@@ -337,26 +349,15 @@ class Task:
     )
     self.r_master.hsetex(tasks_key, self.task_uuid, json.dumps(done_record), ex=3600)
 
-    # Cleanup cgroups, shared memory, and temp directories
+    # Cleanup shared memory and temp directories
     if self.alloc_id is not None:
-      while True:
-        try:
-          cgroup_kill(self.cgroup_name)
-          cgroup_delete(self.cgroup_name, recursive=True)
-          break
-        except Exception as e:
-          print(f"[worker] {self.cgroup_name} cgroup cleanup failed: {desc(e)}")
-          if ignore_errors:
-            break
-          time.sleep(1)
-
       while True:
         try:
           cleanup_shm_by_gid(self.alloc_id, self.triton_client, self.task_gid)
           break
         except Exception as e:
           print(f"[worker] {self.cgroup_name} /dev/shm cleanup failed: {desc(e)}")
-          if ignore_errors:
+          if exiting:
             break
           time.sleep(1)
     self.rm.release(self.task_uuid)
@@ -554,7 +555,6 @@ def main():
         if proc:
           t0 = time.perf_counter()
           if proc.check_done():
-            proc.finish()
             procs[i] = None
             backoff.reset()
           timings['reap'] += time.perf_counter() - t0
@@ -588,7 +588,7 @@ def main():
           procs[i] = task
           backoff.reset()
         else:
-          task.finish()
+          task._finish()
         timings['start_task'] += time.perf_counter() - t0
         last_init_timings = task.init_timings
   except Exception as e:
@@ -603,7 +603,6 @@ def main():
     while any(procs.values()):
       for i, proc in procs.items():
         if proc and proc.check_done(exiting=True):
-          proc.finish(ignore_errors=True)
           procs[i] = None
       time.sleep(1)
 
