@@ -81,12 +81,12 @@ class TaskRecord(NamedTuple):
   started_at: float
 
 class JobMetadata(NamedTuple):
+  valid: bool
   priority: int
   codedir: str
   executor: str
   limits: dict[str, Any]
   env: dict[str, str]
-  error: str | None = None
 
 class MinirayResultHeader(NamedTuple):
   job: str
@@ -242,6 +242,7 @@ class Executor(BaseExecutor):
 
     self.executor = socket.gethostname()
     job_metadata = JobMetadata(
+      True,
       self.config.priority,
       self.codedir,
       self.executor,
