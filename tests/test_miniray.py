@@ -187,14 +187,14 @@ def test_early_shutdown():
   assert time.time() - t0 < 0.5
   assert all(f.done() for f in futs + futs2)  # all tasks completed
   assert any(f.cancelled() for f in futs + futs2)  # at least some were cancelled
-  assert all(t and not t.is_alive() for t in executor._writer_threads + [executor._reader_thread])
+  assert all(t and not t.is_alive() for t in executor._writer_threads + [executor._reader_thread])  # noqa: SLF001
 
   with get_executor(job_name='miniray_test_early_shutdown_cancel_submit') as executor:
     executor.fmap(is_even, it(), chunksize=1000)
     t0 = time.time()
     executor.shutdown(wait=True, cancel_futures=True)
   assert time.time() - t0 < 0.5
-  assert all(t and not t.is_alive() for t in executor._writer_threads + [executor._reader_thread])
+  assert all(t and not t.is_alive() for t in executor._writer_threads + [executor._reader_thread])  # noqa: SLF001
 
 
 def test_zombie_processes():

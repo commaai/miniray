@@ -291,7 +291,7 @@ class Task:
     if not self._reaped:
       if self._reap(exiting):
         self._reaped = True
-        self._finish(exiting)
+        self.finish(exiting)
       else:
         return False
 
@@ -305,7 +305,7 @@ class Task:
       print(f"[worker] {self.cgroup_name} cgroup cleanup failed: {desc(e)}")
       return exiting
 
-  def _finish(self, exiting=False):
+  def finish(self, exiting=False):
     task_run_time = time.perf_counter() - self.start_time
     if self.proc is not None:
       task_gpu_stats = get_gpu_stats(self.proc.pid, [gpu.handle for gpu in self.rm.gpus])
@@ -588,7 +588,7 @@ def main():
           procs[i] = task
           backoff.reset()
         else:
-          task._finish()
+          task.finish()
         timings['start_task'] += time.perf_counter() - t0
         last_init_timings = task.init_timings
   except Exception as e:
