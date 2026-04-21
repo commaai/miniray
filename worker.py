@@ -454,7 +454,7 @@ def get_task(resource_manager: ResourceManager, r_master: StrictRedis,
 
   resource_manager.rekey(temp_key, record.uuid)
 
-  return Task(record, limits, proc_index, resource_manager, r_master, r_results, job_metadatas[job], job_errors[job], venvs, triton_client)
+  return Task(record, limits, proc_index, resource_manager, r_master, r_results, job_metadatas[job], job_errors.get(job), venvs, triton_client)
 
 
 def sig_callback(signal):
