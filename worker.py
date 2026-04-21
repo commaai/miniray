@@ -29,7 +29,7 @@ from typing import BinaryIO, Optional, cast
 from tritonclient.http import InferenceServerClient
 
 from miniray.lib.cgroup import cgroup_create, cgroup_set_subcontrollers, cgroup_set_memory_limit, \
-                               cgroup_set_numa_nodes, cgroup_add_pid, cgroup_kill, cgroup_delete, cgroup_clear_all_children
+                               cgroup_set_numa_nodes, cgroup_add_pid, cgroup_kill, cgroup_delete, cgroup_clear_all_children, CGROUP_DELETE_RETRIES
 from miniray.lib.sig_term_handler import SigTermHandler
 from miniray.lib.resource_manager import ResourceManager, ResourceLimitError
 from miniray.lib.worker_helpers import ExponentialBackoff
@@ -104,6 +104,23 @@ def cleanup_shm_by_gid(alloc_id, triton_client, gid):
   tmp_dir = get_tmp_dir_for_task(alloc_id)
   if tmp_dir.exists():
     shutil.rmtree(tmp_dir)
+
+
+def cleanup_cgroup_with_retries(cgroup_name: str, ignore_errors: bool=False) -> None:
+  for attempt in range(CGROUP_DELETE_RETRIES + 1):
+    try:
+      cgroup_kill(cgroup_name)
+      cgroup_delete(cgroup_name, recursive=True)
+      return
+    except Exception as e:
+      print(f"[worker] {cgroup_name} cgroup cleanup failed: {desc(e)}")
+      if ignore_errors:
+        return
+      if attempt >= CGROUP_DELETE_RETRIES:
+        raise RuntimeError(
+          f"fatal cgroup cleanup failure for {cgroup_name} after {CGROUP_DELETE_RETRIES + 1} attempts"
+        ) from e
+      time.sleep(1)
 
 class Task:
   proc: Optional[subprocess.Popen]
@@ -297,13 +314,8 @@ class Task:
 
     if self.alloc_id is None:
       return True
-    try:
-      cgroup_kill(self.cgroup_name)
-      cgroup_delete(self.cgroup_name, recursive=True)
-      return True
-    except Exception as e:
-      print(f"[worker] {self.cgroup_name} cgroup cleanup failed: {desc(e)}")
-      return exiting
+    cleanup_cgroup_with_retries(self.cgroup_name, exiting)
+    return True
 
   def finish(self, exiting=False):
     task_run_time = time.perf_counter() - self.start_time
