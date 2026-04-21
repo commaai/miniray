@@ -81,7 +81,7 @@ class TaskRecord(NamedTuple):
   started_at: float
 
 class JobMetadata(NamedTuple):
-  valid: bool
+  valid: bool  # TODO: This field is deprecated, remove at the next opportunity
   priority: int
   codedir: str
   executor: str
