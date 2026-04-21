@@ -119,7 +119,7 @@ class Task:
 
   def __init__(self, task: TaskRecord, limits: Limits, proc_index: int,
                resource_manager: ResourceManager, r_master: StrictRedis, r_results: StrictRedis,
-               job_metadata: JobMetadata, venv_cache: LRU[str, str], triton_client):
+               job_metadata: JobMetadata, job_error: tuple[str, str] | None, venv_cache: LRU[str, str], triton_client):
     self.task = task
     self.limits = limits
     self.proc_index = proc_index
@@ -135,7 +135,7 @@ class Task:
     self._reaped = False
     self._timed_out = False
     self._task_result = b''
-    self._error = None
+    self._error = job_error
     self.init_timings = {}
 
   @property
@@ -149,8 +149,8 @@ class Task:
   def init(self) -> bool:
     self.start_time = time.perf_counter()
     try:
-      if not self.job_metadata.valid:
-        raise ValueError("Invalid JobMetadata, key was probably missing")
+      if self._error:
+        return False
 
       # Fetch function if needed
       t0 = time.perf_counter()
@@ -407,18 +407,20 @@ def get_randomly_scheduled_job(jobs: list[str], job_metadatas: LRU[str, JobMetad
   job = random.choices(jobs, weights=job_weights, k=1)[0]
   return job
 
-def update_job_metadatas(r_master: StrictRedis, jobs: list[str], job_metadatas: LRU[str, JobMetadata]):
+def update_job_metadatas(r_master: StrictRedis, jobs: list[str], job_metadatas: LRU[str, JobMetadata], job_errors: LRU[str, tuple[str, str] | None]):
   for job in jobs:
     if job not in job_metadatas:
       raw_metadata = cast(bytes, r_master.get(get_metadata_key(job)))
       if raw_metadata is not None:
         job_metadatas[job] = JobMetadata(*json.loads(raw_metadata))
+        job_errors[job] = None
       else:
         job_metadatas[job] = JobMetadata(False, 1, "", "", Limits().asdict(), {})
+        job_errors[job] = ("JobMetadataMissingError", f"No metadata found in redis for job {job}")
 
 def get_task(resource_manager: ResourceManager, r_master: StrictRedis,
-             r_results: StrictRedis, r_claimed: StrictRedis, job: str, job_metadatas: LRU[str, JobMetadata], venvs: LRU,
-             proc_index: int, triton_client) -> Optional[Task]:
+             r_results: StrictRedis, r_claimed: StrictRedis, job: str, job_metadatas: LRU[str, JobMetadata], job_errors: LRU[str, tuple[str, str] | None],
+             venvs: LRU, proc_index: int, triton_client) -> Optional[Task]:
   limits = Limits(**job_metadatas[job].limits)
   temp_key = f"{job}-pending"
   try:
@@ -452,7 +454,7 @@ def get_task(resource_manager: ResourceManager, r_master: StrictRedis,
 
   resource_manager.rekey(temp_key, record.uuid)
 
-  return Task(record, limits, proc_index, resource_manager, r_master, r_results, job_metadatas[job], venvs, triton_client)
+  return Task(record, limits, proc_index, resource_manager, r_master, r_results, job_metadatas[job], job_errors.get(job), venvs, triton_client)
 
 
 def sig_callback(signal):
@@ -463,13 +465,14 @@ def sync_venv_cache_and_cleanup(job: str, codedir: str, venv_cache: LRU):
   cleanup_venvs(TASK_UID, keep_venvs=list(venv_cache.keys())+[job,])
   return venv_path
 
-def ensure_venvs(jobs: list[str], job_metadatas: LRU[str, JobMetadata], venv_cache: LRU, pending: dict, executor: ThreadPoolExecutor):
+def ensure_venvs(jobs: list[str], job_metadatas: LRU[str, JobMetadata], job_errors: LRU[str, tuple[str, str] | None],
+                 venv_cache: LRU, pending: dict, executor: ThreadPoolExecutor):
   for job in list(pending):
     if pending[job].done():
       try:
         venv_cache[job] = pending.pop(job).result()
       except Exception as e:
-        job_metadatas[job] = job_metadatas[job]._replace(valid=False)
+        job_errors[job] = ("VenvSyncError", f"Failed to sync venv for job {job}: {desc(e)}")
         venv_cache[job] = ""
         print(f"[worker] venv sync failed for job {job}: {e}")
   for job in jobs:
@@ -490,6 +493,7 @@ def main():
   venv_executor = ThreadPoolExecutor(max_workers=1)
   pending_venv_syncs: dict[str, Future] = {}
   job_metadatas: LRU[str, JobMetadata] = LRU(JOB_CACHE_SIZE)
+  job_errors: LRU[str, tuple[str, str] | None] = LRU(JOB_CACHE_SIZE)
 
   print(f"[worker] REDIS:                 {REDIS_HOST}")
   print(f"[worker] QUEUE:                 {PIPELINE_QUEUE}")
@@ -537,12 +541,12 @@ def main():
 
       t0 = time.perf_counter()
       jobs = sorted(key.decode() for key in cast(list[bytes], r_master.keys(f"*{PIPELINE_QUEUE}")) if b":" not in key)
-      update_job_metadatas(r_master, jobs, job_metadatas)
+      update_job_metadatas(r_master, jobs, job_metadatas, job_errors)
       jobs = [j for j in jobs if not job_metadatas[j].limits.get('node_whitelist') or HOST_NAME in job_metadatas[j].limits['node_whitelist']]
       current_gpu_job = get_globally_scheduled_job(r_master, jobs, job_metadatas)
       timings['redis_sched'] = time.perf_counter() - t0
 
-      ensure_venvs(jobs, job_metadatas, venvs, pending_venv_syncs, venv_executor)
+      ensure_venvs(jobs, job_metadatas, job_errors, venvs, pending_venv_syncs, venv_executor)
 
       for i, proc in procs.items():
         if time.perf_counter() - worker_loop_start > MAX_WORKER_LOOP_SECONDS:
@@ -570,14 +574,14 @@ def main():
         task = None
         if current_gpu_job is not None and current_gpu_job in venvs:
           t0 = time.perf_counter()
-          task = get_task(rm, r_master, r_results, r_claimed, current_gpu_job, job_metadatas, venvs, i, triton_client)
+          task = get_task(rm, r_master, r_results, r_claimed, current_gpu_job, job_metadatas, job_errors, venvs, i, triton_client)
           timings['get_task'] += time.perf_counter() - t0
         if task is None:
           ready_jobs = [j for j in jobs if j in venvs]
           job = get_randomly_scheduled_job(ready_jobs, job_metadatas)
           if job is not None:
             t0 = time.perf_counter()
-            task = get_task(rm, r_master, r_results, r_claimed, job, job_metadatas, venvs, i, triton_client)
+            task = get_task(rm, r_master, r_results, r_claimed, job, job_metadatas, job_errors, venvs, i, triton_client)
             timings['get_task'] += time.perf_counter() - t0
         if task is None:
           continue
