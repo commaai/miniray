@@ -6,7 +6,6 @@ import shutil
 import signal
 import subprocess
 import urllib.request
-import urllib.error
 from functools import wraps
 from pathlib import Path
 from typing import Any, Callable, Optional, TypedDict
@@ -22,12 +21,13 @@ TRITON_MODEL_REPOSITORY = Path(os.getenv('TRITON_MODEL_REPOSITORY', '/dev/shm/mo
 IOConfig = TypedDict('IOConfig', {'name': str, 'data_type': str, 'dims': list[int]})
 ModelConfig = TypedDict('ModelConfig', {'input': list[IOConfig], 'output': list[IOConfig]})
 
-def check_triton_server_health(url: str, timeout: int = 10, scheme: str = "http") -> None:
+def _check_triton_server_health(url: str, timeout: int = 3, scheme: str = "http") -> None:
   if "://" not in url:
     url = f"{scheme}://{url}"
   urllib.request.urlopen(f"{url}/v2/health/live", timeout=timeout)
 
-wait_for_triton_server = retry(stop=stop_after_delay(60), wait=wait_fixed(2), reraise=True)(check_triton_server_health)
+check_triton_server_health = retry(stop=stop_after_delay(15), wait=wait_fixed(1), reraise=True)(_check_triton_server_health)
+wait_for_triton_server = retry(stop=stop_after_delay(60), wait=wait_fixed(2), reraise=True)(_check_triton_server_health)
 
 @retry(stop=stop_after_attempt(3), wait=wait_random(1, 2), reraise=True)
 def get_triton_inference_stats(client: InferenceServerClient):
