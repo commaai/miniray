@@ -548,7 +548,12 @@ def main():
       timings = {'triton': 0.0, 'redis_sched': 0.0, 'reap': 0.0, 'get_task': 0.0, 'start_task': 0.0}
 
       if triton_client is not None:
-        check_triton_server_health(url=TRITON_SERVER_ADDRESS)
+        try:
+          check_triton_server_health(url=TRITON_SERVER_ADDRESS)
+        except TimeoutError:
+          if sigterm_handler.raised:
+            break
+          raise
       timings['triton'] = time.perf_counter() - worker_loop_start
 
       t0 = time.perf_counter()
