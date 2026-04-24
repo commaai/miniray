@@ -29,7 +29,8 @@ from typing import BinaryIO, Optional, cast
 from tritonclient.http import InferenceServerClient
 
 from miniray.lib.cgroup import cgroup_create, cgroup_set_subcontrollers, cgroup_set_memory_limit, \
-                               cgroup_set_numa_nodes, cgroup_add_pid, cgroup_kill, cgroup_delete, cgroup_clear_all_children, CGROUP_DELETE_RETRIES
+                               cgroup_set_numa_nodes, cgroup_add_pid, cgroup_kill, cgroup_delete, cgroup_clear_all_children, \
+                               cgroup_describe_populated, CGROUP_DELETE_RETRIES
 from miniray.lib.sig_term_handler import SigTermHandler
 from miniray.lib.resource_manager import ResourceManager, ResourceLimitError
 from miniray.lib.worker_helpers import ExponentialBackoff
@@ -117,6 +118,10 @@ def cleanup_cgroup_with_retries(cgroup_name: str, ignore_errors: bool=False) -> 
       if ignore_errors:
         return
       if attempt >= CGROUP_DELETE_RETRIES:
+        try:
+          print(f"[worker] {cgroup_name} cgroup state at failure:\n{cgroup_describe_populated(cgroup_name)}")
+        except Exception as diag_e:
+          print(f"[worker] {cgroup_name} cgroup diagnostic failed: {desc(diag_e)}")
         raise RuntimeError(
           f"fatal cgroup cleanup failure for {cgroup_name} after {CGROUP_DELETE_RETRIES + 1} attempts"
         ) from e

@@ -76,6 +76,37 @@ def cgroup_kill(name: str) -> None:
     f.write("1")
 
 
+def cgroup_describe_populated(name: str | Path) -> str:
+  cgroup_path = _get_cgroup_path(name)
+  lines: list[str] = []
+  if not cgroup_path.is_dir():
+    return f"{cgroup_path}: missing"
+  try:
+    events = (cgroup_path / "cgroup.events").read_text().strip().replace("\n", " ")
+  except OSError as e:
+    events = f"<unreadable: {e}>"
+  try:
+    pids = [int(p) for p in (cgroup_path / "cgroup.procs").read_text().split() if p]
+  except OSError as e:
+    pids = []
+    lines.append(f"{cgroup_path}: cgroup.procs unreadable: {e}")
+  lines.append(f"{cgroup_path}: events=[{events}] pids={pids}")
+  for pid in pids:
+    proc = Path(f"/proc/{pid}")
+    try:
+      comm = (proc / "comm").read_text().strip()
+      state = next((l.split(":", 1)[1].strip() for l in (proc / "status").read_text().splitlines() if l.startswith("State:")), "?")
+      wchan = (proc / "wchan").read_text().strip() or "0"
+    except OSError as e:
+      lines.append(f"  pid={pid}: <unreadable: {e}>")
+      continue
+    lines.append(f"  pid={pid} comm={comm!r} state={state} wchan={wchan}")
+  for de in cgroup_path.iterdir():
+    if de.is_dir():
+      lines.append(cgroup_describe_populated(Path(name) / de.name))
+  return "\n".join(lines)
+
+
 def cgroup_clear_all_children(name: str) -> None:
   cgroup_path = _get_cgroup_path(name)
   cgroup_kill(name)
