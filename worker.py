@@ -539,6 +539,7 @@ def main():
   os.nice(1)
 
   procs: dict[int, Optional[Task]] = dict.fromkeys(range(sum(rm.cpu_totals.values())))
+  timings: dict[str, float | dict[str, float]] = {}
 
   if triton_client is not None:
     wait_for_triton_server(url=TRITON_SERVER_ADDRESS)
@@ -549,8 +550,14 @@ def main():
       backoff.sleep()
 
       worker_loop_start = time.perf_counter()
-      last_init_timings = {}
-      timings = {'triton': 0.0, 'redis_sched': 0.0, 'reap': 0.0, 'get_task': 0.0, 'start_task': 0.0}
+
+      # clear nested dicts in place so any Task holding a reference sees the cleared state
+      for k in list(timings.keys()):
+        v = timings[k]
+        if isinstance(v, dict):
+          v.clear()
+        else:
+          del timings[k]
 
       if triton_client is not None:
         try:
@@ -572,18 +579,25 @@ def main():
 
       for i, proc in procs.items():
         if time.perf_counter() - worker_loop_start > MAX_WORKER_LOOP_SECONDS:
-          start_breakdown = ", ".join(f"{k}={v:.2f}s" for k, v in sorted(last_init_timings.items(), key=lambda x: -x[1])) if last_init_timings else "n/a"
+          flat: dict[str, float] = {}
+          for k, v in timings.items():
+            if isinstance(v, dict):
+              for k2, v2 in v.items():
+                flat[f"{k}.{k2}"] = v2
+            else:
+              flat[k] = v
           print("[worker] loop breakdown: " +
-                ", ".join(f"{k}={v:.2f}s" for k, v in sorted(timings.items(), key=lambda x: -x[1]) if v > 0.01) +
-                f" | last start_task: {start_breakdown}")
+                ", ".join(f"{k}={v:.2f}s" for k, v in sorted(flat.items(), key=lambda x: -x[1]) if v > 0.01))
           raise RuntimeError("Did not loop over processes fast enough, cannot garantuee task integrity")
+
+        proc_timings = cast(dict[str, float], timings.setdefault(f"proc{i}", {}))
 
         if proc:
           t0 = time.perf_counter()
           if proc.check_done():
             procs[i] = None
             backoff.reset()
-          timings['reap'] += time.perf_counter() - t0
+          proc_timings['reap'] = time.perf_counter() - t0
 
         # If running behind focus on finishing
         # TODO just make starting faster
@@ -593,30 +607,28 @@ def main():
         if proc is not None:
           continue
 
+        t0 = time.perf_counter()
         task = None
         if current_gpu_job is not None and current_gpu_job in venvs:
-          t0 = time.perf_counter()
           task = get_task(rm, r_master, r_results, r_claimed, current_gpu_job, job_metadatas, job_errors, venvs, i, triton_client)
-          timings['get_task'] += time.perf_counter() - t0
         if task is None:
           ready_jobs = [j for j in jobs if j in venvs]
           job = get_randomly_scheduled_job(ready_jobs, job_metadatas)
           if job is not None:
-            t0 = time.perf_counter()
             task = get_task(rm, r_master, r_results, r_claimed, job, job_metadatas, job_errors, venvs, i, triton_client)
-            timings['get_task'] += time.perf_counter() - t0
+        proc_timings['get_task'] = time.perf_counter() - t0
         if task is None:
           continue
 
         print(f"[worker] starting miniray task from job {task.job} on proc{i}")
         t0 = time.perf_counter()
+        task.init_timings = proc_timings
         if task.init() and task.start():
           procs[i] = task
           backoff.reset()
         else:
           task.finish()
-        timings['start_task'] += time.perf_counter() - t0
-        last_init_timings = task.init_timings
+        proc_timings['start_task'] = time.perf_counter() - t0
   except Exception as e:
     fatal_error = e
   finally:
