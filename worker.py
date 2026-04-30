@@ -550,7 +550,7 @@ def main():
       if triton_client is not None:
         try:
           check_triton_server_health(url=TRITON_SERVER_ADDRESS)
-        except TimeoutError:
+        except (TimeoutError, ConnectionResetError):
           if sigterm_handler.raised:
             break
           raise
