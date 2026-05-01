@@ -37,7 +37,7 @@ from miniray.lib.triton_helpers import TRITON_SERVER_ADDRESS, check_triton_serve
 from miniray.lib.system_helpers import get_cgroup_cpu_usage, get_cgroup_mem_usage, get_gpu_stats, get_gpu_mem_usage, get_gpu_utilization
 from miniray.lib.statsd_helpers import statsd
 from miniray.lib.helpers import Limits, desc, GB_TO_BYTES, MAX_WORKER_LOOP_SECONDS, TASK_TIMEOUT_GRACE_SECONDS, JOB_CACHE_SIZE
-from miniray.lib.uv import sync_venv_cache, cleanup_venvs
+from miniray.lib.uv import sync_venv_cache, cleanup_venvs, populate_venv_cache_from_disk
 from miniray.executor import MinirayResultHeader, JobMetadata, TaskRecord, TaskState, get_metadata_key, get_tasks_key
 
 
@@ -432,7 +432,7 @@ def update_job_metadatas(r_master: StrictRedis, jobs: list[str], job_metadatas: 
 
 def get_task(resource_manager: ResourceManager, r_master: StrictRedis,
              r_results: StrictRedis, r_claimed: StrictRedis, job: str, job_metadatas: LRU[str, JobMetadata], job_errors: LRU[str, tuple[str, str] | None],
-             venvs: LRU, proc_index: int, triton_client) -> Optional[Task]:
+             venvs: LRU[str, str], proc_index: int, triton_client) -> Optional[Task]:
   limits = Limits(**job_metadatas[job].limits)
   temp_key = f"{job}-pending"
   try:
@@ -472,13 +472,13 @@ def get_task(resource_manager: ResourceManager, r_master: StrictRedis,
 def sig_callback(signal):
   print(f"[worker] cleaning up on signal: {signal} ...")
 
-def sync_venv_cache_and_cleanup(job: str, codedir: str, venv_cache: LRU):
+def sync_venv_cache_and_cleanup(job: str, codedir: str, venv_cache: LRU[str, str]):
   venv_path = str(sync_venv_cache(codedir, TASK_UID, job))
   cleanup_venvs(TASK_UID, keep_venvs=list(venv_cache.keys())+[job,])
   return venv_path
 
 def ensure_venvs(jobs: list[str], job_metadatas: LRU[str, JobMetadata], job_errors: LRU[str, tuple[str, str] | None],
-                 venv_cache: LRU, pending: dict, executor: ThreadPoolExecutor):
+                 venv_cache: LRU[str, str], pending: dict[str, Future], executor: ThreadPoolExecutor):
   for job in list(pending):
     if pending[job].done():
       try:
@@ -502,6 +502,7 @@ def main():
   rm = ResourceManager(triton_client=triton_client)
 
   venvs: LRU[str, str] = LRU(JOB_CACHE_SIZE)
+  populate_venv_cache_from_disk(venvs, TASK_UID)
   venv_executor = ThreadPoolExecutor(max_workers=1)
   pending_venv_syncs: dict[str, Future] = {}
   job_metadatas: LRU[str, JobMetadata] = LRU(JOB_CACHE_SIZE)
