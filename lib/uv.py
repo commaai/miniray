@@ -1,9 +1,12 @@
+from __future__ import annotations
+
 import shutil
 from typing import Union
 from pathlib import Path
 import subprocess
 import pwd
 import os
+from lru import LRU
 
 N_RETRIES = 5
 
@@ -46,3 +49,12 @@ def cleanup_venvs(user_id: int, keep_venvs: list[str]):
   for venv in base_dir.iterdir():
     if venv.name not in keep_venvs:
       shutil.rmtree(venv)
+
+
+def populate_venv_cache_from_disk(venv_cache: LRU[str, str], user_id: int) -> None:
+  base_dir = base_venv_path(user_id)
+  if not base_dir.exists():
+    return
+  entries = sorted(base_dir.iterdir(), key=lambda p: p.stat().st_mtime)
+  for entry in entries[-venv_cache.get_size():]:
+    venv_cache[entry.name] = str(entry)
