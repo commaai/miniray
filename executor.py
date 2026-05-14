@@ -38,6 +38,8 @@ PENDING_TASK_SAFETY_TTL = 3 * 24 * 60 * 60
 DEFAULT_RESULT_PAYLOAD_TIMEOUT_SECONDS = 20 * 60
 USE_MAIN_RESULT_REDIS = bool(int(os.getenv("USE_MAIN_RESULT_REDIS", "0")))
 REMOTE_QUEUE = 'remote_v3'
+# Extreme priorities cause inefficient context switching between jobs.
+MAX_PRIORITY = 20
 DEFAULT_LOGGER = get_stream_logger('miniray', level=logging.INFO)
 
 MISSING_RESULT_PAYLOAD_ERROR = (
@@ -244,7 +246,7 @@ class Executor(BaseExecutor):
     self.executor = socket.gethostname()
     job_metadata = JobMetadata(
       True,
-      self.config.priority,
+      min(self.config.priority, MAX_PRIORITY),
       self.codedir,
       self.executor,
       self.config.limits.asdict(),
