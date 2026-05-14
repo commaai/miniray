@@ -37,7 +37,6 @@ NUM_LOCAL_WORKERS = int(os.getenv("MINIRAY_LOCAL_NUM_WORKERS", "1"))
 PENDING_TASK_SAFETY_TTL = 3 * 24 * 60 * 60
 DEFAULT_RESULT_PAYLOAD_TIMEOUT_SECONDS = 20 * 60
 USE_MAIN_RESULT_REDIS = bool(int(os.getenv("USE_MAIN_RESULT_REDIS", "0")))
-CACHE_ROOT = Path("/code.nfs/branches/caches")
 REMOTE_QUEUE = 'remote_v3'
 DEFAULT_LOGGER = get_stream_logger('miniray', level=logging.INFO)
 
@@ -45,9 +44,11 @@ MISSING_RESULT_PAYLOAD_ERROR = (
   f"Did not find payload on worker redis. Results may be piling up and reader has fallen more than {DEFAULT_RESULT_PAYLOAD_TIMEOUT_SECONDS/60:.1f}"
   " minutes behind. If your results are small, consider a larger chunksize. If your results are big, consider multiple miniray executors.")
 
-#TODO xx should not be referenced here
+#TODO xx and code.nfs should not be referenced here
 XX_BASEPATH = Path(__file__).resolve().parent.parent
 XX_BASEDIR = str(XX_BASEPATH)
+CACHE_ROOT = Path("/code.nfs/branches/caches")
+DEFAULT_CODEDIR = Path('/code.nfs/xx')
 
 
 class MinirayError(Exception):
@@ -220,7 +221,7 @@ class Executor(BaseExecutor):
     elif config.use_local_codedir:
       config = replace(config, codedir=sync_local_codedir(job_desc))
     else:
-      config = replace(config, codedir='/code.nfs/xx/')
+      config = replace(config, codedir=str(DEFAULT_CODEDIR))
 
     self.config = config
 
