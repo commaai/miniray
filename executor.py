@@ -292,8 +292,8 @@ class Executor(BaseExecutor):
     assert not self._shutdown_reader_thread, "Cannot submit new tasks after shutdown has started"
     future: Future = Future()
     task_uuid = str(uuid.uuid4())
-    pickled_fn = cloudpickle.dumps(partial(_execute_batch, fn))
-    task = self._pack_task('', pickled_fn, [args], kwargs, task_uuid)
+    function_ptr = self._cache_func_in_redis(fn)
+    task = self._pack_task(function_ptr, b'', [args], kwargs, task_uuid)
     self._submit_tasks([task])
     self._futures[task_uuid] = ([future], True, task[1])
     return future
@@ -305,14 +305,16 @@ class Executor(BaseExecutor):
     futures = list(self.fmap(fn, *iterables, chunksize=chunksize))
     return (future.result() for future in futures)
 
-  def fmap(self, fn: Callable, *iterables: Iterable[Any], chunksize: int = 1) -> Iterator[Future]:
-    assert not self._shutdown_reader_thread, "Cannot submit new tasks after shutdown has started"
-
+  def _cache_func_in_redis(self, fn: Callable) -> str:
     # Instead of sending the function along with every request, we cache it in redis and send the cache key in its place
     pickled_fn = cloudpickle.dumps(partial(_execute_batch, fn))
     function_ptr = f'pickledfunc-{hashlib.sha256(pickled_fn).hexdigest()}'
     self._submit_redis_master.set(function_ptr, pickled_fn, ex=7*24*60*60)
+    return function_ptr
 
+  def fmap(self, fn: Callable, *iterables: Iterable[Any], chunksize: int = 1) -> Iterator[Future]:
+    assert not self._shutdown_reader_thread, "Cannot submit new tasks after shutdown has started"
+    function_ptr = self._cache_func_in_redis(fn)
     submitted_queue: Queue[Optional[Future]] = Queue()
     writer_thread = threading.Thread(target=self._writer_loop, args=(submitted_queue, function_ptr, list(iterables), chunksize), daemon=True)
     writer_thread.start()
