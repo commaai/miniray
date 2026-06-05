@@ -361,12 +361,10 @@ class Executor(BaseExecutor):
           self._check_lost_tasks()
         raw = cast(list[bytes], self._result_redis.lpop(self.result_queue_id, count=1000) or [])
         results = self._unpack_results(raw)
-        to_delete = results.copy()
         for header, dat in results.values():
-          if self._resolve_futures(header, dat):
-            to_delete.pop(header.task_uuid)
-        if to_delete:
-          self._submit_redis_master.hdel(get_tasks_key(self.submit_queue_id), *to_delete.keys())
+          self._resolve_futures(header, dat)
+        if results:
+          self._submit_redis_master.hdel(get_tasks_key(self.submit_queue_id), *results.keys())
         time.sleep(0.1)
       except RedisConnectionError:
         print("[ERROR] Redis connection error in miniray reader thread. Retrying in 10 seconds...", file=sys.stderr)
@@ -414,11 +412,10 @@ class Executor(BaseExecutor):
       results[header.task_uuid] = (header, dat[1] if len(dat) > 1 else b'')
     return results
 
-  def _resolve_futures(self, header: MinirayResultHeader, dat: bytes) -> bool:
-    """Deliver a result to its futures. Returns True if the task was requeued instead (its record must be kept)."""
+  def _resolve_futures(self, header: MinirayResultHeader, dat: bytes) -> None:
     if header.task_uuid not in self._futures:
       print(f"[ERROR] finished unstarted task: {header.task_uuid} [{header.worker}]", file=sys.stderr)
-      return False
+      return
     futures, _, record = self._futures.pop(header.task_uuid)
 
     try:
@@ -437,10 +434,11 @@ class Executor(BaseExecutor):
             else:
               future.set_exception(MinirayError(subtask.exception_type, subtask.exception_desc, header.job, header.worker))
       elif header.exception_type == "WorkerShutdown":
-        self._submit_tasks([(header.task_uuid, record)])
-        print(f"[miniray] task {header.task_uuid} killed by worker shutdown [{header.worker}], requeued", file=sys.stderr)
-        self._futures[header.task_uuid] = (futures, True, record)  # leave the futures pending; the retry resolves them
-        return True
+        new_uuid = str(uuid.uuid4())
+        record = json.dumps(TaskRecord(*json.loads(record))._replace(uuid=new_uuid), ensure_ascii=False).encode('utf-8')
+        self._submit_tasks([(new_uuid, record)])
+        print(f"[miniray] task {header.task_uuid} killed by worker shutdown [{header.worker}], requeued as {new_uuid}", file=sys.stderr)
+        self._futures[new_uuid] = (futures, True, record)  # leave the futures pending; the retry resolves them
       else:
         for future in futures:
           future.set_exception(MinirayError(header.exception_type, header.exception_desc, header.job, header.worker))
@@ -450,7 +448,6 @@ class Executor(BaseExecutor):
     except Exception as e:
       for future in futures:
         future.set_exception(e)
-    return False
 
   def _submit_tasks(self, tasks: list[tuple[str, bytes]]) -> None:
     self._submit_redis_master.hsetex(get_tasks_key(self.submit_queue_id), mapping=dict(tasks), ex=PENDING_TASK_SAFETY_TTL)
