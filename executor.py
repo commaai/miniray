@@ -232,7 +232,7 @@ class Executor(BaseExecutor):
     self.submit_queue_id = f'{job_desc}-{self.config.queue_name}'
     self.result_queue_id = f'fq-{self.submit_queue_id}'
 
-    self._futures: dict[str, tuple[list[Future], bool]] = {}
+    self._futures: dict[str, tuple[list[Future], bool, bytes]] = {}
     self._submit_redis_master = StrictRedis(host=self.config.redis_host, port=6379, db=1, socket_keepalive=True)
     self._result_redis = StrictRedis(host=self.config.redis_host, port=6379, db=5, socket_keepalive=True)
     self._claimed_redis = StrictRedis(host=self.config.redis_host, port=6379, db=2, socket_keepalive=True)
@@ -282,7 +282,7 @@ class Executor(BaseExecutor):
         self._reader_thread.join()
 
       if cancel_futures:
-        for futures, _ in self._futures.values():
+        for futures, _, _ in self._futures.values():
           for future in futures:
             future.cancel()
 
@@ -295,7 +295,7 @@ class Executor(BaseExecutor):
     pickled_fn = cloudpickle.dumps(partial(_execute_batch, fn))
     task = self._pack_task('', pickled_fn, [args], kwargs, task_uuid)
     self._submit_tasks([task])
-    self._futures[task_uuid] = ([future], True)
+    self._futures[task_uuid] = ([future], True, task[1])
     return future
 
   def map(self, fn: Callable, *iterables: Iterable[Any], timeout: Optional[float] = None, chunksize: int = 1) -> Iterator[Any]:
@@ -339,9 +339,10 @@ class Executor(BaseExecutor):
           task_futures[task_uuid] = [Future() for _ in batch]
           for future in task_futures[task_uuid]:
             submitted_queue.put(future)
-        self._futures.update({task_uuid: (futures, False) for task_uuid, futures in task_futures.items()})  # mark as unsubmitted
-        self._submit_tasks([self._pack_task(function_ptr, b'', args, {}, task_uuid) for task_uuid, args in task_args.items()])
-        self._futures.update({task_uuid: (futures, True) for task_uuid, futures in task_futures.items()})  # mark as submitted
+        tasks = dict(self._pack_task(function_ptr, b'', args, {}, task_uuid) for task_uuid, args in task_args.items())
+        self._futures.update({task_uuid: (futures, False, tasks[task_uuid]) for task_uuid, futures in task_futures.items()})  # mark as unsubmitted
+        self._submit_tasks(list(tasks.items()))
+        self._futures.update({task_uuid: (futures, True, tasks[task_uuid]) for task_uuid, futures in task_futures.items()})  # mark as submitted
 
       submitted_queue.put(None)  # Signal the end of the stream
     except Exception:
@@ -358,10 +359,12 @@ class Executor(BaseExecutor):
           self._check_lost_tasks()
         raw = cast(list[bytes], self._result_redis.lpop(self.result_queue_id, count=1000) or [])
         results = self._unpack_results(raw)
+        to_delete = results.copy()
         for header, dat in results.values():
-          self._resolve_futures(header, dat)
-        if results:
-          self._submit_redis_master.hdel(get_tasks_key(self.submit_queue_id), *results.keys())
+          if self._resolve_futures(header, dat):
+            to_delete.pop(header.task_uuid)
+        if to_delete:
+          self._submit_redis_master.hdel(get_tasks_key(self.submit_queue_id), *to_delete.keys())
         time.sleep(0.1)
       except RedisConnectionError:
         print("[ERROR] Redis connection error in miniray reader thread. Retrying in 10 seconds...", file=sys.stderr)
@@ -376,7 +379,7 @@ class Executor(BaseExecutor):
       task_records = cast(list[Optional[bytes]], self._submit_redis_master.hmget(tasks_key, sampled_task_uuids))
 
       for task_uuid, record in zip(sampled_task_uuids, task_records, strict=True):
-        futures, submitted = self._futures[task_uuid]
+        futures, submitted, _ = self._futures[task_uuid]
         if record is None and submitted:
           self._futures.pop(task_uuid)
           claimed = cast(Optional[bytes], self._claimed_redis.get(f"claimed:{task_uuid}"))
@@ -409,11 +412,12 @@ class Executor(BaseExecutor):
       results[header.task_uuid] = (header, dat[1] if len(dat) > 1 else b'')
     return results
 
-  def _resolve_futures(self, header: MinirayResultHeader, dat: bytes) -> None:
+  def _resolve_futures(self, header: MinirayResultHeader, dat: bytes) -> bool:
+    """Deliver a result to its futures. Returns True if the task was requeued instead (its record must be kept)."""
     if header.task_uuid not in self._futures:
       print(f"[ERROR] finished unstarted task: {header.task_uuid} [{header.worker}]", file=sys.stderr)
-      return
-    futures, _ = self._futures.pop(header.task_uuid)
+      return False
+    futures, _, record = self._futures.pop(header.task_uuid)
 
     try:
       if header.succeeded:
@@ -430,6 +434,11 @@ class Executor(BaseExecutor):
               future.set_result(subtask.result)
             else:
               future.set_exception(MinirayError(subtask.exception_type, subtask.exception_desc, header.job, header.worker))
+      elif header.exception_type == "WorkerShutdown":
+        self._submit_tasks([(header.task_uuid, record)])
+        print(f"[miniray] task {header.task_uuid} killed by worker shutdown [{header.worker}], requeued", file=sys.stderr)
+        self._futures[header.task_uuid] = (futures, True, record)  # leave the futures pending; the retry resolves them
+        return True
       else:
         for future in futures:
           future.set_exception(MinirayError(header.exception_type, header.exception_desc, header.job, header.worker))
@@ -439,6 +448,7 @@ class Executor(BaseExecutor):
     except Exception as e:
       for future in futures:
         future.set_exception(e)
+    return False
 
   def _submit_tasks(self, tasks: list[tuple[str, bytes]]) -> None:
     self._submit_redis_master.hsetex(get_tasks_key(self.submit_queue_id), mapping=dict(tasks), ex=PENDING_TASK_SAFETY_TTL)
