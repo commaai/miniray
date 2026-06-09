@@ -115,6 +115,7 @@ class JobConfig:
   use_local_codedir: bool = False
   limits: Limits = field(default_factory=Limits)
   env: dict[str, str] = field(default_factory=dict)
+  local_max_tasks_per_child: Optional[int] = 1
 
   def asdict(self):
     return asdict(self)
@@ -168,7 +169,7 @@ def _get_redis_client(hostname: str) -> StrictRedis:
   return StrictRedis(host=hostname, db=10)
 
 class LocalExecutor(ProcessPoolExecutor):
-  def __init__(self, env: dict[str, str]):
+  def __init__(self, env: dict[str, str], max_tasks_per_child: Optional[int] = 1):
     # need to set env before spawn, because it imports stuff before initializer is run
     self._saved_env = {k: os.environ.get(k) for k in env}
     os.environ.update(env)
@@ -177,9 +178,12 @@ class LocalExecutor(ProcessPoolExecutor):
     super().__init__(
       max_workers=NUM_LOCAL_WORKERS,
       mp_context=ctx,
-      max_tasks_per_child=1,
+      max_tasks_per_child=max_tasks_per_child,
       initializer=_local_worker_init,
     )
+
+  def get_submit_queue_size(self) -> int:
+    return len(self._pending_work_items)
 
   def shutdown(self, *args, **kwargs):
     super().shutdown(*args, **kwargs)
@@ -202,7 +206,8 @@ class Executor(BaseExecutor):
       env: dict[str, str] = config.env if isinstance(config, JobConfig) else {}
       if 'env' in kwargs:
         env = cast(dict[str, str], kwargs['env'])
-      return LocalExecutor(env=env)
+      max_tasks_per_child = config.local_max_tasks_per_child if isinstance(config, JobConfig) else 1
+      return LocalExecutor(env=env, max_tasks_per_child=max_tasks_per_child)
     return super().__new__(cls)
 
   def __init__(self, config: Optional[JobConfig] = None, **kwargs) -> None:
