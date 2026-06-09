@@ -232,7 +232,7 @@ class Executor(BaseExecutor):
     self.submit_queue_id = f'{job_desc}-{self.config.queue_name}'
     self.result_queue_id = f'fq-{self.submit_queue_id}'
 
-    self._futures: dict[str, tuple[list[Future], bool]] = {}
+    self._futures: dict[str, tuple[list[Future], bool, bytes]] = {}
     self._submit_redis_master = StrictRedis(host=self.config.redis_host, port=6379, db=1, socket_keepalive=True)
     self._result_redis = StrictRedis(host=self.config.redis_host, port=6379, db=5, socket_keepalive=True)
     self._claimed_redis = StrictRedis(host=self.config.redis_host, port=6379, db=2, socket_keepalive=True)
@@ -282,7 +282,7 @@ class Executor(BaseExecutor):
         self._reader_thread.join()
 
       if cancel_futures:
-        for futures, _ in self._futures.values():
+        for futures, _, _ in self._futures.values():
           for future in futures:
             future.cancel()
 
@@ -292,10 +292,10 @@ class Executor(BaseExecutor):
     assert not self._shutdown_reader_thread, "Cannot submit new tasks after shutdown has started"
     future: Future = Future()
     task_uuid = str(uuid.uuid4())
-    pickled_fn = cloudpickle.dumps(partial(_execute_batch, fn))
-    task = self._pack_task('', pickled_fn, [args], kwargs, task_uuid)
+    function_ptr = self._cache_func_in_redis(fn)
+    task = self._pack_task(function_ptr, b'', [args], kwargs, task_uuid)
     self._submit_tasks([task])
-    self._futures[task_uuid] = ([future], True)
+    self._futures[task_uuid] = ([future], True, task[1])
     return future
 
   def map(self, fn: Callable, *iterables: Iterable[Any], timeout: Optional[float] = None, chunksize: int = 1) -> Iterator[Any]:
@@ -305,14 +305,16 @@ class Executor(BaseExecutor):
     futures = list(self.fmap(fn, *iterables, chunksize=chunksize))
     return (future.result() for future in futures)
 
-  def fmap(self, fn: Callable, *iterables: Iterable[Any], chunksize: int = 1) -> Iterator[Future]:
-    assert not self._shutdown_reader_thread, "Cannot submit new tasks after shutdown has started"
-
+  def _cache_func_in_redis(self, fn: Callable) -> str:
     # Instead of sending the function along with every request, we cache it in redis and send the cache key in its place
     pickled_fn = cloudpickle.dumps(partial(_execute_batch, fn))
     function_ptr = f'pickledfunc-{hashlib.sha256(pickled_fn).hexdigest()}'
     self._submit_redis_master.set(function_ptr, pickled_fn, ex=7*24*60*60)
+    return function_ptr
 
+  def fmap(self, fn: Callable, *iterables: Iterable[Any], chunksize: int = 1) -> Iterator[Future]:
+    assert not self._shutdown_reader_thread, "Cannot submit new tasks after shutdown has started"
+    function_ptr = self._cache_func_in_redis(fn)
     submitted_queue: Queue[Optional[Future]] = Queue()
     writer_thread = threading.Thread(target=self._writer_loop, args=(submitted_queue, function_ptr, list(iterables), chunksize), daemon=True)
     writer_thread.start()
@@ -339,9 +341,10 @@ class Executor(BaseExecutor):
           task_futures[task_uuid] = [Future() for _ in batch]
           for future in task_futures[task_uuid]:
             submitted_queue.put(future)
-        self._futures.update({task_uuid: (futures, False) for task_uuid, futures in task_futures.items()})  # mark as unsubmitted
-        self._submit_tasks([self._pack_task(function_ptr, b'', args, {}, task_uuid) for task_uuid, args in task_args.items()])
-        self._futures.update({task_uuid: (futures, True) for task_uuid, futures in task_futures.items()})  # mark as submitted
+        tasks = dict(self._pack_task(function_ptr, b'', args, {}, task_uuid) for task_uuid, args in task_args.items())
+        self._futures.update({task_uuid: (futures, False, tasks[task_uuid]) for task_uuid, futures in task_futures.items()})  # mark as unsubmitted
+        self._submit_tasks(list(tasks.items()))
+        self._futures.update({task_uuid: (futures, True, tasks[task_uuid]) for task_uuid, futures in task_futures.items()})  # mark as submitted
 
       submitted_queue.put(None)  # Signal the end of the stream
     except Exception:
@@ -376,7 +379,7 @@ class Executor(BaseExecutor):
       task_records = cast(list[Optional[bytes]], self._submit_redis_master.hmget(tasks_key, sampled_task_uuids))
 
       for task_uuid, record in zip(sampled_task_uuids, task_records, strict=True):
-        futures, submitted = self._futures[task_uuid]
+        futures, submitted, _ = self._futures[task_uuid]
         if record is None and submitted:
           self._futures.pop(task_uuid)
           claimed = cast(Optional[bytes], self._claimed_redis.get(f"claimed:{task_uuid}"))
@@ -413,7 +416,7 @@ class Executor(BaseExecutor):
     if header.task_uuid not in self._futures:
       print(f"[ERROR] finished unstarted task: {header.task_uuid} [{header.worker}]", file=sys.stderr)
       return
-    futures, _ = self._futures.pop(header.task_uuid)
+    futures, _, record = self._futures.pop(header.task_uuid)
 
     try:
       if header.succeeded:
@@ -430,6 +433,12 @@ class Executor(BaseExecutor):
               future.set_result(subtask.result)
             else:
               future.set_exception(MinirayError(subtask.exception_type, subtask.exception_desc, header.job, header.worker))
+      elif header.exception_type == "WorkerShutdown":
+        new_uuid = str(uuid.uuid4())
+        record = json.dumps(TaskRecord(*json.loads(record))._replace(uuid=new_uuid), ensure_ascii=False).encode('utf-8')
+        self._submit_tasks([(new_uuid, record)])
+        print(f"[miniray] task {header.task_uuid} killed by worker shutdown [{header.worker}], requeued as {new_uuid}", file=sys.stderr)
+        self._futures[new_uuid] = (futures, True, record)  # leave the futures pending; the retry resolves them
       else:
         for future in futures:
           future.set_exception(MinirayError(header.exception_type, header.exception_desc, header.job, header.worker))
