@@ -44,8 +44,8 @@ def get_triton_inference_stats(client: InferenceServerClient):
 def load_triton_model(client: InferenceServerClient, model: str, config: ModelConfig, load_timeout = 60):
   if _is_model_loading(client, model):
     deadline = time.perf_counter() + load_timeout
-    while time.time() < deadline and _is_model_loading(client, model):
-      time.sleep(min(5, load_timeout / 5))
+    while time.perf_counter() < deadline and _is_model_loading(client, model):
+      time.sleep(min(5, load_timeout))
     assert client.is_model_ready(model)
     return
   return client.load_model(model, config=json.dumps(config))
