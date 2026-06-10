@@ -29,8 +29,8 @@ def _check_triton_server_health(url: str, timeout: int = 3, scheme: str = "http"
 def _is_model_loading(client: InferenceServerClient, model_name: str):
   repo_index = client.get_model_repository_index()
   for entry in repo_index:
-    if entry.get("name", "") != model_name: continue
-    if entry.get("state", "") == "LOADING": return True
+    if entry.get("name", "") == model_name and entry.get("state", "") == "LOADING":
+      return True
   return False
 
 check_triton_server_health = retry(stop=stop_after_delay(15), wait=wait_fixed(1), reraise=True)(_check_triton_server_health)
@@ -43,8 +43,7 @@ def get_triton_inference_stats(client: InferenceServerClient):
 @retry(stop=stop_after_attempt(3), wait=wait_random(1, 2), reraise=True)
 def load_triton_model(client: InferenceServerClient, model: str, config: ModelConfig, load_timeout = 60):
   if _is_model_loading(client, model):
-    # If model is loading, wait at most load_timeout for it to finish
-    deadline = time.time() + load_timeout
+    deadline = time.perf_counter() + load_timeout
     while time.time() < deadline and _is_model_loading(client, model):
       time.sleep(min(5, load_timeout / 5))
     assert client.is_model_ready(model)
