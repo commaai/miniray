@@ -48,7 +48,7 @@ def load_triton_model(client: InferenceServerClient, model: str, config: ModelCo
     while time.time() < deadline and _is_model_loading(client, model):
       time.sleep(min(5, load_timeout / 5))
     assert client.is_model_ready(model)
-    return 
+    return
   return client.load_model(model, config=json.dumps(config))
 
 def setup_triton_model(func: Callable[..., ModelConfig]):
@@ -62,7 +62,7 @@ def setup_triton_model(func: Callable[..., ModelConfig]):
         return
       if redis is None:
         redis = StrictRedis(host=TRITON_REDIS_HOST, port=6379, db=8)
-      with redis.lock(model, timeout=10*60): 
+      with redis.lock(model, timeout=10*60):
         if client.is_model_ready(model):
           return  # check if the model is ready both before and after acquiring the lock
         shutil.rmtree(model_dir, ignore_errors=True)
