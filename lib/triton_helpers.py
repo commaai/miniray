@@ -26,6 +26,13 @@ def _check_triton_server_health(url: str, timeout: int = 3, scheme: str = "http"
     url = f"{scheme}://{url}"
   urllib.request.urlopen(f"{url}/v2/health/live", timeout=timeout)
 
+def _is_model_loading(client: InferenceServerClient, model_name: str):
+  repo_index = client.get_model_repository_index()
+  for entry in repo_index:
+    if entry.get("name", "") != model_name: continue
+    if entry.get("state", "") == "LOADING": return True
+  return False
+
 check_triton_server_health = retry(stop=stop_after_delay(15), wait=wait_fixed(1), reraise=True)(_check_triton_server_health)
 wait_for_triton_server = retry(stop=stop_after_delay(60), wait=wait_fixed(2), reraise=True)(_check_triton_server_health)
 
@@ -34,12 +41,19 @@ def get_triton_inference_stats(client: InferenceServerClient):
   return client.get_inference_statistics()['model_stats']
 
 @retry(stop=stop_after_attempt(3), wait=wait_random(1, 2), reraise=True)
-def load_triton_model(client: InferenceServerClient, model: str, config: ModelConfig):
+def load_triton_model(client: InferenceServerClient, model: str, config: ModelConfig, load_timeout = 60):
+  if _is_model_loading(client, model):
+    # If model is loading, wait at most load_timeout for it to finish
+    deadline = time.time() + load_timeout
+    while time.time() < deadline and _is_model_loading(client, model):
+      time.sleep(min(5, load_timeout / 5))
+    assert client.is_model_ready(model)
+    return 
   return client.load_model(model, config=json.dumps(config))
 
 def setup_triton_model(func: Callable[..., ModelConfig]):
   @wraps(func)
-  def wrapper(*self: Any, client: InferenceServerClient, model: str, redis: Optional[StrictRedis] = None) -> None:
+  def wrapper(*self: Any, client: InferenceServerClient, model: str, redis: Optional[StrictRedis] = None, load_timeout = 60) -> None:
       model_dir = TRITON_MODEL_REPOSITORY / model / '1'
       if client.is_model_ready(model):  # if the model is already loaded, bump the mtime and return
         mtime = time.time()
@@ -48,13 +62,13 @@ def setup_triton_model(func: Callable[..., ModelConfig]):
         return
       if redis is None:
         redis = StrictRedis(host=TRITON_REDIS_HOST, port=6379, db=8)
-      with redis.lock(model, timeout=10*60):
+      with redis.lock(model, timeout=10*60): 
         if client.is_model_ready(model):
           return  # check if the model is ready both before and after acquiring the lock
         shutil.rmtree(model_dir, ignore_errors=True)
         model_dir.mkdir(parents=True, exist_ok=True)
         config = func(*self, model_dir)
-        load_triton_model(client, model, config)
+        load_triton_model(client, model, config, load_timeout=load_timeout)
         assert client.is_model_ready(model)
   return wrapper
 
