@@ -413,7 +413,7 @@ class Executor(BaseExecutor):
       results[header.task_uuid] = (header, dat[1] if len(dat) > 1 else b'')
     return results
   
-  def _resubmit_task(self, futures: list[Future], header: MinirayResultHeader, record: bytes, reason: str = 'killed by worker shutdown') -> None:
+  def _resubmit_task(self, futures: list[Future], header: MinirayResultHeader, record: bytes, reason: str) -> None:
     new_uuid = str(uuid.uuid4())
     record = json.dumps(TaskRecord(*json.loads(record))._replace(uuid=new_uuid), ensure_ascii=False).encode('utf-8')
     self._submit_tasks([(new_uuid, record)])
@@ -445,7 +445,7 @@ class Executor(BaseExecutor):
             else:
               future.set_exception(MinirayError(subtask.exception_type, subtask.exception_desc, header.job, header.worker))
       elif header.exception_type == "WorkerShutdown":
-        self._resubmit_task(futures, header, record)
+        self._resubmit_task(futures, header, record, 'killed by worker shutdown')
       else:
         for future in futures:
           future.set_exception(MinirayError(header.exception_type, header.exception_desc, header.job, header.worker))
