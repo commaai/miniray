@@ -412,7 +412,7 @@ class Executor(BaseExecutor):
       header = MinirayResultHeader(*json.loads(dat[0]))
       results[header.task_uuid] = (header, dat[1] if len(dat) > 1 else b'')
     return results
-
+  
   def _resubmit_task(self, futures: list[Future], header: MinirayResultHeader, record: bytes, reason: str = 'killed by worker shutdown') -> None:
     new_uuid = str(uuid.uuid4())
     record = json.dumps(TaskRecord(*json.loads(record))._replace(uuid=new_uuid), ensure_ascii=False).encode('utf-8')
