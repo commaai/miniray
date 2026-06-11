@@ -148,15 +148,16 @@ def _execute_batch(fn, *batch, **kwargs):
       results.append(MiniraySubTaskResult(False, type(e).__name__, traceback.format_exc(), None))
   return _wrap_result_local_redis(results, timeout_seconds=DEFAULT_RESULT_PAYLOAD_TIMEOUT_SECONDS)
 
-def _wrap_result_local_redis(data: Any, timeout_seconds: int) -> tuple[str, str]:
+def _wrap_result_local_redis(data: Any, timeout_seconds: int) -> tuple[str, str, str]:
   key = f"miniray-{uuid.uuid4()}"
   redis_result_host = REDIS_HOST if USE_MAIN_RESULT_REDIS else socket.gethostname()
   r = StrictRedis(host=redis_result_host, db=10)
+  run_id = cast(dict[str, Any], r.info('server'))['run_id']
   pipe = r.pipeline()
   pipe.lpush(key, cloudpickle.dumps(data))
   pipe.expire(key, timeout_seconds)
   pipe.execute()
-  return (redis_result_host, key)
+  return (redis_result_host, key, run_id)
 
 def _local_worker_init():
   if (seed := os.getenv("MINIRAY_LOCAL_SEED")) is not None:
@@ -412,6 +413,13 @@ class Executor(BaseExecutor):
       results[header.task_uuid] = (header, dat[1] if len(dat) > 1 else b'')
     return results
 
+  def _resubmit_task(self, futures: list[Future], header: MinirayResultHeader, record: bytes, reason: str = 'killed by worker shutdown') -> None:
+    new_uuid = str(uuid.uuid4())
+    record = json.dumps(TaskRecord(*json.loads(record))._replace(uuid=new_uuid), ensure_ascii=False).encode('utf-8')
+    self._submit_tasks([(new_uuid, record)])
+    print(f"[miniray] task {header.task_uuid} {reason} [{header.worker}], requeued as {new_uuid}", file=sys.stderr)
+    self._futures[new_uuid] = (futures, True, record)  # leave the futures pending; the retry resolves them
+
   def _resolve_futures(self, header: MinirayResultHeader, dat: bytes) -> None:
     if header.task_uuid not in self._futures:
       print(f"[ERROR] finished unstarted task: {header.task_uuid} [{header.worker}]", file=sys.stderr)
@@ -420,12 +428,15 @@ class Executor(BaseExecutor):
 
     try:
       if header.succeeded:
-        hostname, key = cloudpickle.loads(dat)
+        hostname, key, run_id = cloudpickle.loads(dat)
         r = _get_redis_client(hostname)
         result_payload = cast(Optional[bytes], r.lpop(key))
         if result_payload is None:
-          for future in futures:
-            future.set_exception(MinirayError("MinirayError", MISSING_RESULT_PAYLOAD_ERROR, header.job, header.worker))
+          if run_id != cast(dict[str, Any], r.info('server'))['run_id']:
+            self._resubmit_task(futures, header, record, reason='result payload lost (worker redis recreated)')
+          else:
+            for future in futures:
+              future.set_exception(MinirayError("MinirayError", MISSING_RESULT_PAYLOAD_ERROR, header.job, header.worker))
         else:
           subtasks = cloudpickle.loads(result_payload)
           for future, subtask in zip(futures, subtasks, strict=True):
@@ -434,11 +445,7 @@ class Executor(BaseExecutor):
             else:
               future.set_exception(MinirayError(subtask.exception_type, subtask.exception_desc, header.job, header.worker))
       elif header.exception_type == "WorkerShutdown":
-        new_uuid = str(uuid.uuid4())
-        record = json.dumps(TaskRecord(*json.loads(record))._replace(uuid=new_uuid), ensure_ascii=False).encode('utf-8')
-        self._submit_tasks([(new_uuid, record)])
-        print(f"[miniray] task {header.task_uuid} killed by worker shutdown [{header.worker}], requeued as {new_uuid}", file=sys.stderr)
-        self._futures[new_uuid] = (futures, True, record)  # leave the futures pending; the retry resolves them
+        self._resubmit_task(futures, header, record)
       else:
         for future in futures:
           future.set_exception(MinirayError(header.exception_type, header.exception_desc, header.job, header.worker))
