@@ -257,7 +257,6 @@ class Executor(BaseExecutor):
     if not self._submit_redis_master.keys(f'active:{self.config.queue_name}:*'):
       print(f"[miniray] WARNING: no workers listening on queue {self.config.queue_name}", file=sys.stderr)
 
-
   def __enter__(self):
     self._shutdown_writer_threads = False
     self._shutdown_reader_thread = None
