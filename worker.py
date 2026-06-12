@@ -60,6 +60,7 @@ TMP_DIR_ROOT = Path("/dev/shm/tmp") / CGROUP_NODE
 # you need a really good reason to use a global directory shared across all tasks
 # (normally you should use the tmp directory that is cleaned up after every task)
 CUPY_CACHE_DIR = TMP_DIR_ROOT / "cupy"
+PYCACHE_DIR = TMP_DIR_ROOT / "pycache"
 TRITON_SERVER_ENABLED = int(os.getenv('TRITON_SERVER_ENABLED', '0'))
 
 
@@ -74,6 +75,10 @@ def setup_global_dirs():
   CUPY_CACHE_DIR.mkdir(parents=True)
   os.chown(CUPY_CACHE_DIR, TASK_UID, TASK_UID)
   CUPY_CACHE_DIR.chmod(0o755)
+
+  PYCACHE_DIR.mkdir(parents=True)
+  os.chown(PYCACHE_DIR, TASK_UID, TASK_UID)
+  PYCACHE_DIR.chmod(0o755)
 
 def create_tmp_dir(path: Path, uid, gid):
   if path.exists():
@@ -220,6 +225,7 @@ class Task:
         **os.environ,
         'NO_PROGRESS': '1',
         'CUPY_CACHE_DIR': str(CUPY_CACHE_DIR),
+        'PYTHONPYCACHEPREFIX': str(PYCACHE_DIR),
         'CUDA_VISIBLE_DEVICES': ','.join(cuda_visible_devices),
         'USER': 'batman',
         'HOME': '/home/batman',
