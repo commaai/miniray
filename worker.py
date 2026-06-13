@@ -250,7 +250,7 @@ class Task:
       if DEBUG: print("[worker]", " ".join(p_args))
 
       t0 = time.perf_counter()
-      self.proc = subprocess.Popen(p_args, user=0, group=self.task_gid, extra_groups=task_extra_groups, cwd=str(EMPTY_DIR), env=p_env,
+      self.proc = subprocess.Popen(p_args, user=TASK_UID, group=self.task_gid, extra_groups=task_extra_groups, cwd=str(EMPTY_DIR), env=p_env,
                                    start_new_session=True, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
       cgroup_add_pid(self.cgroup_name, self.proc.pid)
       assert self.proc.stdin is not None
