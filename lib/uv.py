@@ -56,7 +56,6 @@ def cleanup_venvs(user_id: int, keep_venvs: list[str]):
   for venv in base_dir.iterdir():
     if venv.name not in keep_venvs:
       shutil.rmtree(venv)
-      # also delete the local pycache dir
       pycache_dir = pycache_dir_for_venv(venv.name, user_id)
       shutil.rmtree(pycache_dir, ignore_errors=True)
 
