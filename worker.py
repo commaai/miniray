@@ -37,7 +37,7 @@ from miniray.lib.triton_helpers import TRITON_SERVER_ADDRESS, check_triton_serve
 from miniray.lib.system_helpers import get_cgroup_cpu_usage, get_cgroup_mem_usage, get_gpu_stats, get_gpu_mem_usage, get_gpu_utilization
 from miniray.lib.statsd_helpers import statsd
 from miniray.lib.helpers import Limits, desc, GB_TO_BYTES, MAX_WORKER_LOOP_SECONDS, TASK_TIMEOUT_GRACE_SECONDS, JOB_CACHE_SIZE
-from miniray.lib.uv import sync_venv_cache, cleanup_venvs, populate_venv_cache_from_disk, pycache_dir_for_venv
+from miniray.lib.uv import sync_venv_cache, cleanup_venvs, populate_venv_cache_from_disk, pycache_base_dir, pycache_dir_for_venv
 from miniray.executor import MinirayResultHeader, JobMetadata, TaskRecord, TaskState, get_metadata_key, get_tasks_key
 
 
@@ -60,7 +60,7 @@ TMP_DIR_ROOT = Path("/dev/shm/tmp") / CGROUP_NODE
 # you need a really good reason to use a global directory shared across all tasks
 # (normally you should use the tmp directory that is cleaned up after every task)
 CUPY_CACHE_DIR = TMP_DIR_ROOT / "cupy"
-PYCACHE_DIR = Path(os.getenv('MINIRAY_PYCACHE_DIR', f"/var/cache/miniray/pycache_{TASK_UID}"))
+PYCACHE_DIR = pycache_base_dir(TASK_UID)
 TRITON_SERVER_ENABLED = int(os.getenv('TRITON_SERVER_ENABLED', '0'))
 
 

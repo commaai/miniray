@@ -20,9 +20,11 @@ def parse_uv_sync_stderr(stderr):
 def base_venv_path(user_id: int):
   return Path(pwd.getpwuid(user_id).pw_dir) / ".job_venvs"
 
+def pycache_base_dir(user_id: int) -> Path:
+  return Path(f"/var/cache/miniray/pycache_{user_id}")
+
 def pycache_dir_for_venv(venv_name: str, user_id: int) -> Path:
-  base = Path(os.getenv("MINIRAY_PYCACHE_DIR", f"/var/cache/miniray/pycache_{user_id}"))
-  return base / venv_name
+  return pycache_base_dir(user_id) / venv_name
 
 def sync_venv_cache(codedir: Union[str, Path], user_id: int, venv_name: str):
   venv_dir = base_venv_path(user_id) / venv_name
