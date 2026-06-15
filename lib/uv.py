@@ -20,11 +20,8 @@ def parse_uv_sync_stderr(stderr):
 def base_venv_path(user_id: int):
   return Path(pwd.getpwuid(user_id).pw_dir) / ".job_venvs"
 
-def pycache_base_dir(user_id: int) -> Path:
-  return Path(f"/var/cache/miniray/pycache_{user_id}")
-
 def pycache_dir_for_venv(venv_name: str, user_id: int) -> Path:
-  return pycache_base_dir(user_id) / venv_name
+  return Path(f"/var/cache/miniray/pycache_{user_id}") / venv_name
 
 def sync_venv_cache(codedir: Union[str, Path], user_id: int, venv_name: str):
   venv_dir = base_venv_path(user_id) / venv_name
@@ -59,7 +56,7 @@ def cleanup_venvs(user_id: int, keep_venvs: list[str]):
   for venv in base_dir.iterdir():
     if venv.name not in keep_venvs:
       shutil.rmtree(venv)
-      # also delete the companion local pycache dir when the venv is evicted
+      # also delete the local pycache dir
       pycache_dir = pycache_dir_for_venv(venv.name, user_id)
       shutil.rmtree(pycache_dir, ignore_errors=True)
 
