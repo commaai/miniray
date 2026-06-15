@@ -52,8 +52,7 @@ def cleanup_venvs(user_id: int, keep_venvs: list[str]):
   for venv in base_dir.iterdir():
     if venv.name not in keep_venvs:
       shutil.rmtree(venv)
-      pycache_dir = pycache_dir_for_venv(venv.name, user_id)
-      shutil.rmtree(pycache_dir, ignore_errors=True)
+      shutil.rmtree(pycache_dir_for_venv(venv.name, user_id), ignore_errors=True)
 
 
 def populate_venv_cache_from_disk(venv_cache: LRU[str, str], user_id: int) -> None:
