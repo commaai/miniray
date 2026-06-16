@@ -164,7 +164,7 @@ def test_memory_limit():
     future_over = executor.submit(allocate_and_hash, over_limit_bytes)
     with pytest.raises(miniray.MinirayError) as excinfo:
       future_over.result()
-    assert excinfo.value.exception_type == "ChildProcessError<9>"
+    assert excinfo.value.exception_type == "ChildProcessError<-9>"
 
 
 def test_early_shutdown():
