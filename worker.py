@@ -274,10 +274,9 @@ class Task:
 
     # Wait for the process to terminate
     if self.proc.returncode is None:
-      pid, returncode = os.waitpid(self.proc.pid, os.WNOHANG)
-      if not pid and not self._timed_out:
+      self.proc.poll()
+      if self.proc.returncode is None and not self._timed_out:
         return False  # still waiting
-      self.proc.returncode = returncode
 
     cgroup_kill(self.cgroup_name)
     try:
@@ -288,6 +287,11 @@ class Task:
         print(stderr.decode())
     except subprocess.TimeoutExpired:
       print('Task proc communicate timed out, might be a zombie?')
+      try:
+        self.proc.kill()
+        self.proc.communicate(timeout=5)
+      except Exception as e:
+        print(f'[worker] failed to reap zombie task proc: {desc(e)}')
 
     # Read result file
     try:
