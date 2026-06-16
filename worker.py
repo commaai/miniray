@@ -287,11 +287,6 @@ class Task:
         print(stderr.decode())
     except subprocess.TimeoutExpired:
       print('Task proc communicate timed out, might be a zombie?')
-      try:
-        self.proc.kill()
-        self.proc.communicate(timeout=5)
-      except Exception as e:
-        print(f'[worker] failed to reap zombie task proc: {desc(e)}')
 
     # Read result file
     try:
