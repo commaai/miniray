@@ -78,9 +78,11 @@ def cgroup_kill(name: str) -> None:
 
 def cgroup_is_populated(name: str | Path) -> bool:
   try:
-    return "populated 1" in (_get_cgroup_path(name) / "cgroup.events").read_text()
+    events = (_get_cgroup_path(name) / "cgroup.events").read_text()
   except FileNotFoundError:
     return False
+  fields = dict(line.split() for line in events.splitlines())
+  return fields["populated"] == "1"
 
 
 def cgroup_clear_all_children(name: str) -> None:
