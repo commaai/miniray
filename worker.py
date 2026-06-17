@@ -266,7 +266,6 @@ class Task:
 
     self._timed_out = time.perf_counter() > self.start_time + self.limits.timeout_seconds
 
-    # Wait for the task to finish (or time out), then kill the whole cgroup once.
     if self._kill_deadline is None:
       self.proc.poll()
       if self.proc.returncode is None and not self._timed_out:
