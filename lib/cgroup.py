@@ -77,16 +77,10 @@ def cgroup_kill(name: str) -> None:
 
 
 def cgroup_is_populated(name: str | Path) -> bool:
-  cgroup_path = _get_cgroup_path(name)
   try:
-    with (cgroup_path / "cgroup.events").open() as f:
-      for line in f:
-        key, _, value = line.partition(" ")
-        if key == "populated":
-          return value.strip() == "1"
+    return "populated 1" in (_get_cgroup_path(name) / "cgroup.events").read_text()
   except FileNotFoundError:
     return False
-  return False
 
 
 def cgroup_clear_all_children(name: str) -> None:
