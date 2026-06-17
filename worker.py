@@ -277,7 +277,7 @@ class Task:
     # Poll until every process in the cgroup has exited.
     if cgroup_is_populated(self.cgroup_name):
       if not exiting and time.perf_counter() < self._kill_deadline:
-        return False  # let sigkill take effect
+        return False  # still waiting on sigkill
       print(f"[worker] {self.cgroup_name} still populated after {SIGKILL_GRACE_SECONDS}s")
 
     try:
