@@ -264,11 +264,9 @@ class Task:
       cgroup_kill(self.cgroup_name)
       self._kill_deadline = time.perf_counter() + SIGKILL_GRACE_SECONDS
 
-    # Poll until every process in the cgroup has exited.
-    if cgroup_is_populated(self.cgroup_name):
-      if not exiting and time.perf_counter() < self._kill_deadline:
-        return False  # still waiting on sigkill
-      print(f"[worker] {self.cgroup_name} still populated after {SIGKILL_GRACE_SECONDS}s")
+    # Wait (non-blocking) for the cgroup to drain, up to the SIGKILL grace.
+    if cgroup_is_populated(self.cgroup_name) and not exiting and time.perf_counter() < self._kill_deadline:
+      return False  # still waiting on sigkill
 
     try:
       stdout, stderr = self.proc.communicate(timeout=1)
@@ -313,7 +311,8 @@ class Task:
       return True
     if cgroup_is_populated(self.cgroup_name):
       if not exiting:
-        raise RuntimeError(f"{self.cgroup_name} still populated after SIGKILL")
+        raise RuntimeError(f"{self.cgroup_name}: a process survived SIGKILL+{SIGKILL_GRACE_SECONDS}s, restarting worker to reclaim the cgroup")
+      print(f"[worker] {self.cgroup_name}: a process survived SIGKILL+{SIGKILL_GRACE_SECONDS}s")
     else:
       cgroup_delete(self.cgroup_name, recursive=True)
     return True
