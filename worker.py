@@ -311,7 +311,7 @@ class Task:
       return True
     if cgroup_is_populated(self.cgroup_name):
       if not exiting:
-        raise RuntimeError(f"{self.cgroup_name}: a process survived SIGKILL+{SIGKILL_GRACE_SECONDS}s, restarting worker to reclaim the cgroup")
+        raise RuntimeError(f"{self.cgroup_name}: a process survived SIGKILL+{SIGKILL_GRACE_SECONDS}s")
       print(f"[worker] {self.cgroup_name}: a process survived SIGKILL+{SIGKILL_GRACE_SECONDS}s")
     else:
       cgroup_delete(self.cgroup_name, recursive=True)
