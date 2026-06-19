@@ -112,15 +112,6 @@ def cleanup_shm_by_gid(alloc_id, triton_client, gid):
   if tmp_dir.exists():
     shutil.rmtree(tmp_dir)
 
-
-def cleanup_cgroup(cgroup_name: str, ignore_errors: bool=False) -> None:
-  try:
-    cgroup_delete(cgroup_name, recursive=True)
-  except OSError as e:
-    print(f"[worker] {cgroup_name} cgroup delete failed: {desc(e)}")
-    if not ignore_errors:
-      raise
-
 class Task:
   proc: Optional[subprocess.Popen]
   alloc_id: Optional[str]
@@ -320,7 +311,11 @@ class Task:
 
     if self.alloc_id is None:
       return True
-    cleanup_cgroup(self.cgroup_name, exiting)
+    if cgroup_is_populated(self.cgroup_name):
+      if not exiting:
+        raise RuntimeError(f"{self.cgroup_name} still populated after SIGKILL")
+    else:
+      cgroup_delete(self.cgroup_name, recursive=True)
     return True
 
   def finish(self, exiting=False):

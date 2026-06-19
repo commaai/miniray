@@ -77,10 +77,7 @@ def cgroup_kill(name: str) -> None:
 
 
 def cgroup_is_populated(name: str | Path) -> bool:
-  try:
-    events = (_get_cgroup_path(name) / "cgroup.events").read_text()
-  except FileNotFoundError:
-    return False
+  events = (_get_cgroup_path(name) / "cgroup.events").read_text()
   fields = dict(line.split() for line in events.splitlines())
   return fields["populated"] == "1"
 
