@@ -4,7 +4,7 @@ version = "0.1.0"
 description = "Distributed task execution framework"
 requires-python = ">=3.12"
 dependencies = [
-    "redis>=4.0.0",
+    "redis>=7.3.0,<8",
     "cloudpickle>=2.0.0",
     "tqdm>=4.60.0",
     "lru-dict>=1.1.0",
