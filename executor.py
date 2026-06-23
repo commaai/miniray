@@ -148,16 +148,16 @@ def _execute_batch(fn, *batch, **kwargs):
       results.append(MiniraySubTaskResult(False, type(e).__name__, traceback.format_exc(), None))
   return _wrap_result_local_redis(results, timeout_seconds=DEFAULT_RESULT_PAYLOAD_TIMEOUT_SECONDS)
 
-def _wrap_result_local_redis(data: Any, timeout_seconds: int) -> tuple[str, str, str]:
-  key = f"miniray-{uuid.uuid4()}"
+def _wrap_result_local_redis(data: Any, timeout_seconds: int) -> tuple[str, str]:
   redis_result_host = REDIS_HOST if USE_MAIN_RESULT_REDIS else socket.gethostname()
   r = StrictRedis(host=redis_result_host, db=10)
   run_id = cast(dict[str, Any], r.info('server'))['run_id']
+  key = f"miniray-{uuid.uuid4()}@{run_id}"
   pipe = r.pipeline()
   pipe.lpush(key, cloudpickle.dumps(data))
   pipe.expire(key, timeout_seconds)
   pipe.execute()
-  return (redis_result_host, key, run_id)
+  return (redis_result_host, key)
 
 def _local_worker_init():
   if (seed := os.getenv("MINIRAY_LOCAL_SEED")) is not None:
@@ -428,11 +428,12 @@ class Executor(BaseExecutor):
 
     try:
       if header.succeeded:
-        hostname, key, run_id = cloudpickle.loads(dat)
+        hostname, key = cloudpickle.loads(dat)
         r = _get_redis_client(hostname)
         result_payload = cast(Optional[bytes], r.lpop(key))
         if result_payload is None:
-          if run_id != cast(dict[str, Any], r.info('server'))['run_id']:
+          run_id = key.partition('@')[2]
+          if run_id and run_id != cast(dict[str, Any], r.info('server'))['run_id']:
             self._resubmit_task(futures, header, record, reason='result payload lost (worker redis recreated)')
           else:
             for future in futures:
