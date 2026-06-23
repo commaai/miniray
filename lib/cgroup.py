@@ -76,6 +76,12 @@ def cgroup_kill(name: str) -> None:
     f.write("1")
 
 
+def cgroup_is_populated(name: str | Path) -> bool:
+  events = (_get_cgroup_path(name) / "cgroup.events").read_text()
+  fields = dict(line.split() for line in events.splitlines())
+  return fields["populated"] == "1"
+
+
 def cgroup_clear_all_children(name: str) -> None:
   cgroup_path = _get_cgroup_path(name)
   cgroup_kill(name)
