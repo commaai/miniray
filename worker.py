@@ -37,7 +37,7 @@ from miniray.lib.triton_helpers import TRITON_SERVER_ADDRESS, check_triton_serve
 from miniray.lib.system_helpers import get_cgroup_cpu_usage, get_cgroup_mem_usage, get_gpu_stats, get_gpu_mem_usage, get_gpu_utilization
 from miniray.lib.statsd_helpers import statsd
 from miniray.lib.helpers import Limits, desc, GB_TO_BYTES, MAX_WORKER_LOOP_SECONDS, TASK_TIMEOUT_GRACE_SECONDS, JOB_CACHE_SIZE
-from miniray.lib.uv import sync_venv_cache, cleanup_venvs, populate_venv_cache_from_disk
+from miniray.lib.uv import sync_venv_cache, cleanup_venvs, populate_venv_cache_from_disk, pycache_dir_for_venv
 from miniray.executor import MinirayResultHeader, JobMetadata, TaskRecord, TaskState, get_metadata_key, get_tasks_key
 
 
@@ -60,6 +60,7 @@ TMP_DIR_ROOT = Path("/dev/shm/tmp") / CGROUP_NODE
 # you need a really good reason to use a global directory shared across all tasks
 # (normally you should use the tmp directory that is cleaned up after every task)
 CUPY_CACHE_DIR = TMP_DIR_ROOT / "cupy"
+PYCACHE_DIR = Path(f"/var/cache/miniray/pycache_{TASK_UID}")
 TRITON_SERVER_ENABLED = int(os.getenv('TRITON_SERVER_ENABLED', '0'))
 
 
@@ -74,6 +75,11 @@ def setup_global_dirs():
   CUPY_CACHE_DIR.mkdir(parents=True)
   os.chown(CUPY_CACHE_DIR, TASK_UID, TASK_UID)
   CUPY_CACHE_DIR.chmod(0o755)
+
+  # keep python bytecode cache on local disk instead of inside the venvs on NFS.
+  PYCACHE_DIR.mkdir(parents=True, exist_ok=True)
+  os.chown(PYCACHE_DIR, TASK_UID, TASK_UID)
+  PYCACHE_DIR.chmod(0o755)
 
 def create_tmp_dir(path: Path, uid, gid):
   if path.exists():
@@ -220,6 +226,7 @@ class Task:
         **os.environ,
         'NO_PROGRESS': '1',
         'CUPY_CACHE_DIR': str(CUPY_CACHE_DIR),
+        'PYTHONPYCACHEPREFIX': str(pycache_dir_for_venv(self.job, TASK_UID)),
         'CUDA_VISIBLE_DEVICES': ','.join(cuda_visible_devices),
         'USER': 'batman',
         'HOME': '/home/batman',
@@ -244,7 +251,7 @@ class Task:
       if DEBUG: print("[worker]", " ".join(p_args))
 
       t0 = time.perf_counter()
-      self.proc = subprocess.Popen(p_args, user=0, group=self.task_gid, extra_groups=task_extra_groups, cwd=str(EMPTY_DIR), env=p_env,
+      self.proc = subprocess.Popen(p_args, user=TASK_UID, group=self.task_gid, extra_groups=task_extra_groups, cwd=str(EMPTY_DIR), env=p_env,
                                    start_new_session=True, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
       cgroup_add_pid(self.cgroup_name, self.proc.pid)
       assert self.proc.stdin is not None
@@ -267,10 +274,9 @@ class Task:
 
     # Wait for the process to terminate
     if self.proc.returncode is None:
-      pid, returncode = os.waitpid(self.proc.pid, os.WNOHANG)
-      if not pid and not self._timed_out:
+      self.proc.poll()
+      if self.proc.returncode is None and not self._timed_out:
         return False  # still waiting
-      self.proc.returncode = returncode
 
     cgroup_kill(self.cgroup_name)
     try:

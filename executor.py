@@ -255,6 +255,8 @@ class Executor(BaseExecutor):
     )
     self._submit_redis_master.set(get_metadata_key(self.submit_queue_id), json.dumps(job_metadata), ex=7*24*60*60)
 
+    if not self._submit_redis_master.keys(f'active:{self.config.queue_name}:*'):
+      print(f"[miniray] WARNING: no workers listening on queue {self.config.queue_name}", file=sys.stderr)
 
   def __enter__(self):
     self._shutdown_writer_threads = False
