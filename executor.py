@@ -50,6 +50,7 @@ MISSING_RESULT_PAYLOAD_ERROR = (
 XX_BASEPATH = Path(__file__).resolve().parent.parent
 XX_BASEDIR = str(XX_BASEPATH)
 CACHE_ROOT = Path("/code.nfs/branches/caches")
+DEFAULT_CODEDIR = Path('/code.nfs/xx')
 
 
 class MinirayError(Exception):
