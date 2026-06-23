@@ -22,7 +22,7 @@ def show_working():
       records = {task_id: TaskRecord(*json.loads(task_value)) for task_id, task_value in batch}
       working = {task_id: record for task_id, record in records.items() if record.state == TaskState.WORKING}
       if working:
-        ttls = cast(list[int], client.httl(job, *working.keys()))
+        ttls = client.httl(job, *working.keys())
         for record, ttl in zip(working.values(), ttls, strict=True):
           outputs[job].append(f"{record.worker:<24s} {record.executor:<24s} {ttl:8d}s remaining")
 
