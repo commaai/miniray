@@ -11,7 +11,6 @@ RUN bash /app/miniray/setup_isolation.sh
 RUN uv lock && uv pip install --system -r pyproject.toml --all-extras
 RUN mkdir /code.nfs
 RUN ln -s /app /code.nfs/xx
-# stamp the version the deploy would write, so _own_miniray_sha() needn't shell out to git (absent here)
 RUN echo ci > /app/miniray/VERSION
 
 ENV PYTHONPATH=/app
