@@ -29,7 +29,7 @@ from typing import BinaryIO, Optional, cast
 from tritonclient.http import InferenceServerClient
 
 from miniray.lib.cgroup import cgroup_create, cgroup_set_subcontrollers, cgroup_set_memory_limit, \
-                               cgroup_set_numa_nodes, cgroup_add_pid, cgroup_kill, cgroup_delete, cgroup_clear_all_children, CGROUP_DELETE_RETRIES
+                               cgroup_set_numa_nodes, cgroup_add_pid, cgroup_kill, cgroup_delete, cgroup_clear_all_children, cgroup_is_populated
 from miniray.lib.sig_term_handler import SigTermHandler
 from miniray.lib.resource_manager import ResourceManager, ResourceLimitError
 from miniray.lib.worker_helpers import ExponentialBackoff
@@ -47,6 +47,7 @@ DEBUG = os.getenv("DEBUG_WORKER", None)
 REDIS_HOST = os.getenv('REDIS_HOST', 'redis.comma.internal')
 PIPELINE_QUEUE = os.getenv('PIPELINE_QUEUE', 'local'+"-"+HOST_NAME)   # override this in systemd
 SLEEP_TIME_MAX = int(os.getenv('SLEEP_TIME_MAX', '2'))
+SIGKILL_GRACE_SECONDS = 60
 
 EMPTY_DIR = Path("/tmp/empty")  # Run worker_task.py from an empty directory so relative path lookups don't hit code.nfs
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -111,23 +112,6 @@ def cleanup_shm_by_gid(alloc_id, triton_client, gid):
   if tmp_dir.exists():
     shutil.rmtree(tmp_dir)
 
-
-def cleanup_cgroup_with_retries(cgroup_name: str, ignore_errors: bool=False) -> None:
-  for attempt in range(CGROUP_DELETE_RETRIES + 1):
-    try:
-      cgroup_kill(cgroup_name)
-      cgroup_delete(cgroup_name, recursive=True)
-      return
-    except Exception as e:
-      print(f"[worker] {cgroup_name} cgroup cleanup failed: {desc(e)}")
-      if ignore_errors:
-        return
-      if attempt >= CGROUP_DELETE_RETRIES:
-        raise RuntimeError(
-          f"fatal cgroup cleanup failure for {cgroup_name} after {CGROUP_DELETE_RETRIES + 1} attempts"
-        ) from e
-      time.sleep(1)
-
 class Task:
   proc: Optional[subprocess.Popen]
   alloc_id: Optional[str]
@@ -157,6 +141,7 @@ class Task:
     self.alloc_id: Optional[str] = None
     self._reaped = False
     self._timed_out = False
+    self._kill_deadline: Optional[float] = None
     self._task_result = b''
     self._error = job_error
     self.init_timings = {}
@@ -272,13 +257,17 @@ class Task:
 
     self._timed_out = time.perf_counter() > self.start_time + self.limits.timeout_seconds
 
-    # Wait for the process to terminate
-    if self.proc.returncode is None:
+    if self._kill_deadline is None:
       self.proc.poll()
       if self.proc.returncode is None and not self._timed_out:
-        return False  # still waiting
+        return False  # still running
+      cgroup_kill(self.cgroup_name)
+      self._kill_deadline = time.perf_counter() + SIGKILL_GRACE_SECONDS
 
-    cgroup_kill(self.cgroup_name)
+    # Wait (non-blocking) for the cgroup to drain, up to the SIGKILL grace.
+    if cgroup_is_populated(self.cgroup_name) and not exiting and time.perf_counter() < self._kill_deadline:
+      return False  # still waiting on sigkill
+
     try:
       stdout, stderr = self.proc.communicate(timeout=1)
       if stdout:
@@ -320,7 +309,12 @@ class Task:
 
     if self.alloc_id is None:
       return True
-    cleanup_cgroup_with_retries(self.cgroup_name, exiting)
+    if cgroup_is_populated(self.cgroup_name):
+      if not exiting:
+        raise RuntimeError(f"{self.cgroup_name}: a process survived SIGKILL+{SIGKILL_GRACE_SECONDS}s")
+      print(f"[worker] {self.cgroup_name}: a process survived SIGKILL+{SIGKILL_GRACE_SECONDS}s")
+    else:
+      cgroup_delete(self.cgroup_name, recursive=True)
     return True
 
   def finish(self, exiting=False):
