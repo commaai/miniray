@@ -50,7 +50,8 @@ MISSING_RESULT_PAYLOAD_ERROR = (
 XX_BASEPATH = Path(__file__).resolve().parent.parent
 XX_BASEDIR = str(XX_BASEPATH)
 CACHE_ROOT = Path("/code.nfs/branches/caches")
-DEFAULT_CODEDIR = Path('/code.nfs/xx')
+DEFAULT_CODEDIR = Path('/code.nfs/xx')         # symlink
+LEGACY_CODEDIR = Path('/code.nfs/xx-legacy')
 
 
 class MinirayError(Exception):
@@ -139,6 +140,22 @@ def sync_local_codedir(job_desc: str) -> str:
   subprocess.check_call(["rsync", "-a", "--max-delete=0", "--copy-dest=/xx", "--info=progress2", *excludes, f"{XX_BASEPATH}/", f"rsync://app01:1026/code_nfs/{dest}/"])
   return str(cache_dir)
 
+def _own_miniray_sha() -> str:
+  mr = Path(__file__).resolve().parent
+  version = mr / "VERSION"  # written into deployed (non-git) trees; dev checkouts read it from git
+  if version.exists():
+    return version.read_text().strip()
+  return subprocess.check_output(["git", "-C", str(mr), "rev-parse", "HEAD"], text=True).strip()
+
+def _resolve_deployed_codedir() -> str:
+  # Pin the immutable tree whose miniray matches this executor
+  mine = _own_miniray_sha()
+  for link in (DEFAULT_CODEDIR, LEGACY_CODEDIR):
+    tree = link.resolve()
+    if (tree / "miniray/VERSION").read_text().strip() == mine:
+      return str(tree)
+  raise RuntimeError(f"miniray {mine[:12]} is not deployed (current or legacy); pull master, or pass use_local_codedir=True")
+
 def _execute_batch(fn, *batch, **kwargs):
   results = []
   for args in batch:
@@ -223,7 +240,7 @@ class Executor(BaseExecutor):
     elif config.use_local_codedir:
       config = replace(config, codedir=sync_local_codedir(job_desc))
     else:
-      config = replace(config, codedir=str(DEFAULT_CODEDIR))
+      config = replace(config, codedir=_resolve_deployed_codedir())
 
     self.config = config
 
