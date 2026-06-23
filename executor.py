@@ -342,7 +342,7 @@ class Executor(BaseExecutor):
       yield future
 
   def get_submit_queue_size(self) -> int:
-    return cast(int, self._submit_redis_master.llen(self.submit_queue_id))
+    return self._submit_redis_master.llen(self.submit_queue_id)
 
   # Worker threads
 
