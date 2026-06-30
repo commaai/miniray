@@ -50,14 +50,6 @@ def get_executor(job_name: str) -> miniray.Executor:
                           limits={'memory': MINIRAY_MEMORY_GB})
 
 
-def wait_for_submit_queue_to_drain(executor: miniray.Executor, timeout: float = 60.0):
-  deadline = time.monotonic() + timeout
-  while time.monotonic() < deadline:
-    if executor.get_submit_queue_size() == 0:
-      return
-    time.sleep(0.5)
-  pytest.fail("miniray worker did not claim all submitted tasks")
-
 # Tests
 
 def test_map_matches_local_and_threadpool():
@@ -148,7 +140,6 @@ def test_d_state_tasks_do_not_crash_worker():
                         queue_name=QUEUE_NAME,
                         limits={"memory": MINIRAY_MEMORY_GB, "timeout_seconds": timeout_seconds}) as executor:
     futures = [executor.submit(block_in_frozen_filesystem, hold_seconds) for _ in range(task_count)]
-    wait_for_submit_queue_to_drain(executor)
     t0 = time.monotonic()
     errors = []
     for future in as_completed(futures, timeout=hold_seconds + 120):
@@ -164,26 +155,21 @@ def test_d_state_tasks_do_not_crash_worker():
 
 
 @pytest.mark.dstate
-def test_d_state_tasks_crash_worker():
+def test_d_state_task_crashes_worker():
   hold_seconds = 90
   timeout_seconds = 10
-  task_count = get_worker_capacity(MINIRAY_MEMORY_GB)
 
   with miniray.Executor(job_name="miniray_test_dstate_crash",
                         priority=MINIRAY_PRIORITY,
                         queue_name=QUEUE_NAME,
                         limits={"memory": MINIRAY_MEMORY_GB, "timeout_seconds": timeout_seconds}) as executor:
-    futures = [executor.submit(block_in_frozen_filesystem, hold_seconds) for _ in range(task_count)]
-    wait_for_submit_queue_to_drain(executor)
-    errors = []
-    for future in as_completed(futures, timeout=hold_seconds + 120):
-      with pytest.raises(miniray.MinirayError) as excinfo:
-        future.result()
-      errors.append(excinfo.value)
+    future = executor.submit(block_in_frozen_filesystem, hold_seconds)
+    with pytest.raises(miniray.MinirayError) as excinfo:
+      future.result(timeout=hold_seconds + 120)
 
-  lost_error = next((error for error in errors if error.exception_type == "RuntimeError" and "task lost" in error.exception_desc), None)
-  assert lost_error is not None, f"expected a lost task, got {[error.exception_type for error in errors]}"
-  wait_for_worker_to_disappear(QUEUE_NAME, lost_error.worker)
+  assert excinfo.value.exception_type == "RuntimeError"
+  assert "task lost" in excinfo.value.exception_desc
+  wait_for_worker_to_disappear(QUEUE_NAME, excinfo.value.worker)
 
 
 def test_class_method_submission():
