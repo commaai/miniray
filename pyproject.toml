@@ -30,9 +30,6 @@ py-modules = []
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-markers = [
-    "dstate: tests that intentionally block tasks in D state and may stop the worker",
-]
 
 [tool.ruff]
 lint.select = ["A", "B", "E", "F", "N", "W", "PIE", "C4", "ISC", "RUF100", "PTH", "TID251", "SLF"]
