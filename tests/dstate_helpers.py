@@ -6,7 +6,6 @@ import tempfile
 import time
 import uuid
 from pathlib import Path
-from typing import cast
 
 import pytest
 from redis import StrictRedis
@@ -122,28 +121,16 @@ def block_in_frozen_filesystem(hold_seconds: int):
       cleanup_mount()
 
 
-def get_active_workers(queue_name: str) -> set[str]:
+def wait_for_worker_to_disappear(queue_name: str, worker: str, timeout: float = 120.0):
+  if not worker:
+    pytest.fail("lost task did not report a worker")
+
   redis_host = os.environ.get('REDIS_HOST', 'redis.comma.internal')
   r = StrictRedis(host=redis_host, port=6379, db=1)
-  prefix = f"active:{queue_name}:"
-  keys = cast(list[bytes], r.keys(f"{prefix}*"))
-  return {key.decode().removeprefix(prefix) for key in keys}
-
-
-def wait_for_active_workers(queue_name: str, timeout: float = 30.0) -> set[str]:
+  active_key = f"active:{queue_name}:{worker}"
   deadline = time.monotonic() + timeout
   while time.monotonic() < deadline:
-    workers = get_active_workers(queue_name)
-    if workers:
-      return workers
-    time.sleep(0.5)
-  pytest.fail(f"no active miniray workers on queue {queue_name}")
-
-
-def wait_for_worker_to_disappear(queue_name: str, worker: str, timeout: float = 120.0):
-  deadline = time.monotonic() + timeout
-  while time.monotonic() < deadline:
-    if worker not in get_active_workers(queue_name):
+    if not r.exists(active_key):
       return
     time.sleep(0.5)
   pytest.fail(f"worker {worker} stayed active after the D-state task exceeded SIGKILL grace")

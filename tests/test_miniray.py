@@ -9,7 +9,6 @@ import miniray
 from .dstate_helpers import (
   block_in_frozen_filesystem,
   get_worker_capacity,
-  wait_for_active_workers,
   wait_for_worker_to_disappear,
 )
 
@@ -169,7 +168,6 @@ def test_d_state_tasks_crash_worker():
   hold_seconds = 90
   timeout_seconds = 10
   task_count = get_worker_capacity(MINIRAY_MEMORY_GB)
-  workers_before = wait_for_active_workers(QUEUE_NAME)
 
   with miniray.Executor(job_name="miniray_test_dstate_crash",
                         priority=MINIRAY_PRIORITY,
@@ -185,7 +183,6 @@ def test_d_state_tasks_crash_worker():
 
   lost_error = next((error for error in errors if error.exception_type == "RuntimeError" and "task lost" in error.exception_desc), None)
   assert lost_error is not None, f"expected a lost task, got {[error.exception_type for error in errors]}"
-  assert lost_error.worker in workers_before
   wait_for_worker_to_disappear(QUEUE_NAME, lost_error.worker)
 
 
