@@ -171,35 +171,22 @@ def test_d_state_tasks_crash_worker():
   task_count = get_worker_capacity(MINIRAY_MEMORY_GB)
   workers_before = wait_for_active_workers(QUEUE_NAME)
 
-  executor = miniray.Executor(job_name="miniray_test_dstate_crash",
-                              priority=MINIRAY_PRIORITY,
-                              queue_name=QUEUE_NAME,
-                              limits={"memory": MINIRAY_MEMORY_GB, "timeout_seconds": timeout_seconds})
-  executor.__enter__()
-  try:
+  with miniray.Executor(job_name="miniray_test_dstate_crash",
+                        priority=MINIRAY_PRIORITY,
+                        queue_name=QUEUE_NAME,
+                        limits={"memory": MINIRAY_MEMORY_GB, "timeout_seconds": timeout_seconds}) as executor:
     futures = [executor.submit(block_in_frozen_filesystem, hold_seconds) for _ in range(task_count)]
     wait_for_submit_queue_to_drain(executor)
-    t0 = time.monotonic()
     errors = []
-    lost_error = None
     for future in as_completed(futures, timeout=hold_seconds + 120):
       with pytest.raises(miniray.MinirayError) as excinfo:
         future.result()
       errors.append(excinfo.value)
-      if excinfo.value.exception_type == "RuntimeError" and "task lost" in excinfo.value.exception_desc:
-        lost_error = excinfo.value
-        break
-    elapsed = time.monotonic() - t0
-  finally:
-    executor.shutdown(cancel_futures=True)
 
+  lost_error = next((error for error in errors if error.exception_type == "RuntimeError" and "task lost" in error.exception_desc), None)
   assert lost_error is not None, f"expected a lost task, got {[error.exception_type for error in errors]}"
   assert lost_error.worker in workers_before
   wait_for_worker_to_disappear(QUEUE_NAME, lost_error.worker)
-
-  remaining_hold = hold_seconds + 5 - elapsed
-  if remaining_hold > 0:
-    time.sleep(remaining_hold)
 
 
 def test_class_method_submission():
