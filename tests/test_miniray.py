@@ -38,6 +38,121 @@ def spawn_zombie():
     os._exit(0)
   return "done"
 
+def remote_worker_supports_d_state_test():
+  import os
+  import shutil
+  from pathlib import Path
+
+  required_commands = ("bash", "fallocate", "fsfreeze", "mkfs.ext4", "mount", "umount")
+  return (
+    os.geteuid() == 0
+    and all(shutil.which(cmd) is not None for cmd in required_commands)
+    and Path("/sys/fs/cgroup").is_dir()
+  )
+
+
+def block_in_frozen_filesystem(hold_seconds: int):
+  import shutil
+  import subprocess
+  import tempfile
+  import time
+  import uuid
+  from pathlib import Path
+
+  if not remote_worker_supports_d_state_test():
+    raise RuntimeError("worker does not have root, cgroup, loop mount, and fsfreeze support")
+
+  token = uuid.uuid4().hex
+  tmp_root = Path(tempfile.mkdtemp(prefix=f"miniray-dstate-{token}-", dir="/tmp"))
+  img = tmp_root / "fs.img"
+  mnt = tmp_root / "mnt"
+  ready = tmp_root / "watchdog.ready"
+  watchdog = tmp_root / "watchdog.sh"
+  watchdog_cgroup = Path("/sys/fs/cgroup") / f"miniray-dstate-watchdog-{token}"
+  watchdog_proc = None
+  mounted = False
+
+  def run_command(args):
+    subprocess.run(args, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+  watchdog.write_text(f"""#!/usr/bin/env bash
+set -u
+mnt=\"{mnt}\"
+img=\"{img}\"
+tmp_root=\"{tmp_root}\"
+ready=\"{ready}\"
+watchdog_cgroup=\"{watchdog_cgroup}\"
+hold_seconds=\"{hold_seconds}\"
+
+cleanup() {{
+  fsfreeze -u \"$mnt\" 2>/dev/null || true
+  for _ in {{1..100}}; do
+    umount \"$mnt\" 2>/dev/null && break
+    sleep 0.1
+  done
+  rmdir \"$mnt\" 2>/dev/null || true
+  rm -f \"$img\" \"$ready\" \"$0\" 2>/dev/null || true
+  rmdir \"$tmp_root\" 2>/dev/null || true
+  rmdir \"$watchdog_cgroup\" 2>/dev/null || true
+}}
+trap cleanup EXIT
+trap "exit 0" TERM INT
+
+mkdir \"$watchdog_cgroup\" 2>/dev/null || true
+if [[ -w \"$watchdog_cgroup/cgroup.procs\" ]]; then
+  echo \"$$\" > \"$watchdog_cgroup/cgroup.procs\" 2>/dev/null || true
+fi
+cat \"/proc/$$/cgroup\" > \"$ready\" 2>/dev/null || touch \"$ready\"
+sleep \"$hold_seconds\"
+""")
+  watchdog.chmod(0o755)
+
+  try:
+    mnt.mkdir()
+    run_command(["fallocate", "-l", "64M", str(img)])
+    run_command(["mkfs.ext4", "-q", "-F", str(img)])
+    run_command(["mount", "-o", "loop", str(img), str(mnt)])
+    mounted = True
+
+    watchdog_proc = subprocess.Popen(
+      ["bash", str(watchdog)],
+      stdin=subprocess.DEVNULL,
+      stdout=subprocess.DEVNULL,
+      stderr=subprocess.DEVNULL,
+      start_new_session=True,
+    )
+    for _ in range(1000):
+      if ready.exists():
+        break
+      if watchdog_proc.poll() is not None:
+        raise RuntimeError(f"D-state watchdog exited early with code {watchdog_proc.returncode}")
+      time.sleep(0.01)
+    else:
+      raise RuntimeError("D-state watchdog did not report readiness")
+
+    if watchdog_cgroup.name not in ready.read_text():
+      raise RuntimeError("D-state watchdog did not move out of the task cgroup")
+
+    run_command(["fsfreeze", "-f", str(mnt)])
+    (mnt / "blocked-dir").mkdir()
+    raise RuntimeError("mkdir on a frozen filesystem unexpectedly completed")
+  finally:
+    if watchdog_proc is not None and watchdog_proc.poll() is None:
+      watchdog_proc.terminate()
+      try:
+        watchdog_proc.wait(timeout=1)
+      except subprocess.TimeoutExpired:
+        watchdog_proc.kill()
+    if mounted:
+      subprocess.run(["fsfreeze", "-u", str(mnt)], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+      subprocess.run(["umount", str(mnt)], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    shutil.rmtree(tmp_root, ignore_errors=True)
+    try:
+      watchdog_cgroup.rmdir()
+    except OSError:
+      pass
+
+
 def get_executor(job_name: str) -> miniray.Executor:
   return miniray.Executor(job_name=job_name,
                           priority=MINIRAY_PRIORITY,
@@ -121,6 +236,28 @@ def test_timeout():
     with pytest.raises(miniray.MinirayError) as excinfo:
       future.result()
     assert excinfo.value.exception_type == "TimeoutError"
+
+
+@pytest.mark.parametrize("hold_seconds", [30], ids=["dstate_30s"])
+def test_d_state_timeout_reaping(hold_seconds):
+  with get_executor(job_name=f"miniray_test_dstate_probe_{hold_seconds}s") as executor:
+    if not executor.submit(remote_worker_supports_d_state_test).result(timeout=120):
+      pytest.skip("remote worker does not support root loop mounts and fsfreeze")
+
+  timeout_seconds = 10
+  with miniray.Executor(job_name=f"miniray_test_dstate_{hold_seconds}s",
+                        priority=MINIRAY_PRIORITY,
+                        queue_name=QUEUE_NAME,
+                        limits={"memory": MINIRAY_MEMORY_GB, "timeout_seconds": timeout_seconds}) as executor:
+    future = executor.submit(block_in_frozen_filesystem, hold_seconds)
+    t0 = time.monotonic()
+    with pytest.raises(miniray.MinirayError) as excinfo:
+      future.result(timeout=hold_seconds + 120)
+    elapsed = time.monotonic() - t0
+
+    assert excinfo.value.exception_type == "TimeoutError"
+    assert elapsed >= hold_seconds - 2
+    assert executor.submit(is_even, 96).result(timeout=60) is True
 
 
 def test_class_method_submission():
