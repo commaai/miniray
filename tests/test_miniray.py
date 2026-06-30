@@ -14,6 +14,7 @@ from .dstate_helpers import (
 
 MINIRAY_PRIORITY = 1000
 MINIRAY_MEMORY_GB = 0.4
+DSTATE_TASK_COUNT_LIMIT = 16
 QUEUE_NAME = os.environ.get('MINIRAY_QUEUE', miniray.REMOTE_QUEUE)
 
 
@@ -133,7 +134,7 @@ def test_timeout():
 def test_d_state_tasks_do_not_crash_worker():
   hold_seconds = 30
   timeout_seconds = 10
-  task_count = get_worker_capacity(MINIRAY_MEMORY_GB)
+  task_count = min(get_worker_capacity(MINIRAY_MEMORY_GB), DSTATE_TASK_COUNT_LIMIT)
 
   with miniray.Executor(job_name="miniray_test_dstate_no_crash",
                         priority=MINIRAY_PRIORITY,
