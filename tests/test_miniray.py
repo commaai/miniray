@@ -38,20 +38,8 @@ def spawn_zombie():
     os._exit(0)
   return "done"
 
-def remote_worker_supports_d_state_test():
-  import os
-  import shutil
-  from pathlib import Path
-
-  required_commands = ("bash", "fallocate", "fsfreeze", "mkfs.ext4", "mount", "umount")
-  return (
-    os.geteuid() == 0
-    and all(shutil.which(cmd) is not None for cmd in required_commands)
-    and Path("/sys/fs/cgroup").is_dir()
-  )
-
-
 def block_in_frozen_filesystem(hold_seconds: int):
+  import signal
   import shutil
   import subprocess
   import tempfile
@@ -59,53 +47,49 @@ def block_in_frozen_filesystem(hold_seconds: int):
   import uuid
   from pathlib import Path
 
-  if not remote_worker_supports_d_state_test():
-    raise RuntimeError("worker does not have root, cgroup, loop mount, and fsfreeze support")
-
   token = uuid.uuid4().hex
   tmp_root = Path(tempfile.mkdtemp(prefix=f"miniray-dstate-{token}-", dir="/tmp"))
   img = tmp_root / "fs.img"
   mnt = tmp_root / "mnt"
   ready = tmp_root / "watchdog.ready"
-  watchdog = tmp_root / "watchdog.sh"
   watchdog_cgroup = Path("/sys/fs/cgroup") / f"miniray-dstate-watchdog-{token}"
-  watchdog_proc = None
+  watchdog_pid = None
   mounted = False
 
   def run_command(args):
     subprocess.run(args, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
-  watchdog.write_text(f"""#!/usr/bin/env bash
-set -u
-mnt=\"{mnt}\"
-img=\"{img}\"
-tmp_root=\"{tmp_root}\"
-ready=\"{ready}\"
-watchdog_cgroup=\"{watchdog_cgroup}\"
-hold_seconds=\"{hold_seconds}\"
+  def cleanup_mount():
+    subprocess.run(["fsfreeze", "-u", str(mnt)], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    for _ in range(100):
+      if subprocess.run(["umount", str(mnt)], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0:
+        break
+      time.sleep(0.1)
+    shutil.rmtree(tmp_root, ignore_errors=True)
+    try:
+      watchdog_cgroup.rmdir()
+    except OSError:
+      pass
 
-cleanup() {{
-  fsfreeze -u \"$mnt\" 2>/dev/null || true
-  for _ in {{1..100}}; do
-    umount \"$mnt\" 2>/dev/null && break
-    sleep 0.1
-  done
-  rmdir \"$mnt\" 2>/dev/null || true
-  rm -f \"$img\" \"$ready\" \"$0\" 2>/dev/null || true
-  rmdir \"$tmp_root\" 2>/dev/null || true
-  rmdir \"$watchdog_cgroup\" 2>/dev/null || true
-}}
-trap cleanup EXIT
-trap "exit 0" TERM INT
+  def start_watchdog():
+    pid = os.fork()
+    if pid != 0:
+      return pid
 
-mkdir \"$watchdog_cgroup\" 2>/dev/null || true
-if [[ -w \"$watchdog_cgroup/cgroup.procs\" ]]; then
-  echo \"$$\" > \"$watchdog_cgroup/cgroup.procs\" 2>/dev/null || true
-fi
-cat \"/proc/$$/cgroup\" > \"$ready\" 2>/dev/null || touch \"$ready\"
-sleep \"$hold_seconds\"
-""")
-  watchdog.chmod(0o755)
+    try:
+      os.setsid()
+      signal.signal(signal.SIGTERM, signal.SIG_IGN)
+      signal.signal(signal.SIGINT, signal.SIG_IGN)
+
+      watchdog_cgroup.mkdir(exist_ok=True)
+      cgroup_procs = watchdog_cgroup / "cgroup.procs"
+      if cgroup_procs.exists():
+        cgroup_procs.write_text(str(os.getpid()))
+      ready.write_text(Path(f"/proc/{os.getpid()}/cgroup").read_text())
+      time.sleep(hold_seconds)
+    finally:
+      cleanup_mount()
+    os._exit(0)
 
   try:
     mnt.mkdir()
@@ -114,18 +98,10 @@ sleep \"$hold_seconds\"
     run_command(["mount", "-o", "loop", str(img), str(mnt)])
     mounted = True
 
-    watchdog_proc = subprocess.Popen(
-      ["bash", str(watchdog)],
-      stdin=subprocess.DEVNULL,
-      stdout=subprocess.DEVNULL,
-      stderr=subprocess.DEVNULL,
-      start_new_session=True,
-    )
+    watchdog_pid = start_watchdog()
     for _ in range(1000):
       if ready.exists():
         break
-      if watchdog_proc.poll() is not None:
-        raise RuntimeError(f"D-state watchdog exited early with code {watchdog_proc.returncode}")
       time.sleep(0.01)
     else:
       raise RuntimeError("D-state watchdog did not report readiness")
@@ -137,20 +113,45 @@ sleep \"$hold_seconds\"
     (mnt / "blocked-dir").mkdir()
     raise RuntimeError("mkdir on a frozen filesystem unexpectedly completed")
   finally:
-    if watchdog_proc is not None and watchdog_proc.poll() is None:
-      watchdog_proc.terminate()
+    if watchdog_pid is not None:
       try:
-        watchdog_proc.wait(timeout=1)
-      except subprocess.TimeoutExpired:
-        watchdog_proc.kill()
+        os.kill(watchdog_pid, signal.SIGKILL)
+        os.waitpid(watchdog_pid, 0)
+      except ChildProcessError:
+        pass
+      except ProcessLookupError:
+        pass
     if mounted:
-      subprocess.run(["fsfreeze", "-u", str(mnt)], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-      subprocess.run(["umount", str(mnt)], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    shutil.rmtree(tmp_root, ignore_errors=True)
-    try:
-      watchdog_cgroup.rmdir()
-    except OSError:
-      pass
+      cleanup_mount()
+
+def get_active_workers() -> set[str]:
+  from typing import cast
+  from redis import StrictRedis
+
+  redis_host = os.environ.get('REDIS_HOST', 'redis.comma.internal')
+  r = StrictRedis(host=redis_host, port=6379, db=1)
+  prefix = f"active:{QUEUE_NAME}:"
+  keys = cast(list[bytes], r.keys(f"{prefix}*"))
+  return {key.decode().removeprefix(prefix) for key in keys}
+
+
+def wait_for_active_workers(timeout: float = 30.0) -> set[str]:
+  deadline = time.monotonic() + timeout
+  while time.monotonic() < deadline:
+    workers = get_active_workers()
+    if workers:
+      return workers
+    time.sleep(0.5)
+  pytest.fail(f"no active miniray workers on queue {QUEUE_NAME}")
+
+
+def wait_for_worker_to_disappear(worker: str, timeout: float = 120.0):
+  deadline = time.monotonic() + timeout
+  while time.monotonic() < deadline:
+    if worker not in get_active_workers():
+      return
+    time.sleep(0.5)
+  pytest.fail(f"worker {worker} stayed active after the D-state task exceeded SIGKILL grace")
 
 
 def get_executor(job_name: str) -> miniray.Executor:
@@ -238,14 +239,13 @@ def test_timeout():
     assert excinfo.value.exception_type == "TimeoutError"
 
 
-@pytest.mark.parametrize("hold_seconds", [30], ids=["dstate_30s"])
-def test_d_state_timeout_reaping(hold_seconds):
-  with get_executor(job_name=f"miniray_test_dstate_probe_{hold_seconds}s") as executor:
-    if not executor.submit(remote_worker_supports_d_state_test).result(timeout=120):
-      pytest.skip("remote worker does not support root loop mounts and fsfreeze")
-
+@pytest.mark.dstate
+def test_d_state_30s_does_not_crash_worker():
+  hold_seconds = 30
   timeout_seconds = 10
-  with miniray.Executor(job_name=f"miniray_test_dstate_{hold_seconds}s",
+  workers_before = wait_for_active_workers()
+
+  with miniray.Executor(job_name="miniray_test_dstate_30s_no_crash",
                         priority=MINIRAY_PRIORITY,
                         queue_name=QUEUE_NAME,
                         limits={"memory": MINIRAY_MEMORY_GB, "timeout_seconds": timeout_seconds}) as executor:
@@ -258,6 +258,35 @@ def test_d_state_timeout_reaping(hold_seconds):
     assert excinfo.value.exception_type == "TimeoutError"
     assert elapsed >= hold_seconds - 2
     assert executor.submit(is_even, 96).result(timeout=60) is True
+
+  workers_after = wait_for_active_workers()
+  assert workers_before & workers_after
+
+
+@pytest.mark.dstate
+def test_d_state_90s_crashes_worker():
+  hold_seconds = 90
+  timeout_seconds = 10
+  workers_before = wait_for_active_workers()
+
+  with miniray.Executor(job_name="miniray_test_dstate_90s_crash",
+                        priority=MINIRAY_PRIORITY,
+                        queue_name=QUEUE_NAME,
+                        limits={"memory": MINIRAY_MEMORY_GB, "timeout_seconds": timeout_seconds}) as executor:
+    future = executor.submit(block_in_frozen_filesystem, hold_seconds)
+    t0 = time.monotonic()
+    with pytest.raises(miniray.MinirayError) as excinfo:
+      future.result(timeout=hold_seconds + 120)
+    elapsed = time.monotonic() - t0
+
+  assert excinfo.value.exception_type == "RuntimeError"
+  assert "task lost" in excinfo.value.exception_desc
+  assert excinfo.value.worker in workers_before
+  wait_for_worker_to_disappear(excinfo.value.worker)
+
+  remaining_hold = hold_seconds + 5 - elapsed
+  if remaining_hold > 0:
+    time.sleep(remaining_hold)
 
 
 def test_class_method_submission():
