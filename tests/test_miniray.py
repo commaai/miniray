@@ -265,7 +265,7 @@ def test_d_state_30s_does_not_crash_worker():
 
 @pytest.mark.dstate
 def test_d_state_90s_crashes_worker():
-  hold_seconds = 90
+  hold_seconds = 40
   timeout_seconds = 10
   workers_before = wait_for_active_workers()
 
