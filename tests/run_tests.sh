@@ -16,12 +16,4 @@ cleanup() {
 trap cleanup EXIT
 
 docker compose -f docker-compose.ci.yml build
-docker compose -f docker-compose.ci.yml up -d redis worker
-docker compose -f docker-compose.ci.yml run --rm test bash -c "
-  sleep 5 &&
-  cd /app/miniray/ &&
-  ruff check . &&
-  ty check . &&
-  python3 -m pytest -n12 -v -m 'not dstate' /app/miniray/tests/ &&
-  python3 -m pytest -v -m dstate /app/miniray/tests/test_miniray.py
-"
+docker compose -f docker-compose.ci.yml up --exit-code-from test --abort-on-container-exit
