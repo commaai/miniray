@@ -11,6 +11,37 @@ from typing import cast
 import pytest
 from redis import StrictRedis
 
+GB_TO_BYTES = 1024 ** 3
+WORKER_MEM_LIMIT_MULTIPLIER = 0.8
+
+
+def _get_cpu_info_by_node() -> dict[int, int]:
+  cpu_info = {}
+  for entry in Path("/sys/devices/system/node").iterdir():
+    if entry.name.startswith("node"):
+      numa_node = int(entry.name[4:])
+      cpu_bit_mask = (entry / "cpumap").read_text().strip().replace(",", "")
+      cpu_info[numa_node] = bin(int(cpu_bit_mask, 16)).count("1")
+  return cpu_info or {0: os.cpu_count() or 1}
+
+
+def _get_mem_total_bytes(numa_node: int) -> int:
+  with Path(f"/sys/devices/system/node/node{numa_node}/meminfo").open("r") as f:
+    for line in f:
+      if "MemTotal:" in line:
+        return int(line.strip().split()[-2]) * 1024
+  raise LookupError("MemTotal")
+
+
+def get_worker_capacity(memory_gb: float, cpu_threads: int = 1) -> int:
+  cpu_totals = _get_cpu_info_by_node()
+  memory_bytes = int(memory_gb * GB_TO_BYTES)
+  slots = 0
+  for numa_node, cpu_total in cpu_totals.items():
+    mem_total = int(_get_mem_total_bytes(numa_node) * WORKER_MEM_LIMIT_MULTIPLIER)
+    slots += min(cpu_total // cpu_threads, mem_total // memory_bytes)
+  return max(1, slots)
+
 
 def block_in_frozen_filesystem(hold_seconds: int):
   token = uuid.uuid4().hex

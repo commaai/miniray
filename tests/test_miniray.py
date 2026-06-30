@@ -8,6 +8,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import miniray
 from .dstate_helpers import (
   block_in_frozen_filesystem,
+  get_worker_capacity,
   wait_for_active_workers,
   wait_for_worker_to_disappear,
 )
@@ -48,6 +49,15 @@ def get_executor(job_name: str) -> miniray.Executor:
                           priority=MINIRAY_PRIORITY,
                           queue_name=QUEUE_NAME,
                           limits={'memory': MINIRAY_MEMORY_GB})
+
+
+def wait_for_submit_queue_to_drain(executor: miniray.Executor, timeout: float = 60.0):
+  deadline = time.monotonic() + timeout
+  while time.monotonic() < deadline:
+    if executor.get_submit_queue_size() == 0:
+      return
+    time.sleep(0.5)
+  pytest.fail("miniray worker did not claim all submitted tasks")
 
 # Tests
 
@@ -129,45 +139,63 @@ def test_timeout():
 
 
 @pytest.mark.dstate
-def test_d_state_30s_does_not_crash_worker():
+def test_d_state_tasks_do_not_crash_worker():
   hold_seconds = 30
   timeout_seconds = 10
+  task_count = get_worker_capacity(MINIRAY_MEMORY_GB)
 
-  with miniray.Executor(job_name="miniray_test_dstate_30s_no_crash",
+  with miniray.Executor(job_name="miniray_test_dstate_no_crash",
                         priority=MINIRAY_PRIORITY,
                         queue_name=QUEUE_NAME,
                         limits={"memory": MINIRAY_MEMORY_GB, "timeout_seconds": timeout_seconds}) as executor:
-    future = executor.submit(block_in_frozen_filesystem, hold_seconds)
+    futures = [executor.submit(block_in_frozen_filesystem, hold_seconds) for _ in range(task_count)]
+    wait_for_submit_queue_to_drain(executor)
     t0 = time.monotonic()
-    with pytest.raises(miniray.MinirayError) as excinfo:
-      future.result(timeout=hold_seconds + 120)
+    errors = []
+    for future in as_completed(futures, timeout=hold_seconds + 120):
+      with pytest.raises(miniray.MinirayError) as excinfo:
+        future.result()
+      errors.append(excinfo.value)
     elapsed = time.monotonic() - t0
 
-    assert excinfo.value.exception_type == "TimeoutError"
+    assert len(errors) == task_count
+    assert {error.exception_type for error in errors} == {"TimeoutError"}
     assert elapsed >= hold_seconds - 2
     assert executor.submit(is_even, 96).result(timeout=60) is True
 
 
 @pytest.mark.dstate
-def test_d_state_90s_crashes_worker():
+def test_d_state_tasks_crash_worker():
   hold_seconds = 90
   timeout_seconds = 10
+  task_count = get_worker_capacity(MINIRAY_MEMORY_GB)
   workers_before = wait_for_active_workers(QUEUE_NAME)
 
-  with miniray.Executor(job_name="miniray_test_dstate_90s_crash",
-                        priority=MINIRAY_PRIORITY,
-                        queue_name=QUEUE_NAME,
-                        limits={"memory": MINIRAY_MEMORY_GB, "timeout_seconds": timeout_seconds}) as executor:
-    future = executor.submit(block_in_frozen_filesystem, hold_seconds)
+  executor = miniray.Executor(job_name="miniray_test_dstate_crash",
+                              priority=MINIRAY_PRIORITY,
+                              queue_name=QUEUE_NAME,
+                              limits={"memory": MINIRAY_MEMORY_GB, "timeout_seconds": timeout_seconds})
+  executor.__enter__()
+  try:
+    futures = [executor.submit(block_in_frozen_filesystem, hold_seconds) for _ in range(task_count)]
+    wait_for_submit_queue_to_drain(executor)
     t0 = time.monotonic()
-    with pytest.raises(miniray.MinirayError) as excinfo:
-      future.result(timeout=hold_seconds + 120)
+    errors = []
+    lost_error = None
+    for future in as_completed(futures, timeout=hold_seconds + 120):
+      with pytest.raises(miniray.MinirayError) as excinfo:
+        future.result()
+      errors.append(excinfo.value)
+      if excinfo.value.exception_type == "RuntimeError" and "task lost" in excinfo.value.exception_desc:
+        lost_error = excinfo.value
+        break
     elapsed = time.monotonic() - t0
+  finally:
+    executor.shutdown(cancel_futures=True)
 
-  assert excinfo.value.exception_type == "RuntimeError"
-  assert "task lost" in excinfo.value.exception_desc
-  assert excinfo.value.worker in workers_before
-  wait_for_worker_to_disappear(QUEUE_NAME, excinfo.value.worker)
+  assert lost_error is not None, f"expected a lost task, got {[error.exception_type for error in errors]}"
+  assert lost_error.worker in workers_before
+  wait_for_worker_to_disappear(QUEUE_NAME, lost_error.worker)
 
   remaining_hold = hold_seconds + 5 - elapsed
   if remaining_hold > 0:
