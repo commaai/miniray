@@ -6,9 +6,14 @@ import pytest
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import miniray
+from .dstate_helpers import (
+  block_in_frozen_filesystem,
+  wait_for_worker_to_disappear,
+)
 
 MINIRAY_PRIORITY = 1000
 MINIRAY_MEMORY_GB = 0.4
+DSTATE_TASK_COUNT = 4
 QUEUE_NAME = os.environ.get('MINIRAY_QUEUE', miniray.REMOTE_QUEUE)
 
 
@@ -43,6 +48,7 @@ def get_executor(job_name: str) -> miniray.Executor:
                           priority=MINIRAY_PRIORITY,
                           queue_name=QUEUE_NAME,
                           limits={'memory': MINIRAY_MEMORY_GB})
+
 
 # Tests
 
@@ -121,6 +127,48 @@ def test_timeout():
     with pytest.raises(miniray.MinirayError) as excinfo:
       future.result()
     assert excinfo.value.exception_type == "TimeoutError"
+
+
+@pytest.mark.dstate
+def test_d_state_tasks_do_not_crash_worker():
+  hold_seconds = 30
+  timeout_seconds = 10
+
+  with miniray.Executor(job_name="miniray_test_dstate_no_crash",
+                        priority=MINIRAY_PRIORITY,
+                        queue_name=QUEUE_NAME,
+                        limits={"memory": MINIRAY_MEMORY_GB, "timeout_seconds": timeout_seconds}) as executor:
+    futures = [executor.submit(block_in_frozen_filesystem, hold_seconds) for _ in range(DSTATE_TASK_COUNT)]
+    t0 = time.monotonic()
+    errors = []
+    for future in as_completed(futures, timeout=hold_seconds + 120):
+      with pytest.raises(miniray.MinirayError) as excinfo:
+        future.result()
+      errors.append(excinfo.value)
+    elapsed = time.monotonic() - t0
+
+    assert len(errors) == DSTATE_TASK_COUNT
+    assert {error.exception_type for error in errors} == {"TimeoutError"}
+    assert elapsed >= hold_seconds - 2
+    assert executor.submit(is_even, 96).result(timeout=60) is True
+
+
+@pytest.mark.dstate
+def test_d_state_task_crashes_worker():
+  hold_seconds = 90
+  timeout_seconds = 10
+
+  with miniray.Executor(job_name="miniray_test_dstate_crash",
+                        priority=MINIRAY_PRIORITY,
+                        queue_name=QUEUE_NAME,
+                        limits={"memory": MINIRAY_MEMORY_GB, "timeout_seconds": timeout_seconds}) as executor:
+    future = executor.submit(block_in_frozen_filesystem, hold_seconds)
+    with pytest.raises(miniray.MinirayError) as excinfo:
+      future.result(timeout=hold_seconds + 120)
+
+  assert excinfo.value.exception_type == "RuntimeError"
+  assert "task lost" in excinfo.value.exception_desc
+  wait_for_worker_to_disappear(QUEUE_NAME, excinfo.value.worker)
 
 
 def test_class_method_submission():

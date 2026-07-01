@@ -16,6 +16,8 @@ services:
       redis:
         condition: service_healthy
     privileged: true
+    # Let D-state cleanup watchdogs survive the worker process exiting.
+    pid: host
     cgroup: host
     volumes:
       - /sys/fs/cgroup:/sys/fs/cgroup:rw
@@ -39,5 +41,3 @@ services:
     environment:
       - REDIS_HOST=redis
       - MINIRAY_QUEUE=miniray-test
-    command: >
-      bash -c "sleep 5 && (cd /app/miniray/ && ruff check . && ty check .) && python3 -m pytest -n12 -v /app/miniray/tests/"
