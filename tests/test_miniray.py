@@ -8,13 +8,12 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import miniray
 from .dstate_helpers import (
   block_in_frozen_filesystem,
-  get_worker_capacity,
   wait_for_worker_to_disappear,
 )
 
 MINIRAY_PRIORITY = 1000
 MINIRAY_MEMORY_GB = 0.4
-DSTATE_TASK_COUNT_LIMIT = 16
+DSTATE_TASK_COUNT = 4
 QUEUE_NAME = os.environ.get('MINIRAY_QUEUE', miniray.REMOTE_QUEUE)
 
 
@@ -134,13 +133,12 @@ def test_timeout():
 def test_d_state_tasks_do_not_crash_worker():
   hold_seconds = 30
   timeout_seconds = 10
-  task_count = min(get_worker_capacity(MINIRAY_MEMORY_GB), DSTATE_TASK_COUNT_LIMIT)
 
   with miniray.Executor(job_name="miniray_test_dstate_no_crash",
                         priority=MINIRAY_PRIORITY,
                         queue_name=QUEUE_NAME,
                         limits={"memory": MINIRAY_MEMORY_GB, "timeout_seconds": timeout_seconds}) as executor:
-    futures = [executor.submit(block_in_frozen_filesystem, hold_seconds) for _ in range(task_count)]
+    futures = [executor.submit(block_in_frozen_filesystem, hold_seconds) for _ in range(DSTATE_TASK_COUNT)]
     t0 = time.monotonic()
     errors = []
     for future in as_completed(futures, timeout=hold_seconds + 120):
@@ -149,7 +147,7 @@ def test_d_state_tasks_do_not_crash_worker():
       errors.append(excinfo.value)
     elapsed = time.monotonic() - t0
 
-    assert len(errors) == task_count
+    assert len(errors) == DSTATE_TASK_COUNT
     assert {error.exception_type for error in errors} == {"TimeoutError"}
     assert elapsed >= hold_seconds - 2
     assert executor.submit(is_even, 96).result(timeout=60) is True

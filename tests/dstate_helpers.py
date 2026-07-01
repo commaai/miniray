@@ -5,41 +5,11 @@ import subprocess
 import tempfile
 import time
 import uuid
+from contextlib import suppress
 from pathlib import Path
 
 import pytest
 from redis import StrictRedis
-
-GB_TO_BYTES = 1024 ** 3
-WORKER_MEM_LIMIT_MULTIPLIER = 0.8
-
-
-def _get_cpu_info_by_node() -> dict[int, int]:
-  cpu_info = {}
-  for entry in Path("/sys/devices/system/node").iterdir():
-    if entry.name.startswith("node"):
-      numa_node = int(entry.name[4:])
-      cpu_bit_mask = (entry / "cpumap").read_text().strip().replace(",", "")
-      cpu_info[numa_node] = bin(int(cpu_bit_mask, 16)).count("1")
-  return cpu_info or {0: os.cpu_count() or 1}
-
-
-def _get_mem_total_bytes(numa_node: int) -> int:
-  with Path(f"/sys/devices/system/node/node{numa_node}/meminfo").open("r") as f:
-    for line in f:
-      if "MemTotal:" in line:
-        return int(line.strip().split()[-2]) * 1024
-  raise LookupError("MemTotal")
-
-
-def get_worker_capacity(memory_gb: float, cpu_threads: int = 1) -> int:
-  cpu_totals = _get_cpu_info_by_node()
-  memory_bytes = int(memory_gb * GB_TO_BYTES)
-  slots = 0
-  for numa_node, cpu_total in cpu_totals.items():
-    mem_total = int(_get_mem_total_bytes(numa_node) * WORKER_MEM_LIMIT_MULTIPLIER)
-    slots += min(cpu_total // cpu_threads, mem_total // memory_bytes)
-  return max(1, slots)
 
 
 def block_in_frozen_filesystem(hold_seconds: int):
@@ -62,10 +32,8 @@ def block_in_frozen_filesystem(hold_seconds: int):
         break
       time.sleep(0.1)
     shutil.rmtree(tmp_root, ignore_errors=True)
-    try:
+    with suppress(OSError):
       watchdog_cgroup.rmdir()
-    except OSError:
-      pass
 
   def start_watchdog():
     pid = os.fork()
@@ -110,13 +78,10 @@ def block_in_frozen_filesystem(hold_seconds: int):
     raise RuntimeError("mkdir on a frozen filesystem unexpectedly completed")
   finally:
     if watchdog_pid is not None:
-      try:
+      with suppress(ProcessLookupError):
         os.kill(watchdog_pid, signal.SIGKILL)
+      with suppress(ChildProcessError):
         os.waitpid(watchdog_pid, 0)
-      except ChildProcessError:
-        pass
-      except ProcessLookupError:
-        pass
     if mounted:
       cleanup_mount()
 

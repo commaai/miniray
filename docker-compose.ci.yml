@@ -16,6 +16,8 @@ services:
       redis:
         condition: service_healthy
     privileged: true
+    # Let D-state cleanup watchdogs survive the worker process exiting.
+    pid: host
     cgroup: host
     volumes:
       - /sys/fs/cgroup:/sys/fs/cgroup:rw
