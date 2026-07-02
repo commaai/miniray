@@ -40,3 +40,6 @@ exclude = ["miniray"]
 
 [tool.ty.src]
 exclude = ["miniray"]
+
+[tool.ty.environment]
+extra-paths = ["lib"]  # worker_task.py imports its siblings directly (it runs standalone inside job venvs)
