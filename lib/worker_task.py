@@ -8,8 +8,25 @@ import cloudpickle
 import wrapt
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))  # sibling imports must work from any job venv
+from landlock import restrict_file_writes
+from task_sandbox import sandbox_uses_landlock, sandbox_write_paths
+
 # Tasks initially start as root so they can be moved into the appropriate cgroup
 os.setuid(int(os.getenv("TASK_UID", 1000)))
+
+
+def apply_sandbox():
+  # Deny filesystem writes outside the task's scratch directories; reads and execution stay
+  # unrestricted. The sandbox is inherited by everything the task spawns and cannot be lifted.
+  # Jobs can whitelist extra paths via MINIRAY_SANDBOX_WRITE_PATHS (colon-separated).
+  read_write_paths = sandbox_write_paths(create_pycache=True)
+  if not restrict_file_writes(read_write_paths, write_file_paths=["/dev"]):  # /dev: GPU nodes, /dev/null, ...
+    print("[worker_task] Landlock unsupported by kernel, task runs without write sandbox", file=sys.stderr)
+
+
+if sandbox_uses_landlock():
+  apply_sandbox()
 
 @wrapt.when_imported("cv2")
 def cv2_import_hook(cv2):

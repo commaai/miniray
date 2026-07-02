@@ -6,6 +6,7 @@ import pytest
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import miniray
+from miniray.lib.task_sandbox import sandbox_backends
 from .dstate_helpers import (
   block_in_frozen_filesystem,
   wait_for_worker_to_disappear,
@@ -15,7 +16,6 @@ MINIRAY_PRIORITY = 1000
 MINIRAY_MEMORY_GB = 0.4
 DSTATE_TASK_COUNT = 4
 QUEUE_NAME = os.environ.get('MINIRAY_QUEUE', miniray.REMOTE_QUEUE)
-
 
 class MinirayTestClass:
   def __init__(self, value):
@@ -129,6 +129,10 @@ def test_timeout():
     assert excinfo.value.exception_type == "TimeoutError"
 
 
+# the dstate tasks mount/freeze filesystems and write outside the sandbox whitelist by design
+DSTATE_ENV = {'MINIRAY_SANDBOX': '0'}
+
+
 @pytest.mark.dstate
 def test_d_state_tasks_do_not_crash_worker():
   hold_seconds = 30
@@ -137,6 +141,7 @@ def test_d_state_tasks_do_not_crash_worker():
   with miniray.Executor(job_name="miniray_test_dstate_no_crash",
                         priority=MINIRAY_PRIORITY,
                         queue_name=QUEUE_NAME,
+                        env=DSTATE_ENV,
                         limits={"memory": MINIRAY_MEMORY_GB, "timeout_seconds": timeout_seconds}) as executor:
     futures = [executor.submit(block_in_frozen_filesystem, hold_seconds) for _ in range(DSTATE_TASK_COUNT)]
     t0 = time.monotonic()
@@ -161,6 +166,7 @@ def test_d_state_task_crashes_worker():
   with miniray.Executor(job_name="miniray_test_dstate_crash",
                         priority=MINIRAY_PRIORITY,
                         queue_name=QUEUE_NAME,
+                        env=DSTATE_ENV,
                         limits={"memory": MINIRAY_MEMORY_GB, "timeout_seconds": timeout_seconds}) as executor:
     future = executor.submit(block_in_frozen_filesystem, hold_seconds)
     with pytest.raises(miniray.MinirayError) as excinfo:
@@ -169,6 +175,57 @@ def test_d_state_task_crashes_worker():
   assert excinfo.value.exception_type == "RuntimeError"
   assert "task lost" in excinfo.value.exception_desc
   wait_for_worker_to_disappear(QUEUE_NAME, excinfo.value.worker)
+
+
+def test_sandbox_backend_parsing():
+  assert sandbox_backends({}) == frozenset({'landlock'})
+  assert sandbox_backends({'MINIRAY_SANDBOX': '0'}) == frozenset()
+  with pytest.raises(ValueError):
+    sandbox_backends({'MINIRAY_SANDBOX': 'bwrap'})
+
+
+def test_sandbox_blocks_writes_outside_whitelist():
+  def probe():
+    import tempfile
+    denied = []
+    for target in [Path('/var/tmp/miniray_sandbox_probe'), Path('/usr/local/miniray_sandbox_probe')]:
+      try:
+        target.write_bytes(b'x')
+        target.unlink()
+      except PermissionError:
+        denied.append(str(target))
+
+    # whitelisted locations must still be writable
+    with tempfile.NamedTemporaryFile() as f:  # honors TMPDIR
+      f.write(b'x')
+    scratch = Path(os.environ['TMPDIR']) / 'sandbox_probe_dir'
+    scratch.mkdir()
+    (scratch / 'probe').write_bytes(b'x')
+    Path('/dev/null').write_bytes(b'x')
+    return denied
+
+  with miniray.Executor(job_name='miniray_test_sandbox',
+                        priority=MINIRAY_PRIORITY,
+                        queue_name=QUEUE_NAME,
+                        env={'MINIRAY_SANDBOX': 'landlock'},
+                        limits={'memory': MINIRAY_MEMORY_GB}) as executor:
+    denied = executor.submit(probe).result()
+    assert denied == ['/var/tmp/miniray_sandbox_probe', '/usr/local/miniray_sandbox_probe']
+
+
+def test_sandbox_extra_write_paths():
+  def probe(path):
+    Path(path).write_bytes(b'x')
+    Path(path).unlink()
+    return "ok"
+
+  target = '/var/tmp/miniray_sandbox_whitelisted'
+  with miniray.Executor(job_name='miniray_test_sandbox_whitelist',
+                        priority=MINIRAY_PRIORITY,
+                        queue_name=QUEUE_NAME,
+                        env={'MINIRAY_SANDBOX': 'landlock', 'MINIRAY_SANDBOX_WRITE_PATHS': '/var/tmp'},
+                        limits={'memory': MINIRAY_MEMORY_GB}) as executor:
+    assert executor.submit(probe, target).result() == "ok"
 
 
 def test_class_method_submission():
