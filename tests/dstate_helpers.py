@@ -99,3 +99,13 @@ def wait_for_worker_to_disappear(queue_name: str, worker: str, timeout: float = 
       return
     time.sleep(0.5)
   pytest.fail(f"worker {worker} stayed active after the D-state task exceeded SIGKILL grace")
+
+def wait_for_worker_to_appear(queue_name: str, timeout: float = 120.0):
+  redis_host = os.environ.get('REDIS_HOST', 'redis.comma.internal')
+  r = StrictRedis(host=redis_host, port=6379, db=1)
+  deadline = time.monotonic() + timeout
+  while time.monotonic() < deadline:
+    if r.keys(f"active:{queue_name}:*"):
+      return
+    time.sleep(0.5)
+  pytest.fail(f"no worker came up on queue {queue_name} within {timeout}s")

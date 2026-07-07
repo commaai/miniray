@@ -275,28 +275,34 @@ def test_nonexistent_codedir():
     assert executor.submit(is_even, 96).result() is True
 
 
+@pytest.mark.dstate
 @pytest.mark.xfail(strict=True, reason="known bug: >64 jobs overflow the LRU(JOB_CACHE_SIZE) and crash the worker")
 def test_more_jobs_than_cache_size_does_not_crash_worker():
-  """With >JOB_CACHE_SIZE jobs in the queue, the worker's main-loop filtering
-  line raises KeyError: update_job_metadatas inserts every job into an
-  LRU(JOB_CACHE_SIZE), evicting entries that the next line then looks up."""
-  import json
-  from types import SimpleNamespace
-  from typing import cast
-  from lru import LRU
-  from redis import StrictRedis
-  from miniray.executor import JobMetadata
+  """The worker should handle >JOB_CACHE_SIZE jobs in the queue. Currently it
+  crashes: update_job_metadatas inserts every job into an LRU(JOB_CACHE_SIZE),
+  evicting one that the next line then looks up (KeyError). Submits >64 jobs and
+  asserts a task completes; fails (xfailed) while the bug exists."""
   from miniray.lib.helpers import JOB_CACHE_SIZE
-  from miniray.worker import update_job_metadatas
+  from .dstate_helpers import wait_for_worker_to_appear
 
-  jobs = sorted(f"job{i:03d}" for i in range(JOB_CACHE_SIZE + 1))
-  md = json.dumps(JobMetadata(True, 1, "/code", "exec", {"cpu_threads": 1, "node_whitelist": None}, {})).encode()
-  r_master = cast(StrictRedis, SimpleNamespace(get=lambda k: md))
+  # a prior crash test may have taken the worker down; wait for one to come back
+  wait_for_worker_to_appear(QUEUE_NAME)
 
-  job_metadatas: LRU[str, JobMetadata] = LRU(JOB_CACHE_SIZE)
-  job_errors: LRU[str, tuple[str, str] | None] = LRU(JOB_CACHE_SIZE)
-  update_job_metadatas(r_master, jobs, job_metadatas, job_errors)
+  # >JOB_CACHE_SIZE distinct jobs, two tasks each so the worker rpop-ing one
+  # doesn't drop the job key before a scan sees them all at once.
+  executors = []
+  try:
+    check_future = None
+    for i in range(JOB_CACHE_SIZE + 1):
+      ex = get_executor(job_name=f'miniray_test_job_overflow_{i}')
+      ex.__enter__()
+      executors.append(ex)
+      check_future = ex.submit(is_even, 96)
+      ex.submit(is_even, 96)
 
-  # exact filtering line from worker.main()
-  filtered = [j for j in jobs if not job_metadatas[j].limits.get('node_whitelist')]
-  assert filtered == jobs
+    # if the worker handles >64 jobs, this completes; if it crashes, this raises (xfail)
+    assert check_future is not None
+    assert check_future.result(timeout=20) is True
+  finally:
+    for ex in executors:
+      ex.shutdown(wait=False, cancel_futures=True)
