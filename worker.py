@@ -420,6 +420,10 @@ def get_randomly_scheduled_job(jobs: list[str], job_metadatas: LRU[str, JobMetad
   return job
 
 def update_job_metadatas(r_master: StrictRedis, jobs: list[str], job_metadatas: LRU[str, JobMetadata], job_errors: LRU[str, tuple[str, str] | None]):
+  for job in set(job_metadatas.keys()) - set(jobs):
+    del job_metadatas[job]
+    job_errors.pop(job, None)
+
   for job in jobs:
     if job not in job_metadatas:
       raw_metadata = cast(bytes, r_master.get(get_metadata_key(job)))
