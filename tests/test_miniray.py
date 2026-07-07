@@ -273,3 +273,30 @@ def test_nonexistent_codedir():
   # verify the worker is still alive after handling the bad codedir
   with get_executor(job_name='miniray_test_bad_codedir_recovery') as executor:
     assert executor.submit(is_even, 96).result() is True
+
+
+@pytest.mark.xfail(strict=True, reason="known bug: >64 jobs overflow the LRU(JOB_CACHE_SIZE) and crash the worker")
+def test_more_jobs_than_cache_size_does_not_crash_worker():
+  """With >JOB_CACHE_SIZE jobs in the queue, the worker's main-loop filtering
+  line raises KeyError: update_job_metadatas inserts every job into an
+  LRU(JOB_CACHE_SIZE), evicting entries that the next line then looks up."""
+  import json
+  from types import SimpleNamespace
+  from typing import cast
+  from lru import LRU
+  from redis import StrictRedis
+  from miniray.executor import JobMetadata
+  from miniray.lib.helpers import JOB_CACHE_SIZE
+  from miniray.worker import update_job_metadatas
+
+  jobs = sorted(f"job{i:03d}" for i in range(JOB_CACHE_SIZE + 1))
+  md = json.dumps(JobMetadata(True, 1, "/code", "exec", {"cpu_threads": 1, "node_whitelist": None}, {})).encode()
+  r_master = cast(StrictRedis, SimpleNamespace(get=lambda k: md))
+
+  job_metadatas: LRU[str, JobMetadata] = LRU(JOB_CACHE_SIZE)
+  job_errors: LRU[str, tuple[str, str] | None] = LRU(JOB_CACHE_SIZE)
+  update_job_metadatas(r_master, jobs, job_metadatas, job_errors)
+
+  # exact filtering line from worker.main()
+  filtered = [j for j in jobs if not job_metadatas[j].limits.get('node_whitelist')]
+  assert filtered == jobs
