@@ -558,6 +558,7 @@ def main():
       timings['triton'] = time.perf_counter() - worker_loop_start
 
       t0 = time.perf_counter()
+      # TODO: with >JOB_CACHE_SIZE jobs, this drops the tail of the sorted list, so prioritization is broken and the excluded jobs get no share
       jobs = sorted(key.decode() for key in cast(list[bytes], r_master.keys(f"*{PIPELINE_QUEUE}")) if b":" not in key)[:JOB_CACHE_SIZE]
       update_job_metadatas(r_master, jobs, job_metadatas, job_errors)
       jobs = [j for j in jobs if not job_metadatas[j].limits.get('node_whitelist') or HOST_NAME in job_metadatas[j].limits['node_whitelist']]
