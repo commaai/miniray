@@ -279,17 +279,13 @@ def test_malformed_job_metadata_does_not_crash_worker():
   from redis import StrictRedis
   from miniray.executor import get_metadata_key
 
-  ex = get_executor(job_name='miniray_test_malformed_metadata')
-  ex.__enter__()
-  try:
+  with get_executor(job_name='miniray_test_malformed_metadata') as ex:
     r = StrictRedis(host=ex.config.redis_host, port=6379, db=1)
     r.set(get_metadata_key(ex.submit_queue_id), b'not valid json')
 
     future = ex.submit(is_even, 42)
     with pytest.raises(miniray.MinirayError):
       future.result(timeout=60)
-  finally:
-    ex.shutdown(cancel_futures=True)
 
   with get_executor(job_name='miniray_test_malformed_metadata_recovery') as executor:
     assert executor.submit(is_even, 96).result() is True
