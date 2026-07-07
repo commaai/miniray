@@ -1,3 +1,7 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
 [project]
 name = "miniray"
 version = "0.1.0"
@@ -25,8 +29,13 @@ testing = [
     "ty",
 ]
 
-[tool.setuptools]
-py-modules = []
+[tool.hatch.build.targets.wheel]
+only-include = [
+  "miniray/__init__.py",
+  "miniray/executor.py",
+  "miniray/worker.py",
+  "miniray/lib",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
