@@ -283,13 +283,12 @@ def test_more_jobs_than_cache_size_does_not_crash_worker():
   evicting one that the next line then looks up (KeyError). Submits >64 jobs and
   asserts a task completes; fails (xfailed) while the bug exists."""
   from miniray.lib.helpers import JOB_CACHE_SIZE
-  from .dstate_helpers import wait_for_worker_to_appear
-
-  # a prior crash test may have taken the worker down; wait for one to come back
-  wait_for_worker_to_appear(QUEUE_NAME)
 
   # >JOB_CACHE_SIZE distinct jobs, two tasks each so the worker rpop-ing one
-  # doesn't drop the job key before a scan sees them all at once.
+  # doesn't drop the job key before a scan sees them all at once. The check task
+  # is submitted last (after the 65th job's key exists), so it can only be picked
+  # up by a scan that sees all 65 jobs — which is the scan that crashes, since the
+  # crash is in the filter before any task is started.
   executors = []
   try:
     check_future = None
@@ -297,8 +296,8 @@ def test_more_jobs_than_cache_size_does_not_crash_worker():
       ex = get_executor(job_name=f'miniray_test_job_overflow_{i}')
       ex.__enter__()
       executors.append(ex)
-      check_future = ex.submit(is_even, 96)
       ex.submit(is_even, 96)
+      check_future = ex.submit(is_even, 96)
 
     # if the worker handles >64 jobs, this completes; if it crashes, this raises (xfail)
     assert check_future is not None
