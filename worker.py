@@ -420,6 +420,10 @@ def get_randomly_scheduled_job(jobs: list[str], job_metadatas: LRU[str, JobMetad
   return job
 
 def update_job_metadatas(r_master: StrictRedis, jobs: list[str], job_metadatas: LRU[str, JobMetadata], job_errors: LRU[str, tuple[str, str] | None]):
+  for job in set(job_metadatas.keys()) - set(jobs):
+    del job_metadatas[job]
+    job_errors.pop(job, None)
+
   for job in jobs:
     if job not in job_metadatas:
       raw_metadata = cast(bytes, r_master.get(get_metadata_key(job)))
@@ -558,7 +562,8 @@ def main():
       timings['triton'] = time.perf_counter() - worker_loop_start
 
       t0 = time.perf_counter()
-      jobs = sorted(key.decode() for key in cast(list[bytes], r_master.keys(f"*{PIPELINE_QUEUE}")) if b":" not in key)
+      # TODO: with >JOB_CACHE_SIZE jobs, this drops the tail of the sorted list, so prioritization is broken and the excluded jobs get no share
+      jobs = sorted(key.decode() for key in cast(list[bytes], r_master.keys(f"*{PIPELINE_QUEUE}")) if b":" not in key)[:JOB_CACHE_SIZE]
       update_job_metadatas(r_master, jobs, job_metadatas, job_errors)
       jobs = [j for j in jobs if not job_metadatas[j].limits.get('node_whitelist') or HOST_NAME in job_metadatas[j].limits['node_whitelist']]
       current_gpu_job = get_globally_scheduled_job(r_master, jobs, job_metadatas)

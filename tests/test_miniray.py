@@ -273,3 +273,23 @@ def test_nonexistent_codedir():
   # verify the worker is still alive after handling the bad codedir
   with get_executor(job_name='miniray_test_bad_codedir_recovery') as executor:
     assert executor.submit(is_even, 96).result() is True
+
+
+@pytest.mark.dstate
+def test_more_jobs_than_cache_size_does_not_crash_worker():
+  from miniray.lib.helpers import JOB_CACHE_SIZE
+
+  executors = []
+  try:
+    for i in range(JOB_CACHE_SIZE * 2):
+      ex = get_executor(job_name=f'miniray_test_job_overflow_{i}')
+      ex.__enter__()
+      executors.append(ex)
+      ex.submit(is_even, 96)
+      ex.submit(is_even, 96)
+
+    check_future = executors[0].submit(is_even, 96)
+    assert check_future.result(timeout=60) is True
+  finally:
+    for ex in executors:
+      ex.shutdown(wait=False, cancel_futures=True)
