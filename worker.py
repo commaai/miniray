@@ -397,7 +397,7 @@ def get_job_intervals(raw_weights: list[int], n_workers: int) -> list[float]:
 # - Find our position in the sorted list of N active workers, this will be a number in [0, N). Divide by N to get a point P in [0, 1).
 # - Divide the interval [0, 1] amongst the available jobs, weighted by job priority
 # - Find the job whose interval contains P, this will be the job we accept.
-def get_globally_scheduled_job(r_master: StrictRedis, jobs: list[str], job_metadatas: dict[str, JobMetadata]) -> Optional[str]:
+def get_globally_scheduled_job(r_master: StrictRedis, jobs: list[str], job_metadatas: LRU[str, JobMetadata]) -> Optional[str]:
   active_key = hashlib.md5(ACTIVE_KEY.encode()).hexdigest()  # we use the hash so machines with different compute capabilities are evenly distributed
   active_workers = sorted(hashlib.md5(k).hexdigest() for k in cast(list[bytes], r_master.keys(f"active:{PIPELINE_QUEUE}:*")))
   if not jobs or active_key not in active_workers:
@@ -409,7 +409,7 @@ def get_globally_scheduled_job(r_master: StrictRedis, jobs: list[str], job_metad
   job_index = next(i for i,end in enumerate(job_intervals) if end >= p + 1e-7)
   return jobs[job_index]
 
-def get_randomly_scheduled_job(jobs: list[str], job_metadatas: dict[str, JobMetadata]) -> Optional[str]:
+def get_randomly_scheduled_job(jobs: list[str], job_metadatas: LRU[str, JobMetadata]) -> Optional[str]:
   # gpu jobs are only scheduled via the global scheduler
   jobs = [job for job in jobs if not Limits(**job_metadatas[job].limits).requires_gpu()]
 
@@ -419,7 +419,7 @@ def get_randomly_scheduled_job(jobs: list[str], job_metadatas: dict[str, JobMeta
   job = random.choices(jobs, weights=job_weights, k=1)[0]
   return job
 
-def update_job_metadatas(r_master: StrictRedis, jobs: list[str], job_metadatas: dict[str, JobMetadata], job_errors: dict[str, tuple[str, str] | None]):
+def update_job_metadatas(r_master: StrictRedis, jobs: list[str], job_metadatas: LRU[str, JobMetadata], job_errors: LRU[str, tuple[str, str] | None]):
   for job in jobs:
     if job not in job_metadatas:
       raw_metadata = cast(bytes, r_master.get(get_metadata_key(job)))
@@ -430,12 +430,8 @@ def update_job_metadatas(r_master: StrictRedis, jobs: list[str], job_metadatas: 
         job_metadatas[job] = JobMetadata(False, 1, "", "", Limits().asdict(), {})
         job_errors[job] = ("JobMetadataMissingError", f"No metadata found in redis for job {job}")
 
-  for job in set(job_metadatas) - set(jobs):
-    del job_metadatas[job]
-    job_errors.pop(job, None)
-
 def get_task(resource_manager: ResourceManager, r_master: StrictRedis,
-             r_results: StrictRedis, r_claimed: StrictRedis, job: str, job_metadatas: dict[str, JobMetadata], job_errors: dict[str, tuple[str, str] | None],
+             r_results: StrictRedis, r_claimed: StrictRedis, job: str, job_metadatas: LRU[str, JobMetadata], job_errors: LRU[str, tuple[str, str] | None],
              venvs: LRU[str, str], proc_index: int, triton_client) -> Optional[Task]:
   limits = Limits(**job_metadatas[job].limits)
   temp_key = f"{job}-pending"
@@ -481,7 +477,7 @@ def sync_venv_cache_and_cleanup(job: str, codedir: str, venv_cache: LRU[str, str
   cleanup_venvs(TASK_UID, keep_venvs=list(venv_cache.keys())+[job,])
   return venv_path
 
-def ensure_venvs(jobs: list[str], job_metadatas: dict[str, JobMetadata], job_errors: dict[str, tuple[str, str] | None],
+def ensure_venvs(jobs: list[str], job_metadatas: LRU[str, JobMetadata], job_errors: LRU[str, tuple[str, str] | None],
                  venv_cache: LRU[str, str], pending: dict[str, Future], executor: ThreadPoolExecutor):
   for job in list(pending):
     if pending[job].done():
@@ -509,8 +505,8 @@ def main():
   populate_venv_cache_from_disk(venvs, TASK_UID)
   venv_executor = ThreadPoolExecutor(max_workers=1)
   pending_venv_syncs: dict[str, Future] = {}
-  job_metadatas: dict[str, JobMetadata] = {}
-  job_errors: dict[str, tuple[str, str] | None] = {}
+  job_metadatas: LRU[str, JobMetadata] = LRU(JOB_CACHE_SIZE)
+  job_errors: LRU[str, tuple[str, str] | None] = LRU(JOB_CACHE_SIZE)
 
   print(f"[worker] REDIS:                 {REDIS_HOST}")
   print(f"[worker] QUEUE:                 {PIPELINE_QUEUE}")
@@ -562,7 +558,7 @@ def main():
       timings['triton'] = time.perf_counter() - worker_loop_start
 
       t0 = time.perf_counter()
-      jobs = sorted(key.decode() for key in cast(list[bytes], r_master.keys(f"*{PIPELINE_QUEUE}")) if b":" not in key)
+      jobs = sorted(key.decode() for key in cast(list[bytes], r_master.keys(f"*{PIPELINE_QUEUE}")) if b":" not in key)[:JOB_CACHE_SIZE]
       update_job_metadatas(r_master, jobs, job_metadatas, job_errors)
       jobs = [j for j in jobs if not job_metadatas[j].limits.get('node_whitelist') or HOST_NAME in job_metadatas[j].limits['node_whitelist']]
       current_gpu_job = get_globally_scheduled_job(r_master, jobs, job_metadatas)
