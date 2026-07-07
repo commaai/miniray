@@ -283,11 +283,6 @@ def test_more_jobs_than_cache_size_does_not_crash_worker():
   asserts a task completes; fails while the bug exists."""
   from miniray.lib.helpers import JOB_CACHE_SIZE
 
-  # >JOB_CACHE_SIZE distinct jobs, two tasks each so the worker rpop-ing one
-  # doesn't drop the job key before a scan sees them all at once. The check task
-  # is submitted last (after the 65th job's key exists), so it can only be picked
-  # up by a scan that sees all 65 jobs — which is the scan that crashes, since the
-  # crash is in the filter before any task is started.
   executors = []
   try:
     check_future = None
@@ -298,7 +293,6 @@ def test_more_jobs_than_cache_size_does_not_crash_worker():
       ex.submit(is_even, 96)
       check_future = ex.submit(is_even, 96)
 
-    # if the worker handles >64 jobs, this completes; if it crashes, this times out (test fails)
     assert check_future is not None
     assert check_future.result(timeout=20) is True
   finally:

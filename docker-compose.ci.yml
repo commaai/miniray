@@ -28,7 +28,7 @@ services:
       - USE_MAIN_RESULT_REDIS=1
       - TASK_UID=0
     command: python3 /app/miniray/worker.py
-    restart: on-failure  # crash tests (dstate) kill the worker; bring it back so they can coexist
+    restart: on-failure
 
   test:
     build:
