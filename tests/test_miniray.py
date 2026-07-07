@@ -276,12 +276,11 @@ def test_nonexistent_codedir():
 
 
 @pytest.mark.dstate
-@pytest.mark.xfail(strict=True, reason="known bug: >64 jobs overflow the LRU(JOB_CACHE_SIZE) and crash the worker")
 def test_more_jobs_than_cache_size_does_not_crash_worker():
   """The worker should handle >JOB_CACHE_SIZE jobs in the queue. Currently it
   crashes: update_job_metadatas inserts every job into an LRU(JOB_CACHE_SIZE),
   evicting one that the next line then looks up (KeyError). Submits >64 jobs and
-  asserts a task completes; fails (xfailed) while the bug exists."""
+  asserts a task completes; fails while the bug exists."""
   from miniray.lib.helpers import JOB_CACHE_SIZE
 
   # >JOB_CACHE_SIZE distinct jobs, two tasks each so the worker rpop-ing one
@@ -299,7 +298,7 @@ def test_more_jobs_than_cache_size_does_not_crash_worker():
       ex.submit(is_even, 96)
       check_future = ex.submit(is_even, 96)
 
-    # if the worker handles >64 jobs, this completes; if it crashes, this raises (xfail)
+    # if the worker handles >64 jobs, this completes; if it crashes, this times out (test fails)
     assert check_future is not None
     assert check_future.result(timeout=20) is True
   finally:
