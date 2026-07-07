@@ -277,10 +277,6 @@ def test_nonexistent_codedir():
 
 @pytest.mark.dstate
 def test_more_jobs_than_cache_size_does_not_crash_worker():
-  """The worker should handle >JOB_CACHE_SIZE jobs in the queue. Currently it
-  crashes: update_job_metadatas inserts every job into an LRU(JOB_CACHE_SIZE),
-  evicting one that the next line then looks up (KeyError). Submits >64 jobs and
-  asserts a task completes; fails while the bug exists."""
   from miniray.lib.helpers import JOB_CACHE_SIZE
 
   executors = []
