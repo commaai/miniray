@@ -25,7 +25,7 @@ import numpy as np
 from lru import LRU
 from pathlib import Path
 from redis import StrictRedis
-from typing import BinaryIO, Optional, cast
+from typing import BinaryIO, MutableMapping, Optional, cast
 from tritonclient.http import InferenceServerClient
 
 from miniray.lib.cgroup import cgroup_create, cgroup_set_subcontrollers, cgroup_set_memory_limit, \
@@ -56,6 +56,8 @@ CGROUP_CONTROLLERS = ["cpu", "cpuset", "memory"]
 WORKER_ID = HOST_NAME
 ACTIVE_KEY = f"active:{PIPELINE_QUEUE}:{WORKER_ID}"
 MINIRAY_TARGET_NAME = "<remote-function>"
+JobMetadataMap = MutableMapping[str, JobMetadata]
+JobErrorMap = MutableMapping[str, tuple[str, str] | None]
 
 TMP_DIR_ROOT = Path("/dev/shm/tmp") / CGROUP_NODE
 # you need a really good reason to use a global directory shared across all tasks
@@ -397,7 +399,7 @@ def get_job_intervals(raw_weights: list[int], n_workers: int) -> list[float]:
 # - Find our position in the sorted list of N active workers, this will be a number in [0, N). Divide by N to get a point P in [0, 1).
 # - Divide the interval [0, 1] amongst the available jobs, weighted by job priority
 # - Find the job whose interval contains P, this will be the job we accept.
-def get_globally_scheduled_job(r_master: StrictRedis, jobs: list[str], job_metadatas: LRU[str, JobMetadata]) -> Optional[str]:
+def get_globally_scheduled_job(r_master: StrictRedis, jobs: list[str], job_metadatas: JobMetadataMap) -> Optional[str]:
   active_key = hashlib.md5(ACTIVE_KEY.encode()).hexdigest()  # we use the hash so machines with different compute capabilities are evenly distributed
   active_workers = sorted(hashlib.md5(k).hexdigest() for k in cast(list[bytes], r_master.keys(f"active:{PIPELINE_QUEUE}:*")))
   if not jobs or active_key not in active_workers:
@@ -409,7 +411,7 @@ def get_globally_scheduled_job(r_master: StrictRedis, jobs: list[str], job_metad
   job_index = next(i for i,end in enumerate(job_intervals) if end >= p + 1e-7)
   return jobs[job_index]
 
-def get_randomly_scheduled_job(jobs: list[str], job_metadatas: LRU[str, JobMetadata]) -> Optional[str]:
+def get_randomly_scheduled_job(jobs: list[str], job_metadatas: JobMetadataMap) -> Optional[str]:
   # gpu jobs are only scheduled via the global scheduler
   jobs = [job for job in jobs if not Limits(**job_metadatas[job].limits).requires_gpu()]
 
@@ -419,7 +421,16 @@ def get_randomly_scheduled_job(jobs: list[str], job_metadatas: LRU[str, JobMetad
   job = random.choices(jobs, weights=job_weights, k=1)[0]
   return job
 
-def update_job_metadatas(r_master: StrictRedis, jobs: list[str], job_metadatas: LRU[str, JobMetadata], job_errors: LRU[str, tuple[str, str] | None]):
+def make_job_metadata_stores() -> tuple[JobMetadataMap, JobErrorMap]:
+  return {}, {}
+
+def update_job_metadatas(r_master: StrictRedis, jobs: list[str], job_metadatas: JobMetadataMap, job_errors: JobErrorMap):
+  active_jobs = set(jobs)
+  for job in list(job_metadatas):
+    if job not in active_jobs:
+      job_metadatas.pop(job, None)
+      job_errors.pop(job, None)
+
   for job in jobs:
     if job not in job_metadatas:
       raw_metadata = cast(bytes, r_master.get(get_metadata_key(job)))
@@ -431,7 +442,7 @@ def update_job_metadatas(r_master: StrictRedis, jobs: list[str], job_metadatas: 
         job_errors[job] = ("JobMetadataMissingError", f"No metadata found in redis for job {job}")
 
 def get_task(resource_manager: ResourceManager, r_master: StrictRedis,
-             r_results: StrictRedis, r_claimed: StrictRedis, job: str, job_metadatas: LRU[str, JobMetadata], job_errors: LRU[str, tuple[str, str] | None],
+             r_results: StrictRedis, r_claimed: StrictRedis, job: str, job_metadatas: JobMetadataMap, job_errors: JobErrorMap,
              venvs: LRU[str, str], proc_index: int, triton_client) -> Optional[Task]:
   limits = Limits(**job_metadatas[job].limits)
   temp_key = f"{job}-pending"
@@ -477,7 +488,7 @@ def sync_venv_cache_and_cleanup(job: str, codedir: str, venv_cache: LRU[str, str
   cleanup_venvs(TASK_UID, keep_venvs=list(venv_cache.keys())+[job,])
   return venv_path
 
-def ensure_venvs(jobs: list[str], job_metadatas: LRU[str, JobMetadata], job_errors: LRU[str, tuple[str, str] | None],
+def ensure_venvs(jobs: list[str], job_metadatas: JobMetadataMap, job_errors: JobErrorMap,
                  venv_cache: LRU[str, str], pending: dict[str, Future], executor: ThreadPoolExecutor):
   for job in list(pending):
     if pending[job].done():
@@ -505,8 +516,7 @@ def main():
   populate_venv_cache_from_disk(venvs, TASK_UID)
   venv_executor = ThreadPoolExecutor(max_workers=1)
   pending_venv_syncs: dict[str, Future] = {}
-  job_metadatas: LRU[str, JobMetadata] = LRU(JOB_CACHE_SIZE)
-  job_errors: LRU[str, tuple[str, str] | None] = LRU(JOB_CACHE_SIZE)
+  job_metadatas, job_errors = make_job_metadata_stores()
 
   print(f"[worker] REDIS:                 {REDIS_HOST}")
   print(f"[worker] QUEUE:                 {PIPELINE_QUEUE}")
