@@ -7,9 +7,12 @@ export TRITON_SERVER_ENABLED=${TRITON_SERVER_ENABLED:-1}
 
 echo "start worker ..."
 export UV_CACHE_DIR=$HOME/.cache/uv
+# TODO: Try hardlink mode once the uv cache and worker venv share one writable mount.
+export UV_LINK_MODE=symlink
 export UV_PYTHON_INSTALL_DIR=$HOME/.local/share/uv/python
 sudo \
   --preserve-env=UV_CACHE_DIR \
+  --preserve-env=UV_LINK_MODE \
   --preserve-env=UV_PYTHON_INSTALL_DIR \
   --preserve-env=TASK_UID \
   --preserve-env=DEBUG_WORKER \
