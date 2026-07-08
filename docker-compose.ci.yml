@@ -42,3 +42,4 @@ services:
     environment:
       - REDIS_HOST=redis
       - MINIRAY_QUEUE=miniray-test
+      - PENDING_TASK_SAFETY_TTL=60
