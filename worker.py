@@ -432,7 +432,7 @@ def update_job_metadatas(r_master: StrictRedis, jobs: list[str], job_metadatas: 
           raise ValueError(f"No metadata found in redis for job {job}")
         job_metadatas[job] = JobMetadata(*json.loads(raw_metadata))
         job_errors[job] = None
-      except (ValueError, TypeError) as e:
+      except Exception as e:
         job_metadatas[job] = JobMetadata(False, 1, "", "", Limits().asdict(), {})
         job_errors[job] = ("JobMetadataError", desc(e))
 
