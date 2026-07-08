@@ -36,7 +36,7 @@ from miniray.lib.worker_helpers import ExponentialBackoff
 from miniray.lib.triton_helpers import TRITON_SERVER_ADDRESS, check_triton_server_health, wait_for_triton_server
 from miniray.lib.system_helpers import get_cgroup_cpu_usage, get_cgroup_mem_usage, get_gpu_stats, get_gpu_mem_usage, get_gpu_utilization
 from miniray.lib.statsd_helpers import statsd
-from miniray.lib.helpers import Limits, desc, GB_TO_BYTES, MAX_WORKER_LOOP_SECONDS, TASK_TIMEOUT_GRACE_SECONDS, JOB_CACHE_SIZE
+from miniray.lib.helpers import Limits, desc, GB_TO_BYTES, MAX_WORKER_LOOP_SECONDS, TASK_TIMEOUT_GRACE_SECONDS, JOB_CACHE_SIZE, get_redis_client
 from miniray.lib.uv import sync_venv_cache, cleanup_venvs, populate_venv_cache_from_disk, pycache_dir_for_venv
 from miniray.executor import MinirayResultHeader, JobMetadata, TaskRecord, TaskState, get_metadata_key, get_tasks_key
 
@@ -534,9 +534,9 @@ def main():
   sigterm_handler = SigTermHandler(callback=sig_callback)
   backoff = ExponentialBackoff(SLEEP_TIME_MAX, DEBUG)
 
-  r_master = StrictRedis(host=REDIS_HOST, port=6379, db=1)
-  r_results = StrictRedis(host=REDIS_HOST, port=6379, db=5)
-  r_claimed = StrictRedis(host=REDIS_HOST, port=6379, db=2)
+  r_master = get_redis_client(REDIS_HOST, port=6379, db=1)
+  r_results = get_redis_client(REDIS_HOST, port=6379, db=5)
+  r_claimed = get_redis_client(REDIS_HOST, port=6379, db=2)
 
   os.nice(1)
 

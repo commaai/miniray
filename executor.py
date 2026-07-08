@@ -28,7 +28,7 @@ from tqdm import tqdm
 from types import TracebackType
 from typing import Any, Callable, Iterable, Iterator, NamedTuple, Optional, Sequence, cast
 
-from miniray.lib.helpers import Limits, extract_error, get_stream_logger
+from miniray.lib.helpers import Limits, extract_error, get_stream_logger, get_redis_client
 
 MAX_ARG_STRLEN = 131071  # max length for unix string arguments, see https://stackoverflow.com/a/29802900
 REDIS_HOST = os.getenv('REDIS_HOST', 'redis.comma.internal')
@@ -151,7 +151,7 @@ def _execute_batch(fn, *batch, **kwargs):
 
 def _wrap_result_local_redis(data: Any, timeout_seconds: int) -> tuple[str, str]:
   redis_result_host = REDIS_HOST if USE_MAIN_RESULT_REDIS else socket.gethostname()
-  r = StrictRedis(host=redis_result_host, db=10)
+  r = get_redis_client(redis_result_host, db=10)
   run_id = cast(dict[str, Any], r.info('server'))['run_id']
   key = f"miniray-{uuid.uuid4()}@{run_id}"
   pipe = r.pipeline()
@@ -167,7 +167,7 @@ def _local_worker_init():
 
 @cache
 def _get_redis_client(hostname: str) -> StrictRedis:
-  return StrictRedis(host=hostname, db=10)
+  return get_redis_client(hostname, db=10)
 
 class LocalExecutor(ProcessPoolExecutor):
   def __init__(self, env: dict[str, str]):
@@ -235,9 +235,9 @@ class Executor(BaseExecutor):
     self.result_queue_id = f'fq-{self.submit_queue_id}'
 
     self._futures: dict[str, tuple[list[Future], bool, bytes]] = {}
-    self._submit_redis_master = StrictRedis(host=self.config.redis_host, port=6379, db=1, socket_keepalive=True)
-    self._result_redis = StrictRedis(host=self.config.redis_host, port=6379, db=5, socket_keepalive=True)
-    self._claimed_redis = StrictRedis(host=self.config.redis_host, port=6379, db=2, socket_keepalive=True)
+    self._submit_redis_master = get_redis_client(self.config.redis_host, port=6379, db=1, socket_keepalive=True)
+    self._result_redis = get_redis_client(self.config.redis_host, port=6379, db=5, socket_keepalive=True)
+    self._claimed_redis = get_redis_client(self.config.redis_host, port=6379, db=2, socket_keepalive=True)
     self._shutdown_lock = threading.Lock()
     self._shutdown_writer_threads = False
     self._shutdown_reader_thread: Optional[ShutdownMode] = None

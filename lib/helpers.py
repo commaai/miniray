@@ -3,6 +3,10 @@ import sys
 import logging
 from typing import Optional
 from dataclasses import dataclass, asdict
+from redis import StrictRedis
+from redis.retry import Retry
+from redis.backoff import ExponentialBackoff as RedisBackoff
+from redis.exceptions import ConnectionError as RedisConnectionError, TimeoutError as RedisTimeoutError
 
 # Memory conversion constants
 GB_TO_BYTES = 1024 ** 3
@@ -12,6 +16,14 @@ TASK_TIMEOUT_GRACE_SECONDS = 10
 MAX_WORKER_LOOP_SECONDS = 30
 JOB_CACHE_SIZE = 64
 JOB_BLOCK_SECONDS = 60 * 5  # 5 minutes
+
+# Retry transient redis errors (connection drops, timeouts) so a brief redis blip doesn't crash the worker/executor.
+REDIS_RETRY = Retry(RedisBackoff(cap=10, base=1), 3)
+REDIS_RETRY_ON_ERROR: list[type[Exception]] = [RedisConnectionError, RedisTimeoutError]
+
+
+def get_redis_client(host: str, port: int = 6379, db: int = 0, **kwargs) -> StrictRedis:
+  return StrictRedis(host=host, port=port, db=db, retry=REDIS_RETRY, retry_on_error=REDIS_RETRY_ON_ERROR, **kwargs)
 
 @dataclass
 class Limits:
