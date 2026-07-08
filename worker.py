@@ -426,17 +426,15 @@ def update_job_metadatas(r_master: StrictRedis, jobs: list[str], job_metadatas: 
 
   for job in jobs:
     if job not in job_metadatas:
-      raw_metadata = cast(bytes, r_master.get(get_metadata_key(job)))
-      if raw_metadata is not None:
-        try:
-          job_metadatas[job] = JobMetadata(*json.loads(raw_metadata))
-          job_errors[job] = None
-        except (ValueError, TypeError):
-          job_metadatas[job] = JobMetadata(False, 1, "", "", Limits().asdict(), {})
-          job_errors[job] = ("JobMetadataParseError", f"Failed to parse metadata for job {job}")
-      else:
+      try:
+        raw_metadata = cast(bytes, r_master.get(get_metadata_key(job)))
+        if raw_metadata is None:
+          raise ValueError(f"No metadata found in redis for job {job}")
+        job_metadatas[job] = JobMetadata(*json.loads(raw_metadata))
+        job_errors[job] = None
+      except (ValueError, TypeError) as e:
         job_metadatas[job] = JobMetadata(False, 1, "", "", Limits().asdict(), {})
-        job_errors[job] = ("JobMetadataMissingError", f"No metadata found in redis for job {job}")
+        job_errors[job] = ("JobMetadataError", desc(e))
 
 def get_task(resource_manager: ResourceManager, r_master: StrictRedis,
              r_results: StrictRedis, r_claimed: StrictRedis, job: str, job_metadatas: LRU[str, JobMetadata], job_errors: LRU[str, tuple[str, str] | None],
