@@ -276,14 +276,12 @@ def test_nonexistent_codedir():
 
 
 @pytest.mark.dstate
-def test_malformed_job_metadata_does_not_crash_worker(monkeypatch):
+def test_malformed_job_metadata_does_not_crash_worker():
   from redis import StrictRedis
   from miniray.executor import get_metadata_key
-  import miniray.executor
-
-  monkeypatch.setattr(miniray.executor, 'PENDING_TASK_SAFETY_TTL', 5)
 
   with get_executor(job_name='miniray_test_malformed_metadata') as ex:
+    ex.pending_task_safety_ttl = 5
     r = StrictRedis(host=ex.config.redis_host, port=6379, db=1)
     r.set(get_metadata_key(ex.submit_queue_id), b'not valid json')
 
