@@ -280,20 +280,15 @@ def test_malformed_job_metadata_does_not_crash_worker():
   from redis import StrictRedis
   from miniray.executor import get_metadata_key
 
-  r = StrictRedis(host=os.environ.get('REDIS_HOST', 'redis.comma.internal'), port=6379, db=1)
-
   ex = get_executor(job_name='miniray_test_malformed_metadata')
   ex.__enter__()
   try:
+    r = StrictRedis(host=ex.config.redis_host, port=6379, db=1)
     r.set(get_metadata_key(ex.submit_queue_id), b'not valid json')
-    ex.submit(is_even, 42)
 
-    # the worker crashes before picking up the task, so the future never resolves.
-    # instead, poll for the active key disappearing (worker crash).
-    deadline = time.monotonic() + 15
-    while time.monotonic() < deadline:
-      assert r.keys(f"active:{QUEUE_NAME}:*"), "worker crashed on malformed job metadata"
-      time.sleep(0.5)
+    future = ex.submit(is_even, 42)
+    with pytest.raises(miniray.MinirayError):
+      future.result(timeout=60)
   finally:
     ex.shutdown(wait=False, cancel_futures=True)
 
