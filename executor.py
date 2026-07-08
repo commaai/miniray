@@ -115,6 +115,7 @@ class JobConfig:
   use_local_codedir: bool = False
   limits: Limits = field(default_factory=Limits)
   env: dict[str, str] = field(default_factory=dict)
+  pending_task_safety_ttl: int = PENDING_TASK_SAFETY_TTL
 
   def asdict(self):
     return asdict(self)
@@ -234,7 +235,6 @@ class Executor(BaseExecutor):
     self.result_queue_id = f'fq-{self.submit_queue_id}'
 
     self._futures: dict[str, tuple[list[Future], bool, bytes]] = {}
-    self.pending_task_safety_ttl = PENDING_TASK_SAFETY_TTL
     self._submit_redis_master = StrictRedis(host=self.config.redis_host, port=6379, db=1, socket_keepalive=True)
     self._result_redis = StrictRedis(host=self.config.redis_host, port=6379, db=5, socket_keepalive=True)
     self._claimed_redis = StrictRedis(host=self.config.redis_host, port=6379, db=2, socket_keepalive=True)
@@ -461,7 +461,7 @@ class Executor(BaseExecutor):
         future.set_exception(e)
 
   def _submit_tasks(self, tasks: list[tuple[str, bytes]]) -> None:
-    self._submit_redis_master.hsetex(get_tasks_key(self.submit_queue_id), mapping=dict(tasks), ex=self.pending_task_safety_ttl)
+    self._submit_redis_master.hsetex(get_tasks_key(self.submit_queue_id), mapping=dict(tasks), ex=self.config.pending_task_safety_ttl)
     uuids = [task_uuid for task_uuid, _ in tasks]
     self._submit_redis_master.lpush(f'{self.submit_queue_id}', *uuids)
 
