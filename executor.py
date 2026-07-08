@@ -115,6 +115,7 @@ class JobConfig:
   use_local_codedir: bool = False
   limits: Limits = field(default_factory=Limits)
   env: dict[str, str] = field(default_factory=dict)
+  queue_timeout: int = PENDING_TASK_SAFETY_TTL
 
   def asdict(self):
     return asdict(self)
@@ -460,7 +461,7 @@ class Executor(BaseExecutor):
         future.set_exception(e)
 
   def _submit_tasks(self, tasks: list[tuple[str, bytes]]) -> None:
-    self._submit_redis_master.hsetex(get_tasks_key(self.submit_queue_id), mapping=dict(tasks), ex=PENDING_TASK_SAFETY_TTL)
+    self._submit_redis_master.hsetex(get_tasks_key(self.submit_queue_id), mapping=dict(tasks), ex=self.config.queue_timeout)
     uuids = [task_uuid for task_uuid, _ in tasks]
     self._submit_redis_master.lpush(f'{self.submit_queue_id}', *uuids)
 
