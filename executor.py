@@ -34,7 +34,7 @@ MAX_ARG_STRLEN = 131071  # max length for unix string arguments, see https://sta
 REDIS_HOST = os.getenv('REDIS_HOST', 'redis.comma.internal')
 FORCE_LOCAL = bool(int(os.getenv("MINIRAY_FORCE_LOCAL", "0")))
 NUM_LOCAL_WORKERS = int(os.getenv("MINIRAY_LOCAL_NUM_WORKERS", "1"))
-PENDING_TASK_SAFETY_TTL = int(os.getenv('PENDING_TASK_SAFETY_TTL', str(3 * 24 * 60 * 60)))
+PENDING_TASK_SAFETY_TTL = int(os.getenv('PENDING_TASK_SAFETY_TTL', str(3 * 24 * 60 * 60)))  # how long a task can sit in the queue before it's considered lost
 DEFAULT_RESULT_PAYLOAD_TIMEOUT_SECONDS = 20 * 60
 USE_MAIN_RESULT_REDIS = bool(int(os.getenv("USE_MAIN_RESULT_REDIS", "0")))
 REMOTE_QUEUE = 'remote_v3'
@@ -115,7 +115,7 @@ class JobConfig:
   use_local_codedir: bool = False
   limits: Limits = field(default_factory=Limits)
   env: dict[str, str] = field(default_factory=dict)
-  pending_task_safety_ttl: int = PENDING_TASK_SAFETY_TTL
+  queue_timeout: int = PENDING_TASK_SAFETY_TTL
 
   def asdict(self):
     return asdict(self)
@@ -461,7 +461,7 @@ class Executor(BaseExecutor):
         future.set_exception(e)
 
   def _submit_tasks(self, tasks: list[tuple[str, bytes]]) -> None:
-    self._submit_redis_master.hsetex(get_tasks_key(self.submit_queue_id), mapping=dict(tasks), ex=self.config.pending_task_safety_ttl)
+    self._submit_redis_master.hsetex(get_tasks_key(self.submit_queue_id), mapping=dict(tasks), ex=self.config.queue_timeout)
     uuids = [task_uuid for task_uuid, _ in tasks]
     self._submit_redis_master.lpush(f'{self.submit_queue_id}', *uuids)
 

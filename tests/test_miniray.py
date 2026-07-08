@@ -283,7 +283,7 @@ def test_malformed_job_metadata_does_not_crash_worker():
   with miniray.Executor(job_name='miniray_test_malformed_metadata',
                         priority=MINIRAY_PRIORITY, queue_name=QUEUE_NAME,
                         limits={'memory': MINIRAY_MEMORY_GB},
-                        pending_task_safety_ttl=5) as ex:
+                        queue_timeout=5) as ex:
     r = StrictRedis(host=ex.config.redis_host, port=6379, db=1)
     r.set(get_metadata_key(ex.submit_queue_id), b'not valid json')
 
