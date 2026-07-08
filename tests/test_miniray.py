@@ -296,6 +296,35 @@ def test_malformed_job_metadata_does_not_crash_worker():
 
 
 @pytest.mark.dstate
+def test_brief_redis_crash_does_not_crash_worker():
+  from redis import StrictRedis
+
+  redis_host = os.environ.get('REDIS_HOST', 'redis.comma.internal')
+  r = StrictRedis(host=redis_host, port=6379, db=1)
+
+  with get_executor(job_name='miniray_test_redis_crash') as ex:
+    assert ex.submit(is_even, 96).result(timeout=60) is True
+
+  try:
+    r.shutdown()
+  except Exception:
+    pass
+
+  deadline = time.monotonic() + 30
+  while time.monotonic() < deadline:
+    try:
+      r.ping()
+      break
+    except Exception:
+      time.sleep(0.5)
+  else:
+    pytest.fail("redis did not come back up")
+
+  with get_executor(job_name='miniray_test_redis_crash_recovery') as ex:
+    assert ex.submit(is_even, 96).result(timeout=60) is True
+
+
+@pytest.mark.dstate
 def test_more_jobs_than_cache_size_does_not_crash_worker():
   from miniray.lib.helpers import JOB_CACHE_SIZE
 
