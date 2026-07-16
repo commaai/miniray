@@ -157,7 +157,7 @@ class ResourceManager():
     if self.gpu_locked_job != job and limits.requires_gpu():
       self.gpu_locked_job = job
       if self._triton_client is not None:
-        cleanup_triton(self._triton_client, [gpu.bus_id for gpu in self.gpus])
+        cleanup_triton(self._triton_client)
 
     self._tasks[task_uuid] = TaskAllocation(
       limits=limits,
