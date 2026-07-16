@@ -115,6 +115,14 @@ def cleanup_triton(client: InferenceServerClient, gpu_bus_ids: list[str]) -> Non
   kill_triton_backend_stubs(gpu_bus_ids)
   unlink_triton_shm_files()
 
+def unload_stale_models(triton_client: InferenceServerClient, redis_client: StrictRedis, keep_model_name: str) -> None:
+  for model in get_triton_inference_stats(triton_client):
+    last_inference_time = model['last_inference']//1000
+    try: model_mtime = os.path.getmtime(TRITON_MODEL_REPOSITORY / model['name'] / '1')
+    except FileNotFoundError: model_mtime = 0
+    if model['name'] != keep_model_name and time.time() - max(last_inference_time, model_mtime) > 60:
+      with redis_client.lock(model['name'], timeout=60):
+        unload_triton_model(triton_client, model['name'])
 
 if __name__ == '__main__':
   import argparse
