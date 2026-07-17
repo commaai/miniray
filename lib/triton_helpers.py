@@ -91,13 +91,16 @@ def unload_triton_models(client: InferenceServerClient, model: Optional[str] = N
       except FileNotFoundError: pass
 
 # NOTE: This function must be run as the root user or it will throw a PermissionError
-def kill_triton_backend_stubs(gpu_bus_ids: Optional[list[str]] = None):
-  nvidia_smi_output = subprocess.check_output(["nvidia-smi", "--query-compute-apps=gpu_bus_id,pid,process_name", "--format=csv,noheader"]).decode('utf-8')
-  for line in nvidia_smi_output.strip().split('\n'):
-    gpu_bus_id, pid, process_name = line.split(', ')
-    if (not gpu_bus_ids or gpu_bus_id in gpu_bus_ids) and 'triton_python_backend_stub' in process_name:
-      try: os.kill(int(pid), signal.SIGKILL)
-      except ProcessLookupError: pass
+def kill_triton_backend_stubs() -> None:
+  container_id = get_triton_container_id()
+  output = subprocess.check_output(["docker", "top", container_id, "-eo", "pid,args"], text=True, timeout=5)
+  for line in output.splitlines()[1:]:
+    fields = line.strip().split(maxsplit=1)
+    if len(fields) != 2: continue
+    pid_text, command = fields
+    if "triton_python_backend_stub" not in command: continue
+    try: os.kill(int(pid_text), signal.SIGKILL)
+    except ProcessLookupError: pass
 
 # NOTE: This function must also run as root, since the triton_python_backend_shm_region files are created directly by the triton server
 def unlink_triton_shm_files() -> None:
@@ -110,9 +113,9 @@ def get_triton_container_id() -> str:
     raise RuntimeError("No tritonserver container found")
   return container_ids.split('\n')[0]
 
-def cleanup_triton(client: InferenceServerClient, gpu_bus_ids: list[str]) -> None:
+def cleanup_triton(client: InferenceServerClient) -> None:
   unload_triton_models(client)
-  kill_triton_backend_stubs(gpu_bus_ids)
+  kill_triton_backend_stubs()
   unlink_triton_shm_files()
 
 def unload_stale_models(triton_client: InferenceServerClient, redis_client: StrictRedis, keep_model_name: str) -> None:
