@@ -22,4 +22,5 @@ sudo \
   --preserve-env=GPU_COUNT \
   --preserve-env=FORCE_SMALL_GPU \
   --preserve-env=TRITON_SERVER_ENABLED \
+  --preserve-env=DIST_EXTRA_CONFIG \
   bash -c "PATH=$HOME/.local/bin:\$PATH && uv run worker.py"
