@@ -98,7 +98,7 @@ def kill_triton_backend_stubs() -> None:
     fields = line.strip().split(maxsplit=1)
     if len(fields) != 2: continue
     pid_text, command = fields
-    if "triton_python_backend_stub" not in command: continue
+    if "triton_python_backend_stub" not in command and not command.startswith("VLLM::"): continue
     try: os.kill(int(pid_text), signal.SIGKILL)
     except ProcessLookupError: pass
 
