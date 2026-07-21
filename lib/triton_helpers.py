@@ -114,8 +114,8 @@ def get_triton_container_id() -> str:
   return container_ids.split('\n')[0]
 
 def cleanup_triton(client: InferenceServerClient) -> None:
-  unload_triton_models(client)
   kill_triton_backend_stubs()
+  unload_triton_models(client)
   unlink_triton_shm_files()
 
 def unload_stale_models(triton_client: InferenceServerClient, redis_client: StrictRedis, keep_model_name: str) -> None:
