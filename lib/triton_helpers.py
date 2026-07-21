@@ -91,14 +91,14 @@ def unload_triton_models(client: InferenceServerClient, model: Optional[str] = N
       except FileNotFoundError: pass
 
 # NOTE: This function must be run as the root user or it will throw a PermissionError
-def kill_triton_backend_stubs() -> None:
+def kill_triton_processes_by_name(name: str) -> None:
   container_id = get_triton_container_id()
   output = subprocess.check_output(["docker", "top", container_id, "-eo", "pid,args"], text=True, timeout=5)
   for line in output.splitlines()[1:]:
     fields = line.strip().split(maxsplit=1)
     if len(fields) != 2: continue
     pid_text, command = fields
-    if "triton_python_backend_stub" not in command: continue
+    if name not in command: continue
     try: os.kill(int(pid_text), signal.SIGKILL)
     except ProcessLookupError: pass
 
@@ -114,8 +114,9 @@ def get_triton_container_id() -> str:
   return container_ids.split('\n')[0]
 
 def cleanup_triton(client: InferenceServerClient) -> None:
+  kill_triton_processes_by_name("VLLM::EngineCore")
   unload_triton_models(client)
-  kill_triton_backend_stubs()
+  kill_triton_processes_by_name("triton_python_backend_stub")
   unlink_triton_shm_files()
 
 def unload_stale_models(triton_client: InferenceServerClient, redis_client: StrictRedis, keep_model_name: str) -> None:
