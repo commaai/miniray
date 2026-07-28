@@ -12,11 +12,12 @@ from typing import Any, Callable, Optional, TypedDict
 from redis import StrictRedis
 from tenacity import retry, stop_after_attempt, stop_after_delay, wait_fixed, wait_random
 from tritonclient.http import InferenceServerClient
-
+from tritonclient.utils import InferenceServerException
 
 TRITON_REDIS_HOST = os.getenv('TRITON_REDIS_HOST', '127.0.0.1')
 TRITON_SERVER_ADDRESS = os.getenv('TRITON_SERVER_ADDRESS', '127.0.0.1:8000')
 TRITON_MODEL_REPOSITORY = Path(os.getenv('TRITON_MODEL_REPOSITORY', '/dev/shm/model-repository'))
+TRITON_MODEL_STALE_AFTER_SECONDS_PARAMETER = 'stale_after_seconds'
 
 IOConfig = TypedDict('IOConfig', {'name': str, 'data_type': str, 'dims': list[int]})
 ModelConfig = TypedDict('ModelConfig', {'input': list[IOConfig], 'output': list[IOConfig]})
@@ -124,7 +125,10 @@ def unload_stale_models(triton_client: InferenceServerClient, redis_client: Stri
     last_inference_time = model['last_inference']//1000
     try: model_mtime = Path(TRITON_MODEL_REPOSITORY / model['name'] / '1').stat().st_mtime
     except FileNotFoundError: model_mtime = 0
-    if model['name'] != keep_model_name and time.time() - max(last_inference_time, model_mtime) > 60:
+    try: parameters = triton_client.get_model_config(model['name']).get('parameters', {})
+    except InferenceServerException: continue
+    model_stale_after_seconds = float(parameters.get(TRITON_MODEL_STALE_AFTER_SECONDS_PARAMETER, {}).get('string_value', 60))
+    if model['name'] != keep_model_name and time.time() - max(last_inference_time, model_mtime) > model_stale_after_seconds:
       with redis_client.lock(model['name'], timeout=60):
         unload_triton_model(triton_client, model['name'])
 
