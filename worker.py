@@ -590,8 +590,12 @@ def main():
       job_keys = [key.decode() for key in all_keys if b":" not in key]
       jobs = sorted(job_keys)[:JOB_CACHE_SIZE]
       update_job_metadatas(r_master, jobs, job_metadatas, job_errors)
-      jobs = [j for j in jobs if not job_metadatas[j].limits.get('node_whitelist')
-              or HOST_NAME in job_metadatas[j].limits['node_whitelist']]
+      filtered_jobs = []
+      for j in jobs:
+        whitelist = job_metadatas[j].limits.get('node_whitelist')
+        if not whitelist or HOST_NAME in whitelist:
+          filtered_jobs.append(j)
+      jobs = filtered_jobs
       current_gpu_job = get_globally_scheduled_job(r_master, jobs, job_metadatas)
       timings['redis_sched'] = time.perf_counter() - t0
 
