@@ -20,6 +20,7 @@ import subprocess
 import grp
 import stat
 import shutil
+from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, Future
 import numpy as np
 from lru import LRU
@@ -401,11 +402,18 @@ def get_job_intervals(raw_weights: list[int], n_workers: int) -> list[float]:
   weights = np.cumsum(weights / weights.sum())
   return weights.tolist()
 
+# group jobs by job_group so they share a scheduling slot (priority = max in the group)
+def group_jobs(jobs: list[str], job_metadatas: LRU[str, JobMetadata]) -> dict[str, list[str]]:
+  groups: dict[str, list[str]] = defaultdict(list)
+  for job in jobs:
+    groups[job_metadatas[job].job_group or job].append(job)
+  return dict(sorted(groups.items()))
+
 # To decide which job to accept, we do the following:
 # - Find our position in the sorted list of N active workers, this will be a number in [0, N).
 #   Divide by N to get a point P in [0, 1).
-# - Divide the interval [0, 1] amongst the available jobs, weighted by job priority
-# - Find the job whose interval contains P, this will be the job we accept.
+# - Divide the interval [0, 1] amongst the available groups, weighted by group priority (max priority in the group)
+# - Find the group whose interval contains P, then pick a random job from that group
 def get_globally_scheduled_job(r_master: StrictRedis,
   jobs: list[str], job_metadatas: LRU[str, JobMetadata]) -> Optional[str]:
   # we use the hash so machines with different compute capabilities are evenly distributed
@@ -415,11 +423,13 @@ def get_globally_scheduled_job(r_master: StrictRedis,
   if not jobs or active_key not in active_workers:
     return None
 
+  groups = group_jobs(jobs, job_metadatas)
+  group_names = list(groups.keys())
   p = active_workers.index(active_key) / len(active_workers)  # p is a point in [0, 1)
-  job_weights = [job_metadatas[j].priority for j in jobs]
-  job_intervals = get_job_intervals(job_weights, len(active_workers))
-  job_index = next(i for i,end in enumerate(job_intervals) if end >= p + 1e-7)
-  return jobs[job_index]
+  group_weights = [max(job_metadatas[j].priority for j in groups[g]) for g in group_names]
+  group_intervals = get_job_intervals(group_weights, len(active_workers))
+  group_index = next(i for i, end in enumerate(group_intervals) if end >= p + 1e-7)
+  return random.choice(groups[group_names[group_index]])
 
 def get_randomly_scheduled_job(jobs: list[str], job_metadatas: LRU[str, JobMetadata]) -> Optional[str]:
   # gpu jobs are only scheduled via the global scheduler
@@ -427,9 +437,11 @@ def get_randomly_scheduled_job(jobs: list[str], job_metadatas: LRU[str, JobMetad
 
   if not jobs:
     return None
-  job_weights = [job_metadatas[j].priority for j in jobs]
-  job = random.choices(jobs, weights=job_weights, k=1)[0]
-  return job
+  groups = group_jobs(jobs, job_metadatas)
+  group_names = list(groups.keys())
+  group_weights = [max(job_metadatas[j].priority for j in groups[g]) for g in group_names]
+  group = random.choices(group_names, weights=group_weights, k=1)[0]
+  return random.choice(groups[group])
 
 def update_job_metadatas(r_master: StrictRedis, jobs: list[str],
   job_metadatas: LRU[str, JobMetadata], job_errors: LRU[str, tuple[str, str] | None]):

@@ -92,6 +92,7 @@ class JobMetadata(NamedTuple):
   executor: str
   limits: dict[str, Any]
   env: dict[str, str]
+  job_group: str = ''
 
 class MinirayResultHeader(NamedTuple):
   job: str
@@ -111,6 +112,7 @@ class MiniraySubTaskResult(NamedTuple):
 class JobConfig:
   priority: int = 1
   job_name: str = 'unnamed'
+  job_group: Optional[str] = None  # jobs in the same group share a scheduling slot, priority is the max in the group
   queue_name: str = REMOTE_QUEUE
   redis_host: str = REDIS_HOST
   codedir: Optional[str] = None
@@ -259,6 +261,7 @@ class Executor(BaseExecutor):
       self.executor,
       self.config.limits.asdict(),
       self.config.env,
+      self.config.job_group or self.config.job_name,
     )
     self._submit_redis_master.set(get_metadata_key(self.submit_queue_id), json.dumps(job_metadata), ex=7*24*60*60)
 
