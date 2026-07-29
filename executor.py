@@ -264,7 +264,7 @@ class Executor(BaseExecutor):
       self.executor,
       self.config.limits.asdict(),
       self.config.env,
-      self.config.job_group or self.config.job_name,
+      self.config.job_group or '',
     )
     # Keep the existing metadata payload compatible with workers that only know the first six fields.
     self._submit_redis_master.set(

@@ -32,6 +32,17 @@ def test_worker_is_pinned_to_group_not_job(monkeypatch):
   assert counts == {"groupA": 2, "groupB": 2}, counts
 
 
+def test_unset_job_group_keeps_jobs_separate():
+  m: LRU[str, JobMetadata] = LRU(64)
+  m["same_name_a"] = JobMetadata(True, 1, "/code", "host", Limits().asdict(), {})
+  m["same_name_b"] = JobMetadata(True, 1, "/code", "host", Limits().asdict(), {})
+
+  assert worker.group_jobs(list(m.keys()), m) == {
+    "same_name_a": ["same_name_a"],
+    "same_name_b": ["same_name_b"],
+  }
+
+
 def test_random_scheduler_excludes_groups_containing_gpu_jobs():
   m: LRU[str, JobMetadata] = LRU(64)
   m["mixed_cpu"] = JobMetadata(True, 1, "/code", "host", Limits().asdict(), {}, "mixed")
@@ -50,12 +61,14 @@ def test_executor_writes_backward_compatible_job_metadata(monkeypatch, tmp_path)
   monkeypatch.setattr(executor_module, "StrictRedis", lambda **kwargs: redis)
 
   executor = executor_module.Executor(job_name="compat", job_group="group", codedir=str(tmp_path))
+  ungrouped_executor = executor_module.Executor(job_name="compat", codedir=str(tmp_path))
   set_values = {call.args[0]: call.args[1] for call in redis.set.call_args_list}
   raw_metadata = json.loads(set_values[get_metadata_key(executor.submit_queue_id)])
 
   assert len(raw_metadata) == 6
   assert JobMetadata(*raw_metadata).job_group == ""
   assert set_values[get_job_group_key(executor.submit_queue_id)] == "group"
+  assert set_values[get_job_group_key(ungrouped_executor.submit_queue_id)] == ""
 
 
 def test_worker_loads_separate_job_group_and_legacy_metadata():
