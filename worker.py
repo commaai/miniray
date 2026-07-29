@@ -445,7 +445,7 @@ def get_randomly_scheduled_group(groups: dict[str, list[str]],
 
 def migrate_job_metadata(metadata: list[Any]) -> JobMetadata:
   if len(metadata) == 6:
-    metadata = [*metadata, '']  # add job_group
+    metadata = [*metadata, '']
   return JobMetadata(*metadata)
 
 def update_job_metadatas(r_master: StrictRedis, jobs: list[str],
