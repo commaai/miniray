@@ -34,8 +34,8 @@ def test_worker_is_pinned_to_group_not_job(monkeypatch):
 
 def test_unset_job_group_keeps_jobs_separate():
   m: LRU[str, JobMetadata] = LRU(64)
-  m["same_name_a"] = JobMetadata(True, 1, "/code", "host", Limits().asdict(), {})
-  m["same_name_b"] = JobMetadata(True, 1, "/code", "host", Limits().asdict(), {})
+  m["same_name_a"] = JobMetadata(True, 1, "/code", "host", Limits().asdict(), {}, "")
+  m["same_name_b"] = JobMetadata(True, 1, "/code", "host", Limits().asdict(), {}, "")
 
   assert worker.group_jobs(list(m.keys()), m) == {
     "same_name_a": ["same_name_a"],
@@ -78,7 +78,7 @@ def test_executor_writes_job_group_in_metadata(monkeypatch, tmp_path):
   assert ungrouped_metadata.job_group == ""
 
 
-def test_worker_loads_new_and_legacy_metadata():
+def test_worker_migrates_legacy_and_loads_current_metadata():
   job = "job-remote_v3"
   metadata = JobMetadata(True, 1, "/code", "host", Limits().asdict(), {}, "inline_group")
 
@@ -87,9 +87,11 @@ def test_worker_loads_new_and_legacy_metadata():
   redis = MagicMock()
   redis.get.return_value = json.dumps(metadata[:-1]).encode()
   worker.update_job_metadatas(redis, [job], job_metadatas, job_errors)
-  assert job_metadatas[job].job_group == ""
+  assert job_metadatas[job] == metadata._replace(job_group="")
+  assert job_errors[job] is None
 
   job_metadatas.clear()
   redis.get.return_value = json.dumps(metadata).encode()
   worker.update_job_metadatas(redis, [job], job_metadatas, job_errors)
-  assert job_metadatas[job].job_group == "inline_group"
+  assert job_metadatas[job] == metadata
+  assert job_errors[job] is None

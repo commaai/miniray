@@ -92,7 +92,7 @@ class JobMetadata(NamedTuple):
   executor: str
   limits: dict[str, Any]
   env: dict[str, str]
-  job_group: str = ''
+  job_group: str
 
 class MinirayResultHeader(NamedTuple):
   job: str

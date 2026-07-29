@@ -26,7 +26,7 @@ import numpy as np
 from lru import LRU
 from pathlib import Path
 from redis import StrictRedis
-from typing import BinaryIO, Optional, cast
+from typing import Any, BinaryIO, Optional, cast
 from tritonclient.http import InferenceServerClient
 
 from miniray.lib.cgroup import (
@@ -443,6 +443,11 @@ def get_randomly_scheduled_group(groups: dict[str, list[str]],
   group_weights = [max(job_metadatas[j].priority for j in groups[g]) for g in group_names]
   return random.choices(group_names, weights=group_weights, k=1)[0]
 
+def migrate_job_metadata(metadata: list[Any]) -> JobMetadata:
+  if len(metadata) == 6:
+    metadata = [*metadata, '']  # add job_group
+  return JobMetadata(*metadata)
+
 def update_job_metadatas(r_master: StrictRedis, jobs: list[str],
   job_metadatas: LRU[str, JobMetadata], job_errors: LRU[str, tuple[str, str] | None]):
   for job in set(job_metadatas.keys()) - set(jobs):
@@ -455,10 +460,10 @@ def update_job_metadatas(r_master: StrictRedis, jobs: list[str],
         raw_metadata = cast(bytes, r_master.get(get_metadata_key(job)))
         if raw_metadata is None:
           raise ValueError("No metadata found in redis")
-        job_metadatas[job] = JobMetadata(*json.loads(raw_metadata))
+        job_metadatas[job] = migrate_job_metadata(json.loads(raw_metadata))
         job_errors[job] = None
       except Exception as e:
-        job_metadatas[job] = JobMetadata(False, 1, "", "", Limits().asdict(), {})
+        job_metadatas[job] = JobMetadata(False, 1, "", "", Limits().asdict(), {}, "")
         job_errors[job] = ("JobMetadataError", f"{job}: {desc(e)}")
 
 def get_task(resource_manager: ResourceManager, r_master: StrictRedis,
