@@ -34,9 +34,16 @@ def _is_model_loading(client: InferenceServerClient, model_name: str):
       return True
   return False
 
-check_triton_server_health = retry(stop=stop_after_delay(15), wait=wait_fixed(1), reraise=True)(
-  _check_triton_server_health)
-wait_for_triton_server = retry(stop=stop_after_delay(60), wait=wait_fixed(2), reraise=True)(_check_triton_server_health)
+check_triton_server_health = retry(
+  stop=stop_after_delay(15),
+  wait=wait_fixed(1),
+  reraise=True,
+)(_check_triton_server_health)
+wait_for_triton_server = retry(
+  stop=stop_after_delay(60),
+  wait=wait_fixed(2),
+  reraise=True,
+)(_check_triton_server_health)
 
 @retry(stop=stop_after_attempt(3), wait=wait_random(1, 2), reraise=True)
 def get_triton_inference_stats(client: InferenceServerClient):
