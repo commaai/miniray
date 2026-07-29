@@ -38,7 +38,9 @@ def cgroup_create(name: str) -> None:
   try:
     cgroup_path.mkdir(mode=0o755)
   except PermissionError as e:
-    raise PermissionError(f"could not create cgroup, manually create with:\nsudo mkdir -p {cgroup_path} && sudo chown $USER:$USER {cgroup_path}") from e
+    raise PermissionError(
+      f"could not create cgroup, manually create with:\nsudo mkdir -p {cgroup_path} "
+      f"&& sudo chown $USER:$USER {cgroup_path}") from e
 
 
 def cgroup_set_numa_nodes(name: str, numa_nodes: list[int]) -> None:

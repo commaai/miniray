@@ -43,8 +43,10 @@ MAX_PRIORITY = 20
 DEFAULT_LOGGER = get_stream_logger('miniray', level=logging.INFO)
 
 MISSING_RESULT_PAYLOAD_ERROR = (
-  f"Did not find payload on worker redis. Results may be piling up and reader has fallen more than {DEFAULT_RESULT_PAYLOAD_TIMEOUT_SECONDS/60:.1f}"
-  " minutes behind. If your results are small, consider a larger chunksize. If your results are big, consider multiple miniray executors.")
+  f"Did not find payload on worker redis. Results may be piling up and reader has fallen more than "
+  f"{DEFAULT_RESULT_PAYLOAD_TIMEOUT_SECONDS/60:.1f}"
+  " minutes behind. If your results are small, consider a larger chunksize."
+  " If your results are big, consider multiple miniray executors.")
 
 #TODO xx and code.nfs should not be referenced here
 XX_BASEPATH = Path(__file__).resolve().parent.parent
@@ -137,7 +139,10 @@ def sync_local_codedir(job_desc: str) -> str:
   if (local_exclude := XX_BASEPATH / "training/.training_cache_exclude.local").exists():
     excludes.append(f"--exclude-from={local_exclude}")
   dest = cache_dir.relative_to(Path("/code.nfs")).as_posix()
-  subprocess.check_call(["rsync", "-a", "--max-delete=0", "--copy-dest=/xx", "--info=progress2", *excludes, f"{XX_BASEPATH}/", f"rsync://app01:1026/code_nfs/{dest}/"])
+  subprocess.check_call([
+    "rsync", "-a", "--max-delete=0", "--copy-dest=/xx", "--info=progress2", *excludes,
+    f"{XX_BASEPATH}/", f"rsync://app01:1026/code_nfs/{dest}/",
+  ])
   return str(cache_dir)
 
 def _execute_batch(fn, *batch, **kwargs):
@@ -216,7 +221,8 @@ class Executor(BaseExecutor):
       limits = replace(config.limits, **limits)
     config = replace(config, limits=limits)
 
-    assert config.job_name.replace('.','').replace('-', '').replace('_', '').isalnum(), f'Invalid job name: {config.job_name}'
+    assert config.job_name.replace('.','').replace('-', '').replace('_', '').isalnum(), \
+      f'Invalid job name: {config.job_name}'
     job_desc = f"{config.job_name}_{str(uuid.uuid4())[:8]}"
 
     if config.codedir is not None:
@@ -266,7 +272,9 @@ class Executor(BaseExecutor):
     self._reader_thread.start()
     return super().__enter__()
 
-  def __exit__(self, exc_type: Optional[type[BaseException]], exc_val: Optional[BaseException], exc_tb: Optional[TracebackType]):
+  def __exit__(
+    self, exc_type: Optional[type[BaseException]], exc_val: Optional[BaseException], exc_tb: Optional[TracebackType],
+  ):
     try:
       self.shutdown()
     except (Exception, KeyboardInterrupt):
@@ -290,7 +298,8 @@ class Executor(BaseExecutor):
           for future in futures:
             future.cancel()
 
-      self._submit_redis_master.delete(get_tasks_key(self.submit_queue_id), self.submit_queue_id, get_metadata_key(self.submit_queue_id))
+      self._submit_redis_master.delete(
+        get_tasks_key(self.submit_queue_id), self.submit_queue_id, get_metadata_key(self.submit_queue_id))
 
   def submit(self, fn: Callable, /, *args, **kwargs) -> Future:
     assert not self._shutdown_reader_thread, "Cannot submit new tasks after shutdown has started"
@@ -302,7 +311,9 @@ class Executor(BaseExecutor):
     self._futures[task_uuid] = ([future], True, task[1])
     return future
 
-  def map(self, fn: Callable, *iterables: Iterable[Any], timeout: Optional[float] = None, chunksize: int = 1) -> Iterator[Any]:
+  def map(
+    self, fn: Callable, *iterables: Iterable[Any], timeout: Optional[float] = None, chunksize: int = 1,
+  ) -> Iterator[Any]:
     if timeout is not None:
       raise NotImplementedError("Timeout arg is not supported. Use `fmap` instead to get a timeout per task.")
     # submit all tasks first, then resolve the results lazily
@@ -320,7 +331,8 @@ class Executor(BaseExecutor):
     assert not self._shutdown_reader_thread, "Cannot submit new tasks after shutdown has started"
     function_ptr = self._cache_func_in_redis(fn)
     submitted_queue: Queue[Optional[Future]] = Queue()
-    writer_thread = threading.Thread(target=self._writer_loop, args=(submitted_queue, function_ptr, list(iterables), chunksize), daemon=True)
+    writer_thread = threading.Thread(
+      target=self._writer_loop, args=(submitted_queue, function_ptr, list(iterables), chunksize), daemon=True)
     writer_thread.start()
     self._writer_threads.append(writer_thread)
     while future := submitted_queue.get():
@@ -331,11 +343,13 @@ class Executor(BaseExecutor):
 
   # Worker threads
 
-  def _writer_loop(self, submitted_queue: Queue[Optional[Future]], function_ptr: str, iterables: list[Iterable[Any]], chunksize: int) -> None:
+  def _writer_loop(
+    self, submitted_queue: Queue[Optional[Future]], function_ptr: str, iterables: list[Iterable[Any]], chunksize: int,
+  ) -> None:
     try:
       args_iterator = zip(*iterables, strict=True)
       assert chunksize >= 1
-      while args := list(islice(args_iterator, chunksize * max(1, (1000 // chunksize)))):  # up to max(1000, chunksize) tasks at a time
+      while args := list(islice(args_iterator, chunksize * max(1, (1000 // chunksize)))):  # up to 1000 tasks at a time
         if self._shutdown_writer_threads:
           break
         task_args, task_futures = {}, {}
@@ -345,10 +359,13 @@ class Executor(BaseExecutor):
           task_futures[task_uuid] = [Future() for _ in batch]
           for future in task_futures[task_uuid]:
             submitted_queue.put(future)
-        tasks = dict(self._pack_task(function_ptr, b'', args, {}, task_uuid) for task_uuid, args in task_args.items())
-        self._futures.update({task_uuid: (futures, False, tasks[task_uuid]) for task_uuid, futures in task_futures.items()})  # mark as unsubmitted
+        tasks = dict(
+          self._pack_task(function_ptr, b'', args, {}, task_uuid) for task_uuid, args in task_args.items())
+        self._futures.update(
+          {task_uuid: (futures, False, tasks[task_uuid]) for task_uuid, futures in task_futures.items()})  # unsubmitted
         self._submit_tasks(list(tasks.items()))
-        self._futures.update({task_uuid: (futures, True, tasks[task_uuid]) for task_uuid, futures in task_futures.items()})  # mark as submitted
+        self._futures.update(
+          {task_uuid: (futures, True, tasks[task_uuid]) for task_uuid, futures in task_futures.items()})  # submitted
 
       submitted_queue.put(None)  # Signal the end of the stream
     except Exception:
@@ -358,7 +375,8 @@ class Executor(BaseExecutor):
 
   def _reader_loop(self) -> None:
     while True:
-      if self._shutdown_reader_thread is ShutdownMode.FORCE or (self._shutdown_reader_thread is ShutdownMode.GRACEFUL and not self._futures):
+      if self._shutdown_reader_thread is ShutdownMode.FORCE or (
+        self._shutdown_reader_thread is ShutdownMode.GRACEFUL and not self._futures):
         break
       try:
         if time.time() - self._last_lost_check > 10:
@@ -388,12 +406,17 @@ class Executor(BaseExecutor):
           self._futures.pop(task_uuid)
           claimed = cast(Optional[bytes], self._claimed_redis.get(f"claimed:{task_uuid}"))
           for future in futures:
-            future.set_exception(MinirayError("RuntimeError", f"task lost ({task_uuid})", self.submit_queue_id, claimed.decode() if claimed else ""))
+            future.set_exception(MinirayError(
+              "RuntimeError", f"task lost ({task_uuid})", self.submit_queue_id, claimed.decode() if claimed else ""))
 
-  def _pack_task(self, function_ptr: str, pickled_fn: bytes, args: Sequence[Any], kwargs: dict[str, Any], task_uuid: str) -> tuple[str, bytes]:
+  def _pack_task(
+    self, function_ptr: str, pickled_fn: bytes, args: Sequence[Any], kwargs: dict[str, Any], task_uuid: str,
+  ) -> tuple[str, bytes]:
     pickled_args = cloudpickle.dumps((args, kwargs))
     if len(pickled_fn) + len(pickled_args) > MAX_ARG_STRLEN:
-      raise RuntimeError(f"Can't send target, size ({len(pickled_fn) + len(pickled_args)}) exceeds max allowed length ({MAX_ARG_STRLEN})")
+      raise RuntimeError(
+        f"Can't send target, size ({len(pickled_fn) + len(pickled_args)}) exceeds max allowed "
+        f"length ({MAX_ARG_STRLEN})")
     record = TaskRecord(
       uuid=task_uuid,
       job=self.submit_queue_id,
@@ -440,14 +463,16 @@ class Executor(BaseExecutor):
             self._resubmit_task(futures, header, record, reason='result payload lost (worker redis recreated)')
           else:
             for future in futures:
-              future.set_exception(MinirayError("MinirayError", MISSING_RESULT_PAYLOAD_ERROR, header.job, header.worker))
+              future.set_exception(MinirayError(
+                "MinirayError", MISSING_RESULT_PAYLOAD_ERROR, header.job, header.worker))
         else:
           subtasks = cloudpickle.loads(result_payload)
           for future, subtask in zip(futures, subtasks, strict=True):
             if subtask.succeeded:
               future.set_result(subtask.result)
             else:
-              future.set_exception(MinirayError(subtask.exception_type, subtask.exception_desc, header.job, header.worker))
+              future.set_exception(MinirayError(
+                subtask.exception_type, subtask.exception_desc, header.job, header.worker))
       elif header.exception_type == "WorkerShutdown":
         self._resubmit_task(futures, header, record, 'killed by worker shutdown')
       else:
@@ -455,17 +480,21 @@ class Executor(BaseExecutor):
           future.set_exception(MinirayError(header.exception_type, header.exception_desc, header.job, header.worker))
     except RedisConnectionError:
       for future in futures:
-        future.set_exception(MinirayError("RedisConnectionError", "lost connection to redis while fetching result payload", header.job, header.worker))
+        future.set_exception(MinirayError(
+          "RedisConnectionError", "lost connection to redis while fetching result payload", header.job, header.worker))
     except Exception as e:
       for future in futures:
         future.set_exception(e)
 
   def _submit_tasks(self, tasks: list[tuple[str, bytes]]) -> None:
-    self._submit_redis_master.hsetex(get_tasks_key(self.submit_queue_id), mapping=dict(tasks), ex=self.config.queue_timeout)
+    self._submit_redis_master.hsetex(
+      get_tasks_key(self.submit_queue_id), mapping=dict(tasks), ex=self.config.queue_timeout)
     uuids = [task_uuid for task_uuid, _ in tasks]
     self._submit_redis_master.lpush(f'{self.submit_queue_id}', *uuids)
 
-def log(iterable: Iterable[Future], logger: Any = DEFAULT_LOGGER, desc: str = 'running miniray tasks', **kwargs: Any) -> list[Any]:
+def log(
+  iterable: Iterable[Future], logger: Any = DEFAULT_LOGGER, desc: str = 'running miniray tasks', **kwargs: Any,
+) -> list[Any]:
   results = []
   statuses: Counter[str] = Counter()
   statuses_hosts = defaultdict(list)

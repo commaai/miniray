@@ -43,7 +43,7 @@ testpaths = ["tests"]
 [tool.ruff]
 lint.select = ["A", "B", "E", "F", "N", "W", "PIE", "C4", "ISC", "RUF100", "PTH", "TID251", "SLF"]
 lint.ignore = ["E701"]
-line-length = 160
+line-length = 120
 target-version="py312"
 exclude = ["miniray"]
 

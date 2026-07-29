@@ -28,7 +28,8 @@ def block_in_frozen_filesystem(hold_seconds: int):
   def cleanup_mount():
     subprocess.run(["fsfreeze", "-u", str(mnt)], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     for _ in range(100):
-      if subprocess.run(["umount", str(mnt)], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0:
+      if subprocess.run(["umount", str(mnt)], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+                         ).returncode == 0:
         break
       time.sleep(0.1)
     shutil.rmtree(tmp_root, ignore_errors=True)

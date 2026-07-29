@@ -28,15 +28,21 @@ from redis import StrictRedis
 from typing import BinaryIO, Optional, cast
 from tritonclient.http import InferenceServerClient
 
-from miniray.lib.cgroup import cgroup_create, cgroup_set_subcontrollers, cgroup_set_memory_limit, \
-                               cgroup_set_numa_nodes, cgroup_add_pid, cgroup_kill, cgroup_delete, cgroup_clear_all_children, cgroup_is_populated
+from miniray.lib.cgroup import (
+  cgroup_create, cgroup_set_subcontrollers, cgroup_set_memory_limit, cgroup_set_numa_nodes,
+  cgroup_add_pid, cgroup_kill, cgroup_delete, cgroup_clear_all_children, cgroup_is_populated,
+)
 from miniray.lib.sig_term_handler import SigTermHandler
 from miniray.lib.resource_manager import ResourceManager, ResourceLimitError
 from miniray.lib.worker_helpers import ExponentialBackoff
 from miniray.lib.triton_helpers import TRITON_SERVER_ADDRESS, check_triton_server_health, wait_for_triton_server
-from miniray.lib.system_helpers import get_cgroup_cpu_usage, get_cgroup_mem_usage, get_gpu_stats, get_gpu_mem_usage, get_gpu_utilization
+from miniray.lib.system_helpers import (
+  get_cgroup_cpu_usage, get_cgroup_mem_usage, get_gpu_stats, get_gpu_mem_usage, get_gpu_utilization,
+)
 from miniray.lib.statsd_helpers import statsd
-from miniray.lib.helpers import Limits, desc, GB_TO_BYTES, MAX_WORKER_LOOP_SECONDS, TASK_TIMEOUT_GRACE_SECONDS, JOB_CACHE_SIZE
+from miniray.lib.helpers import (
+  Limits, desc, GB_TO_BYTES, MAX_WORKER_LOOP_SECONDS, TASK_TIMEOUT_GRACE_SECONDS, JOB_CACHE_SIZE,
+)
 from miniray.lib.uv import sync_venv_cache, cleanup_venvs, populate_venv_cache_from_disk, pycache_dir_for_venv
 from miniray.executor import MinirayResultHeader, JobMetadata, TaskRecord, TaskState, get_metadata_key, get_tasks_key
 
@@ -236,8 +242,9 @@ class Task:
       if DEBUG: print("[worker]", " ".join(p_args))
 
       t0 = time.perf_counter()
-      self.proc = subprocess.Popen(p_args, user=TASK_UID, group=self.task_gid, extra_groups=task_extra_groups, cwd=str(EMPTY_DIR), env=p_env,
-                                   start_new_session=True, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+      self.proc = subprocess.Popen(
+        p_args, user=TASK_UID, group=self.task_gid, extra_groups=task_extra_groups, cwd=str(EMPTY_DIR), env=p_env,
+        start_new_session=True, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
       cgroup_add_pid(self.cgroup_name, self.proc.pid)
       assert self.proc.stdin is not None
       stdin = cast(BinaryIO, self.proc.stdin)
@@ -325,8 +332,9 @@ class Task:
       task_gpu_time = get_gpu_utilization(task_gpu_stats) * task_run_time
       task_memory_gb = get_cgroup_mem_usage(self.cgroup_name) * 1e-9
       task_gpu_memory_gb = get_gpu_mem_usage(task_gpu_stats) * 1e-9
-      statsd.event("pipeline.worker.task_done", runtime=task_run_time, cpu=task_cpu_time, gpu=task_gpu_time,
-                                                memory=task_memory_gb, gpu_memory=task_gpu_memory_gb, tags={'task_id': self.job})
+      statsd.event(
+        "pipeline.worker.task_done", runtime=task_run_time, cpu=task_cpu_time, gpu=task_gpu_time,
+        memory=task_memory_gb, gpu_memory=task_gpu_memory_gb, tags={'task_id': self.job})
       print(f"[worker] finished miniray task from job {self.job} stats: "
             f"elapsed={task_run_time:0.2f}s cpu={task_cpu_time:0.2f}s gpu={task_gpu_time:0.2f}s "
             f"mem={task_memory_gb:0.2f}GB gpumem={task_gpu_memory_gb:0.2f}GB")
@@ -382,11 +390,11 @@ class Task:
 # For example: if we have weights [1, 100, 1000] and N = 10, we find x = 1250
 # to get weights = [0.1, 0.1, 0.8], which satisfies all(W >= 1 / N) and sum(W) == 1.
 def get_job_intervals(raw_weights: list[int], n_workers: int) -> list[float]:
-  weights = all_weights = np.array(raw_weights[:n_workers])  # we have N workers, so we can only schedule a maximum of N jobs at once
+  weights = all_weights = np.array(raw_weights[:n_workers])  # max of N jobs at once
   x = 0
   while sum(weights) / n_workers > x + 1e-7:  # small epsilon to fix rounding errors
     x = sum(weights) / n_workers  # set x to its lower bound
-    n_workers -= sum(weights / x < 1)  # any weights less than 1 / N will be clamped, so remove these weights from both N and weights and keep looping
+    n_workers -= sum(weights / x < 1)  # weights < 1/N get clamped, remove from N and weights
     weights = weights[weights / x >= 1]
 
   weights = np.maximum(1, all_weights / x)
@@ -394,12 +402,17 @@ def get_job_intervals(raw_weights: list[int], n_workers: int) -> list[float]:
   return weights.tolist()
 
 # To decide which job to accept, we do the following:
-# - Find our position in the sorted list of N active workers, this will be a number in [0, N). Divide by N to get a point P in [0, 1).
+# - Find our position in the sorted list of N active workers, this will be a number in [0, N).
+#   Divide by N to get a point P in [0, 1).
 # - Divide the interval [0, 1] amongst the available jobs, weighted by job priority
 # - Find the job whose interval contains P, this will be the job we accept.
-def get_globally_scheduled_job(r_master: StrictRedis, jobs: list[str], job_metadatas: LRU[str, JobMetadata]) -> Optional[str]:
-  active_key = hashlib.md5(ACTIVE_KEY.encode()).hexdigest()  # we use the hash so machines with different compute capabilities are evenly distributed
-  active_workers = sorted(hashlib.md5(k).hexdigest() for k in cast(list[bytes], r_master.keys(f"active:{PIPELINE_QUEUE}:*")))
+def get_globally_scheduled_job(
+  r_master: StrictRedis, jobs: list[str], job_metadatas: LRU[str, JobMetadata],
+) -> Optional[str]:
+  # we use the hash so machines with different compute capabilities are evenly distributed
+  active_key = hashlib.md5(ACTIVE_KEY.encode()).hexdigest()
+  active_workers = sorted(
+    hashlib.md5(k).hexdigest() for k in cast(list[bytes], r_master.keys(f"active:{PIPELINE_QUEUE}:*")))
   if not jobs or active_key not in active_workers:
     return None
 
@@ -419,7 +432,10 @@ def get_randomly_scheduled_job(jobs: list[str], job_metadatas: LRU[str, JobMetad
   job = random.choices(jobs, weights=job_weights, k=1)[0]
   return job
 
-def update_job_metadatas(r_master: StrictRedis, jobs: list[str], job_metadatas: LRU[str, JobMetadata], job_errors: LRU[str, tuple[str, str] | None]):
+def update_job_metadatas(
+  r_master: StrictRedis, jobs: list[str], job_metadatas: LRU[str, JobMetadata],
+  job_errors: LRU[str, tuple[str, str] | None],
+):
   for job in set(job_metadatas.keys()) - set(jobs):
     del job_metadatas[job]
     job_errors.pop(job, None)
@@ -436,9 +452,12 @@ def update_job_metadatas(r_master: StrictRedis, jobs: list[str], job_metadatas: 
         job_metadatas[job] = JobMetadata(False, 1, "", "", Limits().asdict(), {})
         job_errors[job] = ("JobMetadataError", f"{job}: {desc(e)}")
 
-def get_task(resource_manager: ResourceManager, r_master: StrictRedis,
-             r_results: StrictRedis, r_claimed: StrictRedis, job: str, job_metadatas: LRU[str, JobMetadata], job_errors: LRU[str, tuple[str, str] | None],
-             venvs: LRU[str, str], proc_index: int, triton_client) -> Optional[Task]:
+def get_task(
+  resource_manager: ResourceManager, r_master: StrictRedis,
+  r_results: StrictRedis, r_claimed: StrictRedis, job: str,
+  job_metadatas: LRU[str, JobMetadata], job_errors: LRU[str, tuple[str, str] | None],
+  venvs: LRU[str, str], proc_index: int, triton_client,
+) -> Optional[Task]:
   limits = Limits(**job_metadatas[job].limits)
   temp_key = f"{job}-pending"
   try:
@@ -472,7 +491,9 @@ def get_task(resource_manager: ResourceManager, r_master: StrictRedis,
 
   resource_manager.rekey(temp_key, record.uuid)
 
-  return Task(record, limits, proc_index, resource_manager, r_master, r_results, job_metadatas[job], job_errors.get(job), venvs, triton_client)
+  return Task(
+    record, limits, proc_index, resource_manager, r_master, r_results,
+    job_metadatas[job], job_errors.get(job), venvs, triton_client)
 
 
 def sig_callback(signal):
@@ -564,10 +585,13 @@ def main():
       timings['triton'] = time.perf_counter() - worker_loop_start
 
       t0 = time.perf_counter()
-      # TODO: with >JOB_CACHE_SIZE jobs, this drops the tail of the sorted list, so prioritization is broken and the excluded jobs get no share
-      jobs = sorted(key.decode() for key in cast(list[bytes], r_master.keys(f"*{PIPELINE_QUEUE}")) if b":" not in key)[:JOB_CACHE_SIZE]
+      # TODO: with >JOB_CACHE_SIZE jobs, this drops the tail of the sorted list, so prioritization is broken
+      jobs = sorted(
+        key.decode() for key in cast(list[bytes], r_master.keys(f"*{PIPELINE_QUEUE}")) if b":" not in key
+      )[:JOB_CACHE_SIZE]
       update_job_metadatas(r_master, jobs, job_metadatas, job_errors)
-      jobs = [j for j in jobs if not job_metadatas[j].limits.get('node_whitelist') or HOST_NAME in job_metadatas[j].limits['node_whitelist']]
+      jobs = [j for j in jobs if not job_metadatas[j].limits.get('node_whitelist')
+              or HOST_NAME in job_metadatas[j].limits['node_whitelist']]
       current_gpu_job = get_globally_scheduled_job(r_master, jobs, job_metadatas)
       timings['redis_sched'] = time.perf_counter() - t0
 
@@ -575,7 +599,10 @@ def main():
 
       for i, proc in procs.items():
         if time.perf_counter() - worker_loop_start > MAX_WORKER_LOOP_SECONDS:
-          start_breakdown = ", ".join(f"{k}={v:.2f}s" for k, v in sorted(last_init_timings.items(), key=lambda x: -x[1])) if last_init_timings else "n/a"
+          sorted_timings = sorted(last_init_timings.items(), key=lambda x: -x[1])
+          start_breakdown = ", ".join(
+            f"{k}={v:.2f}s" for k, v in sorted_timings
+          ) if last_init_timings else "n/a"
           print("[worker] loop breakdown: " +
                 ", ".join(f"{k}={v:.2f}s" for k, v in sorted(timings.items(), key=lambda x: -x[1]) if v > 0.01) +
                 f" | last start_task: {start_breakdown}")
@@ -599,7 +626,8 @@ def main():
         task = None
         if current_gpu_job is not None and current_gpu_job in venvs:
           t0 = time.perf_counter()
-          task = get_task(rm, r_master, r_results, r_claimed, current_gpu_job, job_metadatas, job_errors, venvs, i, triton_client)
+          task = get_task(
+            rm, r_master, r_results, r_claimed, current_gpu_job, job_metadatas, job_errors, venvs, i, triton_client)
           timings['get_task'] += time.perf_counter() - t0
         if task is None:
           ready_jobs = [j for j in jobs if j in venvs]

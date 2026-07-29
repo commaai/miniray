@@ -70,7 +70,11 @@ def extract_error(e):
     elif cls == "DependencyMissingError":
       msg = msg.split('/')[-3].strip()
     elif cls == "Exception":
-      patterns = ["Error, range out of bounds [0-9]{3}", "Error, requested range but got unexpected response [0-9]{3}", "Error [0-9]{3}"]
+      patterns = [
+        "Error, range out of bounds [0-9]{3}",
+        "Error, requested range but got unexpected response [0-9]{3}",
+        "Error [0-9]{3}",
+      ]
       for pattern in patterns:
         match = re.match(pattern, msg)
         if match:

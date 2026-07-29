@@ -34,7 +34,8 @@ def _is_model_loading(client: InferenceServerClient, model_name: str):
       return True
   return False
 
-check_triton_server_health = retry(stop=stop_after_delay(15), wait=wait_fixed(1), reraise=True)(_check_triton_server_health)
+check_triton_server_health = retry(stop=stop_after_delay(15), wait=wait_fixed(1), reraise=True)(
+  _check_triton_server_health)
 wait_for_triton_server = retry(stop=stop_after_delay(60), wait=wait_fixed(2), reraise=True)(_check_triton_server_health)
 
 @retry(stop=stop_after_attempt(3), wait=wait_random(1, 2), reraise=True)
@@ -53,7 +54,9 @@ def load_triton_model(client: InferenceServerClient, model: str, config: ModelCo
 
 def setup_triton_model(func: Callable[..., ModelConfig]):
   @wraps(func)
-  def wrapper(*self: Any, client: InferenceServerClient, model: str, redis: Optional[StrictRedis] = None, load_timeout = 60) -> None:
+  def wrapper(
+    *self: Any, client: InferenceServerClient, model: str, redis: Optional[StrictRedis] = None, load_timeout = 60,
+  ) -> None:
       model_dir = TRITON_MODEL_REPOSITORY / model / '1'
       if client.is_model_ready(model):  # if the model is already loaded, bump the mtime and return
         mtime = time.time()
@@ -103,13 +106,15 @@ def kill_triton_processes_by_name(name: str) -> None:
     try: os.kill(int(pid_text), signal.SIGKILL)
     except ProcessLookupError: pass
 
-# NOTE: This function must also run as root, since the triton_python_backend_shm_region files are created directly by the triton server
+# NOTE: This function must also run as root, since the triton_python_backend_shm_region files are
+# created directly by the triton server
 def unlink_triton_shm_files() -> None:
   for f in Path("/dev/shm").glob("triton_python_backend_shm_region_*"):
     f.unlink(missing_ok=True)
 
 def get_triton_container_id() -> str:
-  container_ids = subprocess.check_output(["docker", "ps", "--format", "{{.ID}}", "--filter", "name=tritonserver"]).decode('utf-8').strip()
+  container_ids = subprocess.check_output(
+    ["docker", "ps", "--format", "{{.ID}}", "--filter", "name=tritonserver"]).decode('utf-8').strip()
   if not container_ids:
     raise RuntimeError("No tritonserver container found")
   return container_ids.split('\n')[0]
@@ -127,8 +132,10 @@ def unload_stale_models(triton_client: InferenceServerClient, redis_client: Stri
     except FileNotFoundError: model_mtime = 0
     try: parameters = triton_client.get_model_config(model['name']).get('parameters', {})
     except InferenceServerException: continue
-    model_stale_after_seconds = float(parameters.get(TRITON_MODEL_STALE_AFTER_SECONDS_PARAMETER, {}).get('string_value', 60))
-    if model['name'] != keep_model_name and time.time() - max(last_inference_time, model_mtime) > model_stale_after_seconds:
+    model_stale_after_seconds = float(
+      parameters.get(TRITON_MODEL_STALE_AFTER_SECONDS_PARAMETER, {}).get('string_value', 60))
+    if model['name'] != keep_model_name and (
+      time.time() - max(last_inference_time, model_mtime) > model_stale_after_seconds):
       with redis_client.lock(model['name'], timeout=60):
         unload_triton_model(triton_client, model['name'])
 
