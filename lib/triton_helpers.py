@@ -61,13 +61,11 @@ def load_triton_model(client: InferenceServerClient, model: str, config: ModelCo
 
 def setup_triton_model(func: Callable[..., ModelConfig]):
   @wraps(func)
-  def wrapper(
-    *self: Any,
+  def wrapper(*self: Any,
     client: InferenceServerClient,
     model: str,
     redis: Optional[StrictRedis] = None,
-    load_timeout = 60,
-  ) -> None:
+    load_timeout = 60) -> None:
       model_dir = TRITON_MODEL_REPOSITORY / model / '1'
       if client.is_model_ready(model):  # if the model is already loaded, bump the mtime and return
         mtime = time.time()
