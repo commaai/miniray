@@ -112,7 +112,6 @@ class MiniraySubTaskResult(NamedTuple):
 class JobConfig:
   priority: int = 1
   job_name: str = 'unnamed'
-  job_group: Optional[str] = None  # jobs in the same group share a scheduling slot, priority is the max in the group
   queue_name: str = REMOTE_QUEUE
   redis_host: str = REDIS_HOST
   codedir: Optional[str] = None
@@ -120,6 +119,7 @@ class JobConfig:
   limits: Limits = field(default_factory=Limits)
   env: dict[str, str] = field(default_factory=dict)
   queue_timeout: int = PENDING_TASK_SAFETY_TTL
+  job_group: Optional[str] = None  # jobs in the same group share a scheduling slot, priority is the max in the group
 
   def asdict(self):
     return asdict(self)

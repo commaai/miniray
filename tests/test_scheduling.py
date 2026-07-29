@@ -43,6 +43,14 @@ def test_unset_job_group_keeps_jobs_separate():
   }
 
 
+def test_job_config_preserves_positional_queue_name():
+  config = executor_module.JobConfig(5, "name", "custom_queue")
+  assert config.priority == 5
+  assert config.job_name == "name"
+  assert config.queue_name == "custom_queue"
+  assert config.job_group is None
+
+
 def test_random_scheduler_excludes_groups_containing_gpu_jobs():
   m: LRU[str, JobMetadata] = LRU(64)
   m["mixed_cpu"] = JobMetadata(True, 1, "/code", "host", Limits().asdict(), {}, "mixed")
