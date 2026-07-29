@@ -92,6 +92,12 @@ class JobMetadata(NamedTuple):
   executor: str
   limits: dict[str, Any]
   env: dict[str, str]
+  job_group: str
+
+def migrate_job_metadata(metadata: list[Any]) -> JobMetadata:
+  if len(metadata) == 6:
+    metadata = [*metadata, '']
+  return JobMetadata(*metadata)
 
 class MinirayResultHeader(NamedTuple):
   job: str
@@ -118,6 +124,7 @@ class JobConfig:
   limits: Limits = field(default_factory=Limits)
   env: dict[str, str] = field(default_factory=dict)
   queue_timeout: int = PENDING_TASK_SAFETY_TTL
+  job_group: str = ''  # jobs in the same group share a scheduling slot
 
   def asdict(self):
     return asdict(self)
@@ -259,6 +266,7 @@ class Executor(BaseExecutor):
       self.executor,
       self.config.limits.asdict(),
       self.config.env,
+      self.config.job_group,
     )
     self._submit_redis_master.set(get_metadata_key(self.submit_queue_id), json.dumps(job_metadata), ex=7*24*60*60)
 

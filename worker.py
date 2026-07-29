@@ -20,6 +20,7 @@ import subprocess
 import grp
 import stat
 import shutil
+from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, Future
 import numpy as np
 from lru import LRU
@@ -44,7 +45,9 @@ from miniray.lib.helpers import (
   Limits, desc, GB_TO_BYTES, MAX_WORKER_LOOP_SECONDS, TASK_TIMEOUT_GRACE_SECONDS, JOB_CACHE_SIZE,
 )
 from miniray.lib.uv import sync_venv_cache, cleanup_venvs, populate_venv_cache_from_disk, pycache_dir_for_venv
-from miniray.executor import MinirayResultHeader, JobMetadata, TaskRecord, TaskState, get_metadata_key, get_tasks_key
+from miniray.executor import (
+  MinirayResultHeader, JobMetadata, TaskRecord, TaskState, get_metadata_key, get_tasks_key, migrate_job_metadata,
+)
 
 
 HOST_NAME = socket.gethostname()
@@ -401,35 +404,46 @@ def get_job_intervals(raw_weights: list[int], n_workers: int) -> list[float]:
   weights = np.cumsum(weights / weights.sum())
   return weights.tolist()
 
-# To decide which job to accept, we do the following:
+# group jobs by job_group so they share a scheduling slot (priority = max in the group)
+def group_jobs(jobs: list[str], job_metadatas: LRU[str, JobMetadata]) -> dict[str, list[str]]:
+  groups: dict[str, list[str]] = defaultdict(list)
+  for job in jobs:
+    groups[job_metadatas[job].job_group or job].append(job)
+  return dict(sorted(groups.items()))
+
+# To decide which group to accept, we do the following:
 # - Find our position in the sorted list of N active workers, this will be a number in [0, N).
 #   Divide by N to get a point P in [0, 1).
-# - Divide the interval [0, 1] amongst the available jobs, weighted by job priority
-# - Find the job whose interval contains P, this will be the job we accept.
-def get_globally_scheduled_job(r_master: StrictRedis,
-  jobs: list[str], job_metadatas: LRU[str, JobMetadata]) -> Optional[str]:
+# - Divide the interval [0, 1] amongst the available groups, weighted by group priority (max priority in the group)
+# - Find the group whose interval contains P. The worker is pinned to that group, not to a job.
+def get_globally_scheduled_group(r_master: StrictRedis,
+  groups: dict[str, list[str]], job_metadatas: LRU[str, JobMetadata]) -> Optional[str]:
   # we use the hash so machines with different compute capabilities are evenly distributed
   active_key = hashlib.md5(ACTIVE_KEY.encode()).hexdigest()
   active_worker_keys = cast(list[bytes], r_master.keys(f"active:{PIPELINE_QUEUE}:*"))
   active_workers = sorted(hashlib.md5(k).hexdigest() for k in active_worker_keys)
-  if not jobs or active_key not in active_workers:
+  group_names = list(groups.keys())
+  if not group_names or active_key not in active_workers:
     return None
 
   p = active_workers.index(active_key) / len(active_workers)  # p is a point in [0, 1)
-  job_weights = [job_metadatas[j].priority for j in jobs]
-  job_intervals = get_job_intervals(job_weights, len(active_workers))
-  job_index = next(i for i,end in enumerate(job_intervals) if end >= p + 1e-7)
-  return jobs[job_index]
+  group_weights = [max(job_metadatas[j].priority for j in groups[g]) for g in group_names]
+  group_intervals = get_job_intervals(group_weights, len(active_workers))
+  group_index = next(i for i, end in enumerate(group_intervals) if end >= p + 1e-7)
+  return group_names[group_index]
 
-def get_randomly_scheduled_job(jobs: list[str], job_metadatas: LRU[str, JobMetadata]) -> Optional[str]:
-  # gpu jobs are only scheduled via the global scheduler
-  jobs = [job for job in jobs if not Limits(**job_metadatas[job].limits).requires_gpu()]
-
-  if not jobs:
+def get_randomly_scheduled_group(groups: dict[str, list[str]],
+  job_metadatas: LRU[str, JobMetadata]) -> Optional[str]:
+  # groups containing gpu jobs are only scheduled via the global scheduler
+  groups = {
+    group: jobs for group, jobs in groups.items()
+    if not any(Limits(**job_metadatas[job].limits).requires_gpu() for job in jobs)
+  }
+  if not groups:
     return None
-  job_weights = [job_metadatas[j].priority for j in jobs]
-  job = random.choices(jobs, weights=job_weights, k=1)[0]
-  return job
+  group_names = list(groups.keys())
+  group_weights = [max(job_metadatas[j].priority for j in groups[g]) for g in group_names]
+  return random.choices(group_names, weights=group_weights, k=1)[0]
 
 def update_job_metadatas(r_master: StrictRedis, jobs: list[str],
   job_metadatas: LRU[str, JobMetadata], job_errors: LRU[str, tuple[str, str] | None]):
@@ -443,10 +457,10 @@ def update_job_metadatas(r_master: StrictRedis, jobs: list[str],
         raw_metadata = cast(bytes, r_master.get(get_metadata_key(job)))
         if raw_metadata is None:
           raise ValueError("No metadata found in redis")
-        job_metadatas[job] = JobMetadata(*json.loads(raw_metadata))
+        job_metadatas[job] = migrate_job_metadata(json.loads(raw_metadata))
         job_errors[job] = None
       except Exception as e:
-        job_metadatas[job] = JobMetadata(False, 1, "", "", Limits().asdict(), {})
+        job_metadatas[job] = JobMetadata(False, 1, "", "", Limits().asdict(), {}, "")
         job_errors[job] = ("JobMetadataError", f"{job}: {desc(e)}")
 
 def get_task(resource_manager: ResourceManager, r_master: StrictRedis,
@@ -591,7 +605,8 @@ def main():
         if not whitelist or HOST_NAME in whitelist:
           filtered_jobs.append(j)
       jobs = filtered_jobs
-      current_gpu_job = get_globally_scheduled_job(r_master, jobs, job_metadatas)
+      groups = group_jobs(jobs, job_metadatas)
+      current_group = get_globally_scheduled_group(r_master, groups, job_metadatas)
       timings['redis_sched'] = time.perf_counter() - t0
 
       ensure_venvs(jobs, job_metadatas, job_errors, venvs, pending_venv_syncs, venv_executor)
@@ -621,15 +636,20 @@ def main():
           continue
 
         task = None
-        if current_gpu_job is not None and current_gpu_job in venvs:
-          t0 = time.perf_counter()
-          task = get_task(
-            rm, r_master, r_results, r_claimed, current_gpu_job, job_metadatas, job_errors, venvs, i, triton_client)
-          timings['get_task'] += time.perf_counter() - t0
+        if current_group is not None:
+          ready_jobs = [j for j in groups[current_group] if j in venvs]
+          if ready_jobs:
+            job = random.choice(ready_jobs)
+            t0 = time.perf_counter()
+            task = get_task(
+              rm, r_master, r_results, r_claimed, job, job_metadatas, job_errors, venvs, i, triton_client)
+            timings['get_task'] += time.perf_counter() - t0
         if task is None:
-          ready_jobs = [j for j in jobs if j in venvs]
-          job = get_randomly_scheduled_job(ready_jobs, job_metadatas)
-          if job is not None:
+          ready_groups = {g: [j for j in js if j in venvs] for g, js in groups.items()}
+          ready_groups = {g: js for g, js in ready_groups.items() if js}
+          group = get_randomly_scheduled_group(ready_groups, job_metadatas)
+          if group is not None:
+            job = random.choice(ready_groups[group])
             t0 = time.perf_counter()
             task = get_task(rm, r_master, r_results, r_claimed, job, job_metadatas, job_errors, venvs, i, triton_client)
             timings['get_task'] += time.perf_counter() - t0
