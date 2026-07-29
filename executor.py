@@ -359,8 +359,10 @@ class Executor(BaseExecutor):
           task_futures[task_uuid] = [Future() for _ in batch]
           for future in task_futures[task_uuid]:
             submitted_queue.put(future)
-        tasks = dict(
-          self._pack_task(function_ptr, b'', args, {}, task_uuid) for task_uuid, args in task_args.items())
+        tasks = {}
+        for task_uuid, args in task_args.items():
+          _, record = self._pack_task(function_ptr, b'', args, {}, task_uuid)
+          tasks[task_uuid] = record
         for task_uuid, futures in task_futures.items():
           self._futures[task_uuid] = (futures, False, tasks[task_uuid])  # unsubmitted
         self._submit_tasks(list(tasks.items()))
