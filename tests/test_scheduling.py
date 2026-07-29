@@ -48,7 +48,7 @@ def test_job_config_preserves_positional_queue_name():
   assert config.priority == 5
   assert config.job_name == "name"
   assert config.queue_name == "custom_queue"
-  assert config.job_group is None
+  assert config.job_group == ""
 
 
 def test_random_scheduler_excludes_groups_containing_gpu_jobs():

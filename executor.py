@@ -119,7 +119,7 @@ class JobConfig:
   limits: Limits = field(default_factory=Limits)
   env: dict[str, str] = field(default_factory=dict)
   queue_timeout: int = PENDING_TASK_SAFETY_TTL
-  job_group: Optional[str] = None  # jobs in the same group share a scheduling slot
+  job_group: str = ''  # jobs in the same group share a scheduling slot
 
   def asdict(self):
     return asdict(self)
@@ -261,7 +261,7 @@ class Executor(BaseExecutor):
       self.executor,
       self.config.limits.asdict(),
       self.config.env,
-      self.config.job_group or '',
+      self.config.job_group,
     )
     self._submit_redis_master.set(get_metadata_key(self.submit_queue_id), json.dumps(job_metadata), ex=7*24*60*60)
 
