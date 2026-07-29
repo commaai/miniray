@@ -160,10 +160,8 @@ class ResourceManager():
     # Pick the candidate node with the lowest CPU usage
     numa_node = min(candidate_nodes, key=lambda node: cpu_usages[node] / self.cpu_totals[node])
 
-    if small_gpu_mem_bytes and (
-      not small_gpu
-      or gpu_mem_usages[small_gpu.index] + small_gpu_mem_bytes > small_gpu.memory
-    ):
+    small_gpu_over_limit = not small_gpu or gpu_mem_usages[small_gpu.index] + small_gpu_mem_bytes > small_gpu.memory
+    if small_gpu_mem_bytes and small_gpu_over_limit:
       raise ResourceLimitError(
         f"small gpu memory request of {small_gpu_mem_bytes} will exceed limit of "
         f"{small_gpu.memory if small_gpu else 0.0}")
