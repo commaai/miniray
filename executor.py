@@ -119,7 +119,7 @@ class JobConfig:
   limits: Limits = field(default_factory=Limits)
   env: dict[str, str] = field(default_factory=dict)
   queue_timeout: int = PENDING_TASK_SAFETY_TTL
-  job_group: Optional[str] = None  # jobs in the same group share a scheduling slot, priority is the max in the group
+  job_group: Optional[str] = None  # jobs in the same group share a scheduling slot
 
   def asdict(self):
     return asdict(self)
