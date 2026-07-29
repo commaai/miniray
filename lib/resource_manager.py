@@ -199,12 +199,12 @@ class ResourceManager():
 
     cpu_usage = sum(cpu_usages.values()) / sum(self.cpu_totals.values())
     mem_usage = sum(mem_usages.values()) / sum(self.mem_totals.values())
-    small_gpu_mem_usage = sum(
-      gpu_mem_usages[gpu.index] for gpu in self.small_gpus
-    ) / (sum(gpu.memory for gpu in self.small_gpus) + 1e-5)
-    big_gpu_mem_usage = sum(
-      gpu_mem_usages[gpu.index] for gpu in self.big_gpus
-    ) / (sum(gpu.memory for gpu in self.big_gpus) + 1e-5)
+    small_gpu_mem_used = sum(gpu_mem_usages[gpu.index] for gpu in self.small_gpus)
+    small_gpu_mem_total = sum(gpu.memory for gpu in self.small_gpus) + 1e-5
+    small_gpu_mem_usage = small_gpu_mem_used / small_gpu_mem_total
+    big_gpu_mem_used = sum(gpu_mem_usages[gpu.index] for gpu in self.big_gpus)
+    big_gpu_mem_total = sum(gpu.memory for gpu in self.big_gpus) + 1e-5
+    big_gpu_mem_usage = big_gpu_mem_used / big_gpu_mem_total
     return cpu_usage, mem_usage, small_gpu_mem_usage, big_gpu_mem_usage
 
   def _get_cpu_info_by_node(self):
