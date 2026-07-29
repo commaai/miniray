@@ -22,7 +22,7 @@ def check_gpu_status_worker(gpu_bus_ids, output):
     try:
       for bus_id in gpu_bus_ids:
         gpu_dev = pynvml.nvmlDeviceGetHandleByPciBusId(bus_id)
-        pynvml.nvmlDeviceGetTemperature(gpu_dev, pynvml.NVML_TEMPERATURE_GPU)  # sometimes we need to actually query the gpu to tell if it's fallen off
+        pynvml.nvmlDeviceGetTemperature(gpu_dev, pynvml.NVML_TEMPERATURE_GPU)  # query to tell if it's fallen off
       output.valid = True
     except pynvml.NVMLError:
       output.valid = False
@@ -65,7 +65,10 @@ class ResourceManager():
     self.gpu_locked_job: str | None = None
 
     if self.gpus:
-      thread = threading.Thread(target=check_gpu_status_worker, args=([gpu.bus_id for gpu in self.gpus], self.gpu_status))
+      thread = threading.Thread(
+        target=check_gpu_status_worker,
+        args=([gpu.bus_id for gpu in self.gpus], self.gpu_status),
+      )
       thread.daemon = True
       thread.start()
 
@@ -134,24 +137,38 @@ class ResourceManager():
 
     big_gpu, small_gpu = None, None
     if big_gpu_mem_bytes > 0 and self.big_gpus:
-      big_gpu = min(self.big_gpus, key=lambda gpu: gpu_mem_usages[gpu.index])  # Pick the GPU with the lowest memory usage
+      big_gpu = min(self.big_gpus, key=lambda gpu: gpu_mem_usages[gpu.index])  # lowest memory usage
     if small_gpu_mem_bytes > 0 and (self.small_gpus or self.big_gpus):
-      small_gpu = min(self.small_gpus or self.big_gpus, key=lambda gpu: gpu_mem_usages[gpu.index])  # Fall back to big GPUs if no small ones are available
+      small_gpu = min(self.small_gpus or self.big_gpus, key=lambda gpu: gpu_mem_usages[gpu.index])  # fall back
 
     if limits.triton and self._triton_client is None:
       raise ResourceLimitError("Triton client is not available for this ResourceManager")
-    candidate_nodes = [node for node in self.cpu_totals if limits.cpu_threads <= self.cpu_totals[node] - cpu_usages[node]]
+    candidate_nodes = []
+    for node in self.cpu_totals:
+      if limits.cpu_threads <= self.cpu_totals[node] - cpu_usages[node]:
+        candidate_nodes.append(node)
     if not candidate_nodes:
-      raise ResourceLimitError(f"CPU request of {limits.cpu_threads} will exceed limit of {sum(self.cpu_totals.values())}")
-    candidate_nodes = [node for node in candidate_nodes if (mem_bytes) <= self.mem_totals[node] - mem_usages[node]]
+      raise ResourceLimitError(
+        f"CPU request of {limits.cpu_threads} will exceed limit of {sum(self.cpu_totals.values())}")
+    mem_ok_nodes = []
+    for node in candidate_nodes:
+      if (mem_bytes) <= self.mem_totals[node] - mem_usages[node]:
+        mem_ok_nodes.append(node)
+    candidate_nodes = mem_ok_nodes
     if not candidate_nodes:
       raise ResourceLimitError(f"memory request of {mem_bytes} will exceed limit of {sum(self.mem_totals.values())}")
-    numa_node = min(candidate_nodes, key=lambda node: cpu_usages[node] / self.cpu_totals[node])  # Pick the candidate node with the lowest CPU usage
+    # Pick the candidate node with the lowest CPU usage
+    numa_node = min(candidate_nodes, key=lambda node: cpu_usages[node] / self.cpu_totals[node])
 
-    if small_gpu_mem_bytes and (not small_gpu or gpu_mem_usages[small_gpu.index] + small_gpu_mem_bytes > small_gpu.memory):
-      raise ResourceLimitError(f"small gpu memory request of {small_gpu_mem_bytes} will exceed limit of {small_gpu.memory if small_gpu else 0.0}")
+    small_gpu_over_limit = not small_gpu or gpu_mem_usages[small_gpu.index] + small_gpu_mem_bytes > small_gpu.memory
+    if small_gpu_mem_bytes and small_gpu_over_limit:
+      raise ResourceLimitError(
+        f"small gpu memory request of {small_gpu_mem_bytes} will exceed limit of "
+        f"{small_gpu.memory if small_gpu else 0.0}")
     if big_gpu_mem_bytes and (not big_gpu or gpu_mem_usages[big_gpu.index] + big_gpu_mem_bytes > big_gpu.memory):
-      raise ResourceLimitError(f"big gpu memory request of {big_gpu_mem_bytes} will exceed limit of {big_gpu.memory if big_gpu else 0.0}")
+      raise ResourceLimitError(
+        f"big gpu memory request of {big_gpu_mem_bytes} will exceed limit of "
+        f"{big_gpu.memory if big_gpu else 0.0}")
 
     # Store allocation (no exceptions should be raised below this line)
     if self.gpu_locked_job != job and limits.requires_gpu():
@@ -180,8 +197,12 @@ class ResourceManager():
 
     cpu_usage = sum(cpu_usages.values()) / sum(self.cpu_totals.values())
     mem_usage = sum(mem_usages.values()) / sum(self.mem_totals.values())
-    small_gpu_mem_usage = sum(gpu_mem_usages[gpu.index] for gpu in self.small_gpus) / (sum(gpu.memory for gpu in self.small_gpus) + 1e-5)
-    big_gpu_mem_usage = sum(gpu_mem_usages[gpu.index] for gpu in self.big_gpus) / (sum(gpu.memory for gpu in self.big_gpus) + 1e-5)
+    small_gpu_mem_used = sum(gpu_mem_usages[gpu.index] for gpu in self.small_gpus)
+    small_gpu_mem_total = sum(gpu.memory for gpu in self.small_gpus) + 1e-5
+    small_gpu_mem_usage = small_gpu_mem_used / small_gpu_mem_total
+    big_gpu_mem_used = sum(gpu_mem_usages[gpu.index] for gpu in self.big_gpus)
+    big_gpu_mem_total = sum(gpu.memory for gpu in self.big_gpus) + 1e-5
+    big_gpu_mem_usage = big_gpu_mem_used / big_gpu_mem_total
     return cpu_usage, mem_usage, small_gpu_mem_usage, big_gpu_mem_usage
 
   def _get_cpu_info_by_node(self):

@@ -31,7 +31,9 @@ def sync_venv_cache(codedir: Union[str, Path], user_id: int, venv_name: str):
   errs = []
   for i in range(N_RETRIES):
     try:
-      subprocess.run(sync_cmd, env={**os.environ, 'UV_PROJECT_ENVIRONMENT': str(venv_dir)}, user=user_id, check=True, capture_output=True)
+      subprocess.run(
+        sync_cmd, env={**os.environ, 'UV_PROJECT_ENVIRONMENT': str(venv_dir)},
+        user=user_id, check=True, capture_output=True)
       return venv_dir
     except subprocess.CalledProcessError as e:
       errs.append(f'try {i}: {parse_uv_sync_stderr(e.stderr)}')
