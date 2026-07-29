@@ -433,13 +433,13 @@ def get_globally_scheduled_group(r_master: StrictRedis,
 def get_randomly_scheduled_group(groups: dict[str, list[str]],
   job_metadatas: LRU[str, JobMetadata]) -> Optional[str]:
   # gpu jobs are only scheduled via the global scheduler
-  eligible = {g: [j for j in jobs if not Limits(**job_metadatas[j].limits).requires_gpu()]
-              for g, jobs in groups.items()}
-  eligible = {g: js for g, js in eligible.items() if js}
-  if not eligible:
+  groups = {g: [j for j in jobs if not Limits(**job_metadatas[j].limits).requires_gpu()]
+            for g, jobs in groups.items()}
+  groups = {g: js for g, js in groups.items() if js}
+  if not groups:
     return None
-  group_names = list(eligible.keys())
-  group_weights = [max(job_metadatas[j].priority for j in eligible[g]) for g in group_names]
+  group_names = list(groups.keys())
+  group_weights = [max(job_metadatas[j].priority for j in groups[g]) for g in group_names]
   return random.choices(group_names, weights=group_weights, k=1)[0]
 
 def update_job_metadatas(r_master: StrictRedis, jobs: list[str],
