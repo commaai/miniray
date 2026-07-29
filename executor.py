@@ -359,13 +359,14 @@ class Executor(BaseExecutor):
           task_futures[task_uuid] = [Future() for _ in batch]
           for future in task_futures[task_uuid]:
             submitted_queue.put(future)
-        tasks = dict(
-          self._pack_task(function_ptr, b'', args, {}, task_uuid) for task_uuid, args in task_args.items())
-        self._futures.update(
-          {task_uuid: (futures, False, tasks[task_uuid]) for task_uuid, futures in task_futures.items()})  # unsubmitted
+        tasks = {}
+        for task_uuid, args in task_args.items():
+          tasks[task_uuid] = self._pack_task(function_ptr, b'', args, {}, task_uuid)
+        for task_uuid, futures in task_futures.items():
+          self._futures[task_uuid] = (futures, False, tasks[task_uuid])  # unsubmitted
         self._submit_tasks(list(tasks.items()))
-        self._futures.update(
-          {task_uuid: (futures, True, tasks[task_uuid]) for task_uuid, futures in task_futures.items()})  # submitted
+        for task_uuid, futures in task_futures.items():
+          self._futures[task_uuid] = (futures, True, tasks[task_uuid])  # submitted
 
       submitted_queue.put(None)  # Signal the end of the stream
     except Exception:
@@ -405,9 +406,9 @@ class Executor(BaseExecutor):
         if record is None and submitted:
           self._futures.pop(task_uuid)
           claimed = cast(Optional[bytes], self._claimed_redis.get(f"claimed:{task_uuid}"))
+          worker = claimed.decode() if claimed else ""
           for future in futures:
-            future.set_exception(MinirayError(
-              "RuntimeError", f"task lost ({task_uuid})", self.submit_queue_id, claimed.decode() if claimed else ""))
+            future.set_exception(MinirayError("RuntimeError", f"task lost ({task_uuid})", self.submit_queue_id, worker))
 
   def _pack_task(
     self, function_ptr: str, pickled_fn: bytes, args: Sequence[Any], kwargs: dict[str, Any], task_uuid: str,

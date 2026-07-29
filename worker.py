@@ -411,8 +411,8 @@ def get_globally_scheduled_job(
 ) -> Optional[str]:
   # we use the hash so machines with different compute capabilities are evenly distributed
   active_key = hashlib.md5(ACTIVE_KEY.encode()).hexdigest()
-  active_workers = sorted(
-    hashlib.md5(k).hexdigest() for k in cast(list[bytes], r_master.keys(f"active:{PIPELINE_QUEUE}:*")))
+  active_worker_keys = cast(list[bytes], r_master.keys(f"active:{PIPELINE_QUEUE}:*"))
+  active_workers = sorted(hashlib.md5(k).hexdigest() for k in active_worker_keys)
   if not jobs or active_key not in active_workers:
     return None
 
@@ -586,9 +586,9 @@ def main():
 
       t0 = time.perf_counter()
       # TODO: with >JOB_CACHE_SIZE jobs, this drops the tail of the sorted list, so prioritization is broken
-      jobs = sorted(
-        key.decode() for key in cast(list[bytes], r_master.keys(f"*{PIPELINE_QUEUE}")) if b":" not in key
-      )[:JOB_CACHE_SIZE]
+      all_keys = cast(list[bytes], r_master.keys(f"*{PIPELINE_QUEUE}"))
+      job_keys = [key.decode() for key in all_keys if b":" not in key]
+      jobs = sorted(job_keys)[:JOB_CACHE_SIZE]
       update_job_metadatas(r_master, jobs, job_metadatas, job_errors)
       jobs = [j for j in jobs if not job_metadatas[j].limits.get('node_whitelist')
               or HOST_NAME in job_metadatas[j].limits['node_whitelist']]
@@ -600,12 +600,10 @@ def main():
       for i, proc in procs.items():
         if time.perf_counter() - worker_loop_start > MAX_WORKER_LOOP_SECONDS:
           sorted_timings = sorted(last_init_timings.items(), key=lambda x: -x[1])
-          start_breakdown = ", ".join(
-            f"{k}={v:.2f}s" for k, v in sorted_timings
-          ) if last_init_timings else "n/a"
-          print("[worker] loop breakdown: " +
-                ", ".join(f"{k}={v:.2f}s" for k, v in sorted(timings.items(), key=lambda x: -x[1]) if v > 0.01) +
-                f" | last start_task: {start_breakdown}")
+          start_breakdown = ", ".join(f"{k}={v:.2f}s" for k, v in sorted_timings) if last_init_timings else "n/a"
+          sorted_loop = sorted(((k, v) for k, v in timings.items() if v > 0.01), key=lambda x: -x[1])
+          loop_breakdown = ", ".join(f"{k}={v:.2f}s" for k, v in sorted_loop)
+          print(f"[worker] loop breakdown: {loop_breakdown} | last start_task: {start_breakdown}")
           raise RuntimeError("Did not loop over processes fast enough, cannot garantuee task integrity")
 
         if proc:
