@@ -406,9 +406,8 @@ def get_job_intervals(raw_weights: list[int], n_workers: int) -> list[float]:
 #   Divide by N to get a point P in [0, 1).
 # - Divide the interval [0, 1] amongst the available jobs, weighted by job priority
 # - Find the job whose interval contains P, this will be the job we accept.
-def get_globally_scheduled_job(
-  r_master: StrictRedis, jobs: list[str], job_metadatas: LRU[str, JobMetadata],
-) -> Optional[str]:
+def get_globally_scheduled_job(r_master: StrictRedis,
+  jobs: list[str], job_metadatas: LRU[str, JobMetadata]) -> Optional[str]:
   # we use the hash so machines with different compute capabilities are evenly distributed
   active_key = hashlib.md5(ACTIVE_KEY.encode()).hexdigest()
   active_worker_keys = cast(list[bytes], r_master.keys(f"active:{PIPELINE_QUEUE}:*"))
@@ -432,10 +431,8 @@ def get_randomly_scheduled_job(jobs: list[str], job_metadatas: LRU[str, JobMetad
   job = random.choices(jobs, weights=job_weights, k=1)[0]
   return job
 
-def update_job_metadatas(
-  r_master: StrictRedis, jobs: list[str], job_metadatas: LRU[str, JobMetadata],
-  job_errors: LRU[str, tuple[str, str] | None],
-):
+def update_job_metadatas(r_master: StrictRedis, jobs: list[str],
+  job_metadatas: LRU[str, JobMetadata], job_errors: LRU[str, tuple[str, str] | None]):
   for job in set(job_metadatas.keys()) - set(jobs):
     del job_metadatas[job]
     job_errors.pop(job, None)
@@ -452,12 +449,10 @@ def update_job_metadatas(
         job_metadatas[job] = JobMetadata(False, 1, "", "", Limits().asdict(), {})
         job_errors[job] = ("JobMetadataError", f"{job}: {desc(e)}")
 
-def get_task(
-  resource_manager: ResourceManager, r_master: StrictRedis,
+def get_task(resource_manager: ResourceManager, r_master: StrictRedis,
   r_results: StrictRedis, r_claimed: StrictRedis, job: str,
   job_metadatas: LRU[str, JobMetadata], job_errors: LRU[str, tuple[str, str] | None],
-  venvs: LRU[str, str], proc_index: int, triton_client,
-) -> Optional[Task]:
+  venvs: LRU[str, str], proc_index: int, triton_client) -> Optional[Task]:
   limits = Limits(**job_metadatas[job].limits)
   temp_key = f"{job}-pending"
   try:

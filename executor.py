@@ -272,9 +272,8 @@ class Executor(BaseExecutor):
     self._reader_thread.start()
     return super().__enter__()
 
-  def __exit__(
-    self, exc_type: Optional[type[BaseException]], exc_val: Optional[BaseException], exc_tb: Optional[TracebackType],
-  ):
+  def __exit__(self, exc_type: Optional[type[BaseException]],
+    exc_val: Optional[BaseException], exc_tb: Optional[TracebackType]):
     try:
       self.shutdown()
     except (Exception, KeyboardInterrupt):
@@ -311,9 +310,8 @@ class Executor(BaseExecutor):
     self._futures[task_uuid] = ([future], True, task[1])
     return future
 
-  def map(
-    self, fn: Callable, *iterables: Iterable[Any], timeout: Optional[float] = None, chunksize: int = 1,
-  ) -> Iterator[Any]:
+  def map(self, fn: Callable, *iterables: Iterable[Any],
+    timeout: Optional[float] = None, chunksize: int = 1) -> Iterator[Any]:
     if timeout is not None:
       raise NotImplementedError("Timeout arg is not supported. Use `fmap` instead to get a timeout per task.")
     # submit all tasks first, then resolve the results lazily
@@ -343,9 +341,8 @@ class Executor(BaseExecutor):
 
   # Worker threads
 
-  def _writer_loop(
-    self, submitted_queue: Queue[Optional[Future]], function_ptr: str, iterables: list[Iterable[Any]], chunksize: int,
-  ) -> None:
+  def _writer_loop(self, submitted_queue: Queue[Optional[Future]],
+    function_ptr: str, iterables: list[Iterable[Any]], chunksize: int) -> None:
     try:
       args_iterator = zip(*iterables, strict=True)
       assert chunksize >= 1
@@ -411,9 +408,8 @@ class Executor(BaseExecutor):
           for future in futures:
             future.set_exception(MinirayError("RuntimeError", f"task lost ({task_uuid})", self.submit_queue_id, worker))
 
-  def _pack_task(
-    self, function_ptr: str, pickled_fn: bytes, args: Sequence[Any], kwargs: dict[str, Any], task_uuid: str,
-  ) -> tuple[str, bytes]:
+  def _pack_task(self, function_ptr: str, pickled_fn: bytes,
+    args: Sequence[Any], kwargs: dict[str, Any], task_uuid: str) -> tuple[str, bytes]:
     pickled_args = cloudpickle.dumps((args, kwargs))
     if len(pickled_fn) + len(pickled_args) > MAX_ARG_STRLEN:
       raise RuntimeError(
@@ -494,9 +490,8 @@ class Executor(BaseExecutor):
     uuids = [task_uuid for task_uuid, _ in tasks]
     self._submit_redis_master.lpush(f'{self.submit_queue_id}', *uuids)
 
-def log(
-  iterable: Iterable[Future], logger: Any = DEFAULT_LOGGER, desc: str = 'running miniray tasks', **kwargs: Any,
-) -> list[Any]:
+def log(iterable: Iterable[Future], logger: Any = DEFAULT_LOGGER,
+  desc: str = 'running miniray tasks', **kwargs: Any) -> list[Any]:
   results = []
   statuses: Counter[str] = Counter()
   statuses_hosts = defaultdict(list)
