@@ -143,17 +143,18 @@ class ResourceManager():
 
     if limits.triton and self._triton_client is None:
       raise ResourceLimitError("Triton client is not available for this ResourceManager")
-    candidate_nodes = [
-      node for node in self.cpu_totals
-      if limits.cpu_threads <= self.cpu_totals[node] - cpu_usages[node]
-    ]
+    candidate_nodes = []
+    for node in self.cpu_totals:
+      if limits.cpu_threads <= self.cpu_totals[node] - cpu_usages[node]:
+        candidate_nodes.append(node)
     if not candidate_nodes:
       raise ResourceLimitError(
         f"CPU request of {limits.cpu_threads} will exceed limit of {sum(self.cpu_totals.values())}")
-    candidate_nodes = [
-      node for node in candidate_nodes
-      if (mem_bytes) <= self.mem_totals[node] - mem_usages[node]
-    ]
+    mem_ok_nodes = []
+    for node in candidate_nodes:
+      if (mem_bytes) <= self.mem_totals[node] - mem_usages[node]:
+        mem_ok_nodes.append(node)
+    candidate_nodes = mem_ok_nodes
     if not candidate_nodes:
       raise ResourceLimitError(f"memory request of {mem_bytes} will exceed limit of {sum(self.mem_totals.values())}")
     # Pick the candidate node with the lowest CPU usage
