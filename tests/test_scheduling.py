@@ -7,7 +7,7 @@ from lru import LRU
 
 import worker
 import miniray.executor as executor_module
-from miniray.executor import JobMetadata, get_job_group_key, get_metadata_key
+from miniray.executor import JobMetadata, get_metadata_key
 from miniray.lib.helpers import Limits
 
 
@@ -63,7 +63,7 @@ def test_random_scheduler_excludes_groups_containing_gpu_jobs():
   assert worker.get_randomly_scheduled_group({"mixed": groups["mixed"]}, m) is None
 
 
-def test_executor_writes_backward_compatible_job_metadata(monkeypatch, tmp_path):
+def test_executor_writes_job_group_in_metadata(monkeypatch, tmp_path):
   redis = MagicMock()
   redis.keys.return_value = [b"active-worker"]
   monkeypatch.setattr(executor_module, "StrictRedis", lambda **kwargs: redis)
@@ -71,31 +71,25 @@ def test_executor_writes_backward_compatible_job_metadata(monkeypatch, tmp_path)
   executor = executor_module.Executor(job_name="compat", job_group="group", codedir=str(tmp_path))
   ungrouped_executor = executor_module.Executor(job_name="compat", codedir=str(tmp_path))
   set_values = {call.args[0]: call.args[1] for call in redis.set.call_args_list}
-  raw_metadata = json.loads(set_values[get_metadata_key(executor.submit_queue_id)])
+  grouped_metadata = JobMetadata(*json.loads(set_values[get_metadata_key(executor.submit_queue_id)]))
+  ungrouped_metadata = JobMetadata(*json.loads(set_values[get_metadata_key(ungrouped_executor.submit_queue_id)]))
 
-  assert len(raw_metadata) == 6
-  assert JobMetadata(*raw_metadata).job_group == ""
-  assert set_values[get_job_group_key(executor.submit_queue_id)] == "group"
-  assert set_values[get_job_group_key(ungrouped_executor.submit_queue_id)] == ""
+  assert grouped_metadata.job_group == "group"
+  assert ungrouped_metadata.job_group == ""
 
 
-def test_worker_loads_separate_job_group_and_legacy_metadata():
+def test_worker_loads_new_and_legacy_metadata():
   job = "job-remote_v3"
   metadata = JobMetadata(True, 1, "/code", "host", Limits().asdict(), {}, "inline_group")
 
   job_metadatas: LRU[str, JobMetadata] = LRU(64)
   job_errors: LRU[str, tuple[str, str] | None] = LRU(64)
   redis = MagicMock()
-  redis.get.side_effect = [json.dumps(metadata[:-1]).encode(), b"separate_group"]
-  worker.update_job_metadatas(redis, [job], job_metadatas, job_errors)
-  assert job_metadatas[job].job_group == "separate_group"
-
-  job_metadatas.clear()
-  redis.get.side_effect = [json.dumps(metadata[:-1]).encode(), None]
+  redis.get.return_value = json.dumps(metadata[:-1]).encode()
   worker.update_job_metadatas(redis, [job], job_metadatas, job_errors)
   assert job_metadatas[job].job_group == ""
 
   job_metadatas.clear()
-  redis.get.side_effect = [json.dumps(metadata).encode(), None]
+  redis.get.return_value = json.dumps(metadata).encode()
   worker.update_job_metadatas(redis, [job], job_metadatas, job_errors)
   assert job_metadatas[job].job_group == "inline_group"

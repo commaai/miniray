@@ -45,9 +45,7 @@ from miniray.lib.helpers import (
   Limits, desc, GB_TO_BYTES, MAX_WORKER_LOOP_SECONDS, TASK_TIMEOUT_GRACE_SECONDS, JOB_CACHE_SIZE,
 )
 from miniray.lib.uv import sync_venv_cache, cleanup_venvs, populate_venv_cache_from_disk, pycache_dir_for_venv
-from miniray.executor import (
-  MinirayResultHeader, JobMetadata, TaskRecord, TaskState, get_job_group_key, get_metadata_key, get_tasks_key,
-)
+from miniray.executor import MinirayResultHeader, JobMetadata, TaskRecord, TaskState, get_metadata_key, get_tasks_key
 
 
 HOST_NAME = socket.gethostname()
@@ -457,11 +455,7 @@ def update_job_metadatas(r_master: StrictRedis, jobs: list[str],
         raw_metadata = cast(bytes, r_master.get(get_metadata_key(job)))
         if raw_metadata is None:
           raise ValueError("No metadata found in redis")
-        job_metadata = JobMetadata(*json.loads(raw_metadata))
-        raw_job_group = cast(Optional[bytes], r_master.get(get_job_group_key(job)))
-        if raw_job_group is not None:
-          job_metadata = job_metadata._replace(job_group=raw_job_group.decode())
-        job_metadatas[job] = job_metadata
+        job_metadatas[job] = JobMetadata(*json.loads(raw_metadata))
         job_errors[job] = None
       except Exception as e:
         job_metadatas[job] = JobMetadata(False, 1, "", "", Limits().asdict(), {})

@@ -130,9 +130,6 @@ def get_tasks_key(job: str) -> str:
 def get_metadata_key(job: str) -> str:
   return f'job-metadata:{job}'
 
-def get_job_group_key(job: str) -> str:
-  return f'job-group:{job}'
-
 def sync_local_codedir(job_desc: str) -> str:
   cache_name = f"{job_desc}_{socket.gethostname()}_{datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}_{uuid.uuid4().hex}"
   # TODO dont hardcode XX
@@ -266,11 +263,7 @@ class Executor(BaseExecutor):
       self.config.env,
       self.config.job_group or '',
     )
-    # Keep the existing metadata payload compatible with workers that only know the first six fields.
-    self._submit_redis_master.set(
-      get_metadata_key(self.submit_queue_id), json.dumps(job_metadata[:-1]), ex=7*24*60*60)
-    self._submit_redis_master.set(
-      get_job_group_key(self.submit_queue_id), job_metadata.job_group, ex=7*24*60*60)
+    self._submit_redis_master.set(get_metadata_key(self.submit_queue_id), json.dumps(job_metadata), ex=7*24*60*60)
 
     if not self._submit_redis_master.keys(f'active:{self.config.queue_name}:*'):
       print(f"[miniray] WARNING: no workers listening on queue {self.config.queue_name}", file=sys.stderr)
@@ -308,8 +301,7 @@ class Executor(BaseExecutor):
             future.cancel()
 
       self._submit_redis_master.delete(
-        get_tasks_key(self.submit_queue_id), self.submit_queue_id,
-        get_metadata_key(self.submit_queue_id), get_job_group_key(self.submit_queue_id))
+        get_tasks_key(self.submit_queue_id), self.submit_queue_id, get_metadata_key(self.submit_queue_id))
 
   def submit(self, fn: Callable, /, *args, **kwargs) -> Future:
     assert not self._shutdown_reader_thread, "Cannot submit new tasks after shutdown has started"
