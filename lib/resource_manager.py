@@ -161,7 +161,9 @@ class ResourceManager():
     numa_node = min(candidate_nodes, key=lambda node: cpu_usages[node] / self.cpu_totals[node])
 
     if small_gpu_mem_bytes and (
-      not small_gpu or gpu_mem_usages[small_gpu.index] + small_gpu_mem_bytes > small_gpu.memory):
+      not small_gpu
+      or gpu_mem_usages[small_gpu.index] + small_gpu_mem_bytes > small_gpu.memory
+    ):
       raise ResourceLimitError(
         f"small gpu memory request of {small_gpu_mem_bytes} will exceed limit of "
         f"{small_gpu.memory if small_gpu else 0.0}")
