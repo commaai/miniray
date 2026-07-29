@@ -6,7 +6,7 @@ import redis
 from collections import defaultdict
 from itertools import batched
 from typing import cast
-from miniray.executor import JobMetadata, TaskRecord, TaskState, get_metadata_key
+from miniray.executor import TaskRecord, TaskState, get_metadata_key, migrate_job_metadata
 
 REDIS_HOST = os.environ.get("REDIS_HOST", "redis.comma.internal")
 
@@ -31,7 +31,7 @@ def show_working():
     job_id = job.removeprefix('tasks:')
     raw = client.get(get_metadata_key(job_id))
     if raw:
-      metadata = JobMetadata(*json.loads(cast(str, raw)))
+      metadata = migrate_job_metadata(json.loads(cast(str, raw)))
       job_priorities[job] = metadata.priority
 
   for i, (job, lines) in enumerate(outputs.items()):

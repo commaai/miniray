@@ -8,8 +8,7 @@ from collections import defaultdict
 import redis
 from typing import cast
 from miniray import REMOTE_QUEUE
-from miniray.executor import JobMetadata, get_metadata_key
-from miniray.worker import migrate_job_metadata
+from miniray.executor import JobMetadata, get_metadata_key, migrate_job_metadata
 
 REDIS_HOST = os.environ.get("REDIS_HOST", "redis.comma.internal")
 REDIS_DB = int(os.environ.get("REDIS_DB", "1"))

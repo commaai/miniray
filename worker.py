@@ -26,7 +26,7 @@ import numpy as np
 from lru import LRU
 from pathlib import Path
 from redis import StrictRedis
-from typing import Any, BinaryIO, Optional, cast
+from typing import BinaryIO, Optional, cast
 from tritonclient.http import InferenceServerClient
 
 from miniray.lib.cgroup import (
@@ -45,7 +45,9 @@ from miniray.lib.helpers import (
   Limits, desc, GB_TO_BYTES, MAX_WORKER_LOOP_SECONDS, TASK_TIMEOUT_GRACE_SECONDS, JOB_CACHE_SIZE,
 )
 from miniray.lib.uv import sync_venv_cache, cleanup_venvs, populate_venv_cache_from_disk, pycache_dir_for_venv
-from miniray.executor import MinirayResultHeader, JobMetadata, TaskRecord, TaskState, get_metadata_key, get_tasks_key
+from miniray.executor import (
+  MinirayResultHeader, JobMetadata, TaskRecord, TaskState, get_metadata_key, get_tasks_key, migrate_job_metadata,
+)
 
 
 HOST_NAME = socket.gethostname()
@@ -442,11 +444,6 @@ def get_randomly_scheduled_group(groups: dict[str, list[str]],
   group_names = list(groups.keys())
   group_weights = [max(job_metadatas[j].priority for j in groups[g]) for g in group_names]
   return random.choices(group_names, weights=group_weights, k=1)[0]
-
-def migrate_job_metadata(metadata: list[Any]) -> JobMetadata:
-  if len(metadata) == 6:
-    metadata = [*metadata, '']
-  return JobMetadata(*metadata)
 
 def update_job_metadatas(r_master: StrictRedis, jobs: list[str],
   job_metadatas: LRU[str, JobMetadata], job_errors: LRU[str, tuple[str, str] | None]):

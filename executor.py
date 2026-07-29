@@ -94,6 +94,11 @@ class JobMetadata(NamedTuple):
   env: dict[str, str]
   job_group: str
 
+def migrate_job_metadata(metadata: list[Any]) -> JobMetadata:
+  if len(metadata) == 6:
+    metadata = [*metadata, '']
+  return JobMetadata(*metadata)
+
 class MinirayResultHeader(NamedTuple):
   job: str
   succeeded: bool
