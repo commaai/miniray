@@ -66,7 +66,9 @@ class ResourceManager():
 
     if self.gpus:
       thread = threading.Thread(
-        target=check_gpu_status_worker, args=([gpu.bus_id for gpu in self.gpus], self.gpu_status))
+        target=check_gpu_status_worker,
+        args=([gpu.bus_id for gpu in self.gpus], self.gpu_status),
+      )
       thread.daemon = True
       thread.start()
 
