@@ -432,10 +432,11 @@ def get_globally_scheduled_group(r_master: StrictRedis,
 
 def get_randomly_scheduled_group(groups: dict[str, list[str]],
   job_metadatas: LRU[str, JobMetadata]) -> Optional[str]:
-  # gpu jobs are only scheduled via the global scheduler
-  groups = {g: [j for j in jobs if not Limits(**job_metadatas[j].limits).requires_gpu()]
-            for g, jobs in groups.items()}
-  groups = {g: js for g, js in groups.items() if js}
+  # groups containing gpu jobs are only scheduled via the global scheduler
+  groups = {
+    group: jobs for group, jobs in groups.items()
+    if not any(Limits(**job_metadatas[job].limits).requires_gpu() for job in jobs)
+  }
   if not groups:
     return None
   group_names = list(groups.keys())

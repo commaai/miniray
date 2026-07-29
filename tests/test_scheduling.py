@@ -28,3 +28,15 @@ def test_worker_is_pinned_to_group_not_job(monkeypatch):
     assert group is not None
     counts[group] += 1
   assert counts == {"groupA": 2, "groupB": 2}, counts
+
+
+def test_random_scheduler_excludes_groups_containing_gpu_jobs():
+  m: LRU[str, JobMetadata] = LRU(64)
+  m["mixed_cpu"] = JobMetadata(True, 1, "/code", "host", Limits().asdict(), {}, "mixed")
+  m["mixed_gpu"] = JobMetadata(
+    True, 1, "/code", "host", Limits(big_gpu_memory=1).asdict(), {}, "mixed")
+  m["cpu_only"] = JobMetadata(True, 1, "/code", "host", Limits().asdict(), {}, "cpu_only")
+
+  groups = worker.group_jobs(list(m.keys()), m)
+  assert worker.get_randomly_scheduled_group(groups, m) == "cpu_only"
+  assert worker.get_randomly_scheduled_group({"mixed": groups["mixed"]}, m) is None
