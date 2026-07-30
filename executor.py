@@ -124,7 +124,6 @@ class JobConfig:
   limits: Limits = field(default_factory=Limits)
   env: dict[str, str] = field(default_factory=dict)
   queue_timeout: int = PENDING_TASK_SAFETY_TTL
-  job_group: str = ''  # jobs in the same group share a scheduling slot
 
   def asdict(self):
     return asdict(self)
@@ -266,9 +265,11 @@ class Executor(BaseExecutor):
       self.executor,
       self.config.limits.asdict(),
       self.config.env,
-      self.config.job_group,
+      '',
     )
-    self._submit_redis_master.set(get_metadata_key(self.submit_queue_id), json.dumps(job_metadata), ex=7*24*60*60)
+    # Keep the wire format compatible with workers that only know the original six fields.
+    self._submit_redis_master.set(
+      get_metadata_key(self.submit_queue_id), json.dumps(job_metadata[:-1]), ex=7*24*60*60)
 
     if not self._submit_redis_master.keys(f'active:{self.config.queue_name}:*'):
       print(f"[miniray] WARNING: no workers listening on queue {self.config.queue_name}", file=sys.stderr)
