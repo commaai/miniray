@@ -62,11 +62,9 @@ EMPTY_DIR = Path("/tmp/empty")  # Run worker_task.py from an empty directory so 
 SCRIPT_DIR = Path(__file__).resolve().parent
 CGROUP_CONTROLLERS = ["cpu", "cpuset", "memory"]
 _, INHERITED_CGROUP = Path("/proc/self/cgroup").read_text().strip().split("::", 1)
-IS_SLURM_CGROUP = (
-  any(part.startswith("job_") for part in INHERITED_CGROUP.split("/"))
-  and any(part.startswith("step_") for part in INHERITED_CGROUP.split("/"))
-)
-CGROUP_NODE = f"{INHERITED_CGROUP.rsplit('/', 1)[0]}/miniray-tasks".removeprefix("/") if IS_SLURM_CGROUP else "worker"
+if INHERITED_CGROUP == "/":
+  raise RuntimeError("worker must be started in a non-root cgroup")
+CGROUP_NODE = f"{INHERITED_CGROUP.rsplit('/', 1)[0]}/miniray-tasks".removeprefix("/")
 WORKER_ID = HOST_NAME
 ACTIVE_KEY = f"active:{PIPELINE_QUEUE}:{WORKER_ID}"
 MINIRAY_TARGET_NAME = "<remote-function>"
@@ -562,8 +560,6 @@ def main():
   print(f"[worker] TRITON_SERVER_ENABLED: {TRITON_SERVER_ENABLED}")
 
   fatal_error = None
-  if IS_SLURM_CGROUP:
-    cgroup_clear_all_children("worker")
   cgroup_create(CGROUP_NODE)
   cgroup_set_subcontrollers(CGROUP_NODE, CGROUP_CONTROLLERS)
   cgroup_set_memory_limit(CGROUP_NODE, sum(rm.mem_totals.values()))

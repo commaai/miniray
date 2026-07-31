@@ -86,8 +86,6 @@ def cgroup_is_populated(name: str) -> bool:
 
 def cgroup_clear_all_children(name: str) -> None:
   cgroup_path = _get_cgroup_path(name)
-  if not cgroup_path.is_dir():
-    return
   cgroup_kill(name)
   for de in cgroup_path.iterdir():
     if de.is_dir():
