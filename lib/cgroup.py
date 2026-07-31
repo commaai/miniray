@@ -5,7 +5,7 @@ from pathlib import Path
 
 CGROUP_DELETE_RETRIES = 5
 
-def _get_cgroup_path(name: str | Path) -> Path:
+def _get_cgroup_path(name: str) -> Path:
   return Path("/sys/fs/cgroup") / name
 
 
@@ -20,13 +20,13 @@ def _validate_permissions(cgroup_path: Path):
     raise Exception(f"VALIDATION FAILED: cgroup {cgroup_path} not owned by {user_id}")
 
 
-def cgroup_delete(name: str | Path, recursive: bool=False) -> None:
+def cgroup_delete(name: str, recursive: bool=False) -> None:
   cgroup_path = _get_cgroup_path(name)
   if cgroup_path.is_dir():
     if recursive:
       for de in cgroup_path.iterdir():
         if de.is_dir():
-          cgroup_delete(Path(name) / de.name, recursive)
+          cgroup_delete(f"{name}/{de.name}", recursive)
     cgroup_path.rmdir()
 
 
@@ -78,7 +78,7 @@ def cgroup_kill(name: str) -> None:
     f.write("1")
 
 
-def cgroup_is_populated(name: str | Path) -> bool:
+def cgroup_is_populated(name: str) -> bool:
   events = (_get_cgroup_path(name) / "cgroup.events").read_text()
   fields = dict(line.split() for line in events.splitlines())
   return fields["populated"] == "1"
@@ -89,7 +89,7 @@ def cgroup_clear_all_children(name: str) -> None:
   cgroup_kill(name)
   for de in cgroup_path.iterdir():
     if de.is_dir():
-      child_cgroup = Path(name) / de.name
+      child_cgroup = f"{name}/{de.name}"
       for attempt in count():
         try:
           cgroup_delete(child_cgroup, recursive=True)

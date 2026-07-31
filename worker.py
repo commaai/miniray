@@ -60,13 +60,16 @@ SIGKILL_GRACE_SECONDS = 60
 
 EMPTY_DIR = Path("/tmp/empty")  # Run worker_task.py from an empty directory so relative path lookups don't hit code.nfs
 SCRIPT_DIR = Path(__file__).resolve().parent
-CGROUP_NODE = "worker"
 CGROUP_CONTROLLERS = ["cpu", "cpuset", "memory"]
+_, INHERITED_CGROUP = Path("/proc/self/cgroup").read_text().strip().split("::", 1)
+if INHERITED_CGROUP == "/":
+  raise RuntimeError("worker must be started in a non-root cgroup")
+CGROUP_NODE = f"{INHERITED_CGROUP.rsplit('/', 1)[0]}/miniray-tasks".removeprefix("/")
 WORKER_ID = HOST_NAME
 ACTIVE_KEY = f"active:{PIPELINE_QUEUE}:{WORKER_ID}"
 MINIRAY_TARGET_NAME = "<remote-function>"
 
-TMP_DIR_ROOT = Path("/dev/shm/tmp") / CGROUP_NODE
+TMP_DIR_ROOT = Path("/dev/shm/tmp/worker")
 # you need a really good reason to use a global directory shared across all tasks
 # (normally you should use the tmp directory that is cleaned up after every task)
 CUPY_CACHE_DIR = TMP_DIR_ROOT / "cupy"
