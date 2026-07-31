@@ -5,8 +5,17 @@ from pathlib import Path
 
 CGROUP_DELETE_RETRIES = 5
 
+
 def _get_cgroup_path(name: str | Path) -> Path:
   return Path("/sys/fs/cgroup") / name
+
+
+def cgroup_get_current() -> Path:
+  for entry in Path("/proc/self/cgroup").read_text().splitlines():
+    hierarchy_id, controllers, path = entry.split(":", 2)
+    if hierarchy_id == "0" and not controllers:
+      return Path(path.removeprefix("/"))
+  raise RuntimeError("cgroup v2 hierarchy not found")
 
 
 def _get_numa_cpu_list(numa_node):
@@ -30,7 +39,7 @@ def cgroup_delete(name: str | Path, recursive: bool=False) -> None:
     cgroup_path.rmdir()
 
 
-def cgroup_create(name: str) -> None:
+def cgroup_create(name: str | Path) -> None:
   cgroup_path = _get_cgroup_path(name)
   if cgroup_path.is_dir():
     _validate_permissions(cgroup_path)
@@ -43,7 +52,7 @@ def cgroup_create(name: str) -> None:
       f"&& sudo chown $USER:$USER {cgroup_path}") from e
 
 
-def cgroup_set_numa_nodes(name: str, numa_nodes: list[int]) -> None:
+def cgroup_set_numa_nodes(name: str | Path, numa_nodes: list[int]) -> None:
   cgroup_path = _get_cgroup_path(name)
   cpu_lists = [_get_numa_cpu_list(node) for node in numa_nodes]
   with (cgroup_path / "cpuset.cpus").open("w") as f:
@@ -52,13 +61,13 @@ def cgroup_set_numa_nodes(name: str, numa_nodes: list[int]) -> None:
     f.write(",".join(map(str, numa_nodes)))
 
 
-def cgroup_set_subcontrollers(name: str, controllers: list[str]) -> None:
+def cgroup_set_subcontrollers(name: str | Path, controllers: list[str]) -> None:
   cgroup_path = _get_cgroup_path(name)
   with (cgroup_path / "cgroup.subtree_control").open("w") as f:
     f.write(" ".join(f"+{c}" for c in controllers))
 
 
-def cgroup_set_memory_limit(name: str, limit_in_bytes: int) -> None:
+def cgroup_set_memory_limit(name: str | Path, limit_in_bytes: int) -> None:
   cgroup_path = _get_cgroup_path(name)
   with (cgroup_path / "memory.max").open("w") as f:
     f.write(str(limit_in_bytes or "max"))
@@ -66,13 +75,13 @@ def cgroup_set_memory_limit(name: str, limit_in_bytes: int) -> None:
     f.write("0")
 
 
-def cgroup_add_pid(name: str, pid: int) -> None:
+def cgroup_add_pid(name: str | Path, pid: int) -> None:
   cgroup_path = _get_cgroup_path(name)
   with (cgroup_path / "cgroup.procs").open("w") as f:
     f.write(str(pid))
 
 
-def cgroup_kill(name: str) -> None:
+def cgroup_kill(name: str | Path) -> None:
   cgroup_path = _get_cgroup_path(name)
   with (cgroup_path / "cgroup.kill").open("w") as f:
     f.write("1")
@@ -84,8 +93,10 @@ def cgroup_is_populated(name: str | Path) -> bool:
   return fields["populated"] == "1"
 
 
-def cgroup_clear_all_children(name: str) -> None:
+def cgroup_clear_all_children(name: str | Path) -> None:
   cgroup_path = _get_cgroup_path(name)
+  if not cgroup_path.is_dir():
+    return
   cgroup_kill(name)
   for de in cgroup_path.iterdir():
     if de.is_dir():
