@@ -531,6 +531,8 @@ def ensure_venvs(jobs: list[str], job_metadatas: LRU[str, JobMetadata], job_erro
 
 
 def main():
+  os.setpriority(os.PRIO_PROCESS, 0, -10)
+
   setup_global_dirs()
 
   # NOTE: This won't attempt to connect to triton until a request is made
@@ -567,8 +569,6 @@ def main():
   r_master = StrictRedis(host=REDIS_HOST, port=6379, db=1)
   r_results = StrictRedis(host=REDIS_HOST, port=6379, db=5)
   r_claimed = StrictRedis(host=REDIS_HOST, port=6379, db=2)
-
-  os.nice(1)
 
   procs: dict[int, Optional[Task]] = dict.fromkeys(range(sum(rm.cpu_totals.values())))
 
