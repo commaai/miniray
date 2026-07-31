@@ -11,11 +11,8 @@ def _get_cgroup_path(name: str | Path) -> Path:
 
 
 def cgroup_get_current() -> Path:
-  for entry in Path("/proc/self/cgroup").read_text().splitlines():
-    hierarchy_id, controllers, path = entry.split(":", 2)
-    if hierarchy_id == "0" and not controllers:
-      return Path(path.removeprefix("/"))
-  raise RuntimeError("cgroup v2 hierarchy not found")
+  _, path = Path("/proc/self/cgroup").read_text().strip().split("::", 1)
+  return Path(path.removeprefix("/"))
 
 
 def _get_numa_cpu_list(numa_node):
