@@ -5,14 +5,8 @@ from pathlib import Path
 
 CGROUP_DELETE_RETRIES = 5
 
-
-def _get_cgroup_path(name: Path) -> Path:
+def _get_cgroup_path(name: str) -> Path:
   return Path("/sys/fs/cgroup") / name
-
-
-def cgroup_get_current() -> Path:
-  _, path = Path("/proc/self/cgroup").read_text().strip().split("::", 1)
-  return Path(path.removeprefix("/"))
 
 
 def _get_numa_cpu_list(numa_node):
@@ -26,17 +20,17 @@ def _validate_permissions(cgroup_path: Path):
     raise Exception(f"VALIDATION FAILED: cgroup {cgroup_path} not owned by {user_id}")
 
 
-def cgroup_delete(name: Path, recursive: bool=False) -> None:
+def cgroup_delete(name: str, recursive: bool=False) -> None:
   cgroup_path = _get_cgroup_path(name)
   if cgroup_path.is_dir():
     if recursive:
       for de in cgroup_path.iterdir():
         if de.is_dir():
-          cgroup_delete(name / de.name, recursive)
+          cgroup_delete(f"{name}/{de.name}", recursive)
     cgroup_path.rmdir()
 
 
-def cgroup_create(name: Path) -> None:
+def cgroup_create(name: str) -> None:
   cgroup_path = _get_cgroup_path(name)
   if cgroup_path.is_dir():
     _validate_permissions(cgroup_path)
@@ -49,7 +43,7 @@ def cgroup_create(name: Path) -> None:
       f"&& sudo chown $USER:$USER {cgroup_path}") from e
 
 
-def cgroup_set_numa_nodes(name: Path, numa_nodes: list[int]) -> None:
+def cgroup_set_numa_nodes(name: str, numa_nodes: list[int]) -> None:
   cgroup_path = _get_cgroup_path(name)
   cpu_lists = [_get_numa_cpu_list(node) for node in numa_nodes]
   with (cgroup_path / "cpuset.cpus").open("w") as f:
@@ -58,13 +52,13 @@ def cgroup_set_numa_nodes(name: Path, numa_nodes: list[int]) -> None:
     f.write(",".join(map(str, numa_nodes)))
 
 
-def cgroup_set_subcontrollers(name: Path, controllers: list[str]) -> None:
+def cgroup_set_subcontrollers(name: str, controllers: list[str]) -> None:
   cgroup_path = _get_cgroup_path(name)
   with (cgroup_path / "cgroup.subtree_control").open("w") as f:
     f.write(" ".join(f"+{c}" for c in controllers))
 
 
-def cgroup_set_memory_limit(name: Path, limit_in_bytes: int) -> None:
+def cgroup_set_memory_limit(name: str, limit_in_bytes: int) -> None:
   cgroup_path = _get_cgroup_path(name)
   with (cgroup_path / "memory.max").open("w") as f:
     f.write(str(limit_in_bytes or "max"))
@@ -72,32 +66,32 @@ def cgroup_set_memory_limit(name: Path, limit_in_bytes: int) -> None:
     f.write("0")
 
 
-def cgroup_add_pid(name: Path, pid: int) -> None:
+def cgroup_add_pid(name: str, pid: int) -> None:
   cgroup_path = _get_cgroup_path(name)
   with (cgroup_path / "cgroup.procs").open("w") as f:
     f.write(str(pid))
 
 
-def cgroup_kill(name: Path) -> None:
+def cgroup_kill(name: str) -> None:
   cgroup_path = _get_cgroup_path(name)
   with (cgroup_path / "cgroup.kill").open("w") as f:
     f.write("1")
 
 
-def cgroup_is_populated(name: Path) -> bool:
+def cgroup_is_populated(name: str) -> bool:
   events = (_get_cgroup_path(name) / "cgroup.events").read_text()
   fields = dict(line.split() for line in events.splitlines())
   return fields["populated"] == "1"
 
 
-def cgroup_clear_all_children(name: Path) -> None:
+def cgroup_clear_all_children(name: str) -> None:
   cgroup_path = _get_cgroup_path(name)
   if not cgroup_path.is_dir():
     return
   cgroup_kill(name)
   for de in cgroup_path.iterdir():
     if de.is_dir():
-      child_cgroup = name / de.name
+      child_cgroup = f"{name}/{de.name}"
       for attempt in count():
         try:
           cgroup_delete(child_cgroup, recursive=True)

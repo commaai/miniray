@@ -32,7 +32,6 @@ from tritonclient.http import InferenceServerClient
 from miniray.lib.cgroup import (
   cgroup_create, cgroup_set_subcontrollers, cgroup_set_memory_limit, cgroup_set_numa_nodes,
   cgroup_add_pid, cgroup_kill, cgroup_delete, cgroup_clear_all_children, cgroup_is_populated,
-  cgroup_get_current,
 )
 from miniray.lib.sig_term_handler import SigTermHandler
 from miniray.lib.resource_manager import ResourceManager, ResourceLimitError
@@ -62,13 +61,12 @@ SIGKILL_GRACE_SECONDS = 60
 EMPTY_DIR = Path("/tmp/empty")  # Run worker_task.py from an empty directory so relative path lookups don't hit code.nfs
 SCRIPT_DIR = Path(__file__).resolve().parent
 CGROUP_CONTROLLERS = ["cpu", "cpuset", "memory"]
-INHERITED_CGROUP = cgroup_get_current()
+_, INHERITED_CGROUP = Path("/proc/self/cgroup").read_text().strip().split("::", 1)
 IS_SLURM_CGROUP = (
-  any(part.startswith("job_") for part in INHERITED_CGROUP.parts)
-  and any(part.startswith("step_") for part in INHERITED_CGROUP.parts)
+  any(part.startswith("job_") for part in INHERITED_CGROUP.split("/"))
+  and any(part.startswith("step_") for part in INHERITED_CGROUP.split("/"))
 )
-MINIRAY_CGROUP = INHERITED_CGROUP.parent / "miniray-tasks" if IS_SLURM_CGROUP else None
-CGROUP_NODE = MINIRAY_CGROUP if MINIRAY_CGROUP is not None else Path("worker")
+CGROUP_NODE = f"{INHERITED_CGROUP.rsplit('/', 1)[0]}/miniray-tasks".removeprefix("/") if IS_SLURM_CGROUP else "worker"
 WORKER_ID = HOST_NAME
 ACTIVE_KEY = f"active:{PIPELINE_QUEUE}:{WORKER_ID}"
 MINIRAY_TARGET_NAME = "<remote-function>"
@@ -97,13 +95,6 @@ def setup_global_dirs():
   PYCACHE_DIR.mkdir(parents=True, exist_ok=True)
   os.chown(PYCACHE_DIR, TASK_UID, TASK_UID)
   PYCACHE_DIR.chmod(0o755)
-
-def setup_cgroups():
-  if MINIRAY_CGROUP is not None:
-    cgroup_clear_all_children(Path("worker"))
-
-  cgroup_create(CGROUP_NODE)
-  cgroup_set_subcontrollers(CGROUP_NODE, CGROUP_CONTROLLERS)
 
 def create_tmp_dir(path: Path, uid, gid):
   if path.exists():
@@ -139,7 +130,7 @@ class Task:
   proc: Optional[subprocess.Popen]
   alloc_id: Optional[str]
   task_gid: int
-  cgroup_name: Path
+  cgroup_name: str
   result_file: Path
   start_time: float
   tmp_dir: Path
@@ -198,7 +189,7 @@ class Task:
 
       self.alloc_id = f"proc{self.proc_index:0>3}"
       self.task_gid = grp.getgrnam(self.alloc_id).gr_gid
-      self.cgroup_name = CGROUP_NODE / self.alloc_id
+      self.cgroup_name = f"{CGROUP_NODE}/{self.alloc_id}"
       mem_limit_bytes = int((self.limits.memory or 1) * GB_TO_BYTES)
       self.tmp_dir = get_tmp_dir_for_task(self.alloc_id)
 
@@ -239,7 +230,7 @@ class Task:
         'USER': 'batman',
         'HOME': '/home/batman',
         'TASK_UID': str(TASK_UID),
-        'TASK_CGROUP': str(self.cgroup_name),
+        'TASK_CGROUP': self.cgroup_name,
         'TMPDIR': str(self.tmp_dir),
         'CACHE_ROOT': str(self.tmp_dir / "index_cache"),
         'PARAMS_ROOT': str(self.tmp_dir / "params"),
@@ -546,7 +537,6 @@ def ensure_venvs(jobs: list[str], job_metadatas: LRU[str, JobMetadata], job_erro
 
 def main():
   os.setpriority(os.PRIO_PROCESS, 0, -10)
-  setup_cgroups()
 
   setup_global_dirs()
 
@@ -572,6 +562,10 @@ def main():
   print(f"[worker] TRITON_SERVER_ENABLED: {TRITON_SERVER_ENABLED}")
 
   fatal_error = None
+  if IS_SLURM_CGROUP:
+    cgroup_clear_all_children("worker")
+  cgroup_create(CGROUP_NODE)
+  cgroup_set_subcontrollers(CGROUP_NODE, CGROUP_CONTROLLERS)
   cgroup_set_memory_limit(CGROUP_NODE, sum(rm.mem_totals.values()))
   cgroup_set_numa_nodes(CGROUP_NODE, rm.cpu_totals.keys())
   cgroup_clear_all_children(CGROUP_NODE)
@@ -692,9 +686,6 @@ def main():
         if proc and proc.check_done(exiting=True):
           procs[i] = None
       time.sleep(1)
-
-    if MINIRAY_CGROUP is not None and not cgroup_is_populated(MINIRAY_CGROUP):
-      cgroup_delete(MINIRAY_CGROUP, recursive=True)
 
     if fatal_error is not None:
       raise fatal_error
