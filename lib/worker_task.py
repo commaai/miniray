@@ -22,7 +22,7 @@ def torch_import_hook(torch):
 
 
 def worker_process():
-  os.nice(18)
+  os.setpriority(os.PRIO_PROCESS, 0, 18)
 
   result_file = Path(os.environ['RESULT_FILE'])
 
