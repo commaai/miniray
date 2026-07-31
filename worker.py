@@ -100,7 +100,7 @@ def setup_global_dirs():
 
 def setup_cgroups():
   if MINIRAY_CGROUP is not None:
-    cgroup_clear_all_children("worker")
+    cgroup_clear_all_children(Path("worker"))
 
   cgroup_create(CGROUP_NODE)
   cgroup_set_subcontrollers(CGROUP_NODE, CGROUP_CONTROLLERS)
@@ -139,7 +139,7 @@ class Task:
   proc: Optional[subprocess.Popen]
   alloc_id: Optional[str]
   task_gid: int
-  cgroup_name: str
+  cgroup_name: Path
   result_file: Path
   start_time: float
   tmp_dir: Path
@@ -198,7 +198,7 @@ class Task:
 
       self.alloc_id = f"proc{self.proc_index:0>3}"
       self.task_gid = grp.getgrnam(self.alloc_id).gr_gid
-      self.cgroup_name = f"{CGROUP_NODE}/{self.alloc_id}"
+      self.cgroup_name = CGROUP_NODE / self.alloc_id
       mem_limit_bytes = int((self.limits.memory or 1) * GB_TO_BYTES)
       self.tmp_dir = get_tmp_dir_for_task(self.alloc_id)
 
@@ -239,7 +239,7 @@ class Task:
         'USER': 'batman',
         'HOME': '/home/batman',
         'TASK_UID': str(TASK_UID),
-        'TASK_CGROUP': self.cgroup_name,
+        'TASK_CGROUP': str(self.cgroup_name),
         'TMPDIR': str(self.tmp_dir),
         'CACHE_ROOT': str(self.tmp_dir / "index_cache"),
         'PARAMS_ROOT': str(self.tmp_dir / "params"),
