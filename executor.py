@@ -53,18 +53,6 @@ XX_BASEPATH = Path(__file__).resolve().parent.parent
 XX_BASEDIR = str(XX_BASEPATH)
 CACHE_ROOT = Path("/code.nfs/branches/caches")
 DEFAULT_CODEDIR = Path('/code.nfs/xx')
-PYTHON_INSTALL_ROOTS = (Path(sys.prefix).resolve(), Path(sys.base_prefix).resolve())
-
-
-def _pickle_local_module_by_value(fn: Callable) -> None:
-  while isinstance(fn, partial):
-    fn = fn.func
-  module = sys.modules.get(getattr(fn, '__module__', type(fn).__module__))
-  module_file = getattr(module, '__file__', None)
-  is_local = module_file is not None and not any(
-    Path(module_file).resolve().is_relative_to(root) for root in PYTHON_INSTALL_ROOTS)
-  if is_local:
-    cloudpickle.register_pickle_by_value(module)
 
 
 class MinirayError(Exception):
@@ -340,7 +328,6 @@ class Executor(BaseExecutor):
 
   def _cache_func_in_redis(self, fn: Callable) -> str:
     # Instead of sending the function along with every request, we cache it in redis and send the cache key in its place
-    _pickle_local_module_by_value(fn)
     pickled_fn = cloudpickle.dumps(partial(_execute_batch, fn))
     function_ptr = f'pickledfunc-{hashlib.sha256(pickled_fn).hexdigest()}'
     self._submit_redis_master.set(function_ptr, pickled_fn, ex=7*24*60*60)
