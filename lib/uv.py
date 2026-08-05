@@ -6,6 +6,7 @@ from pathlib import Path
 import subprocess
 import pwd
 import os
+import tempfile
 from lru import LRU
 
 N_RETRIES = 5
@@ -30,18 +31,35 @@ def sync_venv_cache(codedir: Union[str, Path], user_id: int, venv_name: str):
 
   errs = []
   for i in range(N_RETRIES):
-    try:
-      subprocess.run(
-        sync_cmd, env={**os.environ, 'UV_PROJECT_ENVIRONMENT': str(venv_dir)},
-        user=user_id, check=True, capture_output=True)
-      return venv_dir
-    except subprocess.CalledProcessError as e:
-      errs.append(f'try {i}: {parse_uv_sync_stderr(e.stderr)}')
-      if i >=3:
-        try:
-          shutil.rmtree(venv_dir)
-        except Exception:
-          pass
+    # Staged source is read-only; a private build root also isolates concurrent syncs.
+    with tempfile.TemporaryDirectory(prefix='miniray-setuptools-', dir='/tmp') as build_root:
+      os.chown(build_root, user_id, -1)
+      setuptools_config = Path(build_root) / 'setuptools.cfg'
+      # Redirect all Setuptools output and clean it between local package builds.
+      setuptools_config.write_text(
+        f'[aliases]\nbdist_wheel = clean --all bdist_wheel\n\n'
+        f'[egg_info]\negg_base = {build_root}\n\n'
+        f'[build]\nbuild_base = {build_root}/build\n')
+      os.chown(setuptools_config, user_id, -1)
+
+      try:
+        subprocess.run(
+          sync_cmd, env={
+            **os.environ,
+            'DIST_EXTRA_CONFIG': str(setuptools_config),
+            'UV_PROJECT_ENVIRONMENT': str(venv_dir),
+            # These builds share build_base, so uv must run them serially.
+            'UV_CONCURRENT_BUILDS': '1',
+          },
+          user=user_id, check=True, capture_output=True)
+        return venv_dir
+      except subprocess.CalledProcessError as e:
+        errs.append(f'try {i}: {parse_uv_sync_stderr(e.stderr)}')
+        if i >=3:
+          try:
+            shutil.rmtree(venv_dir)
+          except Exception:
+            pass
   raise ValueError(f"Failed syncing venv={venv_dir} to {codedir} {N_RETRIES} times \n" + "\n".join(errs))
 
 
