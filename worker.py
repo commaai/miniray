@@ -226,7 +226,6 @@ class Task:
         'CUDA_VISIBLE_DEVICES': ','.join(cuda_visible_devices),
         'USER': 'batman',
         'HOME': '/home/batman',
-        'PYTHONPATH': '',
         'TASK_UID': str(TASK_UID),
         'TASK_CGROUP': self.cgroup_name,
         'TMPDIR': str(self.tmp_dir),
