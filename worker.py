@@ -59,7 +59,6 @@ SLEEP_TIME_MAX = int(os.getenv('SLEEP_TIME_MAX', '2'))
 SIGKILL_GRACE_SECONDS = 60
 
 EMPTY_DIR = Path("/tmp/empty")  # Run worker_task.py from an empty directory so relative path lookups don't hit code.nfs
-SCRIPT_DIR = Path(__file__).resolve().parent
 CGROUP_CONTROLLERS = ["cpu", "cpuset", "memory"]
 _, INHERITED_CGROUP = Path("/proc/self/cgroup").read_text().strip().split("::", 1)
 if INHERITED_CGROUP == "/":
@@ -227,6 +226,7 @@ class Task:
         'CUDA_VISIBLE_DEVICES': ','.join(cuda_visible_devices),
         'USER': 'batman',
         'HOME': '/home/batman',
+        'PYTHONPATH': '',
         'TASK_UID': str(TASK_UID),
         'TASK_CGROUP': self.cgroup_name,
         'TMPDIR': str(self.tmp_dir),
@@ -244,7 +244,7 @@ class Task:
       }
       python3_exe = str(Path(self.venv_cache[self.job]) / "bin/python3")
 
-      p_args = [python3_exe, str(SCRIPT_DIR / "lib/worker_task.py")]
+      p_args = [python3_exe, "-m", "miniray.lib.worker_task"]
       if DEBUG: print("[worker]", " ".join(p_args))
 
       t0 = time.perf_counter()
