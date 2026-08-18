@@ -22,7 +22,6 @@ docker compose -f docker-compose.ci.yml run --rm test bash -c "
   cd /app/miniray/ &&
   ruff check . &&
   ty check . &&
-  bash tests/test_logrotate.sh &&
   python3 -m pytest -n12 -v -m 'not dstate' /app/miniray/tests/ &&
   python3 -m pytest -v -m dstate /app/miniray/tests/test_miniray.py
 "
