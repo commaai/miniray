@@ -16,6 +16,7 @@ from tritonclient.utils import InferenceServerException
 
 TRITON_REDIS_HOST = os.getenv('TRITON_REDIS_HOST', '127.0.0.1')
 TRITON_SERVER_ADDRESS = os.getenv('TRITON_SERVER_ADDRESS', '127.0.0.1:8000')
+TRITON_SHM_DIR = Path('/dev/shm')
 TRITON_MODEL_REPOSITORY = Path(os.getenv('TRITON_MODEL_REPOSITORY', '/dev/shm/model-repository'))
 TRITON_MODEL_STALE_AFTER_SECONDS_PARAMETER = 'stale_after_seconds'
 
@@ -118,7 +119,7 @@ def kill_triton_processes_by_name(name: str) -> None:
 # NOTE: This function must also run as root, since the triton_python_backend_shm_region files are
 # created directly by the triton server
 def unlink_triton_shm_files() -> None:
-  for f in Path("/dev/shm").glob("triton_python_backend_shm_region_*"):
+  for f in TRITON_SHM_DIR.glob("triton_*_backend_shm_region_*"):
     f.unlink(missing_ok=True)
 
 def get_triton_container_id() -> str:
