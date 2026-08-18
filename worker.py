@@ -157,6 +157,7 @@ class Task:
     self._task_result = b''
     self._error = job_error
     self.init_timings = {}
+    self.reap_timings = {}
 
   @property
   def job(self):
@@ -271,16 +272,20 @@ class Task:
     self._timed_out = time.perf_counter() > self.start_time + self.limits.timeout_seconds
 
     if self._kill_deadline is None:
+      t0 = time.perf_counter()
       self.proc.poll()
       if self.proc.returncode is None and not self._timed_out:
+        self.reap_timings['poll'] = time.perf_counter() - t0
         return False  # still running
       cgroup_kill(self.cgroup_name)
       self._kill_deadline = time.perf_counter() + SIGKILL_GRACE_SECONDS
+      self.reap_timings['kill'] = time.perf_counter() - t0
 
     # Wait (non-blocking) for the cgroup to drain, up to the SIGKILL grace.
     if cgroup_is_populated(self.cgroup_name) and not exiting and time.perf_counter() < self._kill_deadline:
       return False  # still waiting on sigkill
 
+    t0 = time.perf_counter()
     try:
       stdout, stderr = self.proc.communicate(timeout=1)
       if stdout:
@@ -289,13 +294,16 @@ class Task:
         print(stderr.decode())
     except subprocess.TimeoutExpired:
       print('Task proc communicate timed out, might be a zombie?')
+    self.reap_timings['communicate'] = time.perf_counter() - t0
 
     # Read result file
+    t0 = time.perf_counter()
     try:
       with self.result_file.open('rb') as f:
         self._task_result = f.read()
     except FileNotFoundError:
       self._task_result = b''
+    self.reap_timings['result'] = time.perf_counter() - t0
 
     # Determine result/error state
     if self._timed_out:
@@ -313,6 +321,7 @@ class Task:
     return True
 
   def check_done(self, exiting=False) -> bool:
+    self.reap_timings = {}
     if not self._reaped:
       if self._reap(exiting):
         self._reaped = True
@@ -322,29 +331,37 @@ class Task:
 
     if self.alloc_id is None:
       return True
+    t0 = time.perf_counter()
     if cgroup_is_populated(self.cgroup_name):
       if not exiting:
         raise RuntimeError(f"{self.cgroup_name}: a process survived SIGKILL+{SIGKILL_GRACE_SECONDS}s")
       print(f"[worker] {self.cgroup_name}: a process survived SIGKILL+{SIGKILL_GRACE_SECONDS}s")
     else:
       cgroup_delete(self.cgroup_name, recursive=True)
+    self.reap_timings['cgroup'] = time.perf_counter() - t0
     return True
 
   def finish(self, exiting=False):
     task_run_time = time.perf_counter() - self.start_time
     if self.proc is not None:
+      t0 = time.perf_counter()
       task_gpu_stats = get_gpu_stats(self.proc.pid, [gpu.handle for gpu in self.rm.gpus])
       task_cpu_time = get_cgroup_cpu_usage(self.cgroup_name)
       task_gpu_time = get_gpu_utilization(task_gpu_stats) * task_run_time
       task_memory_gb = get_cgroup_mem_usage(self.cgroup_name) * 1e-9
       task_gpu_memory_gb = get_gpu_mem_usage(task_gpu_stats) * 1e-9
+      self.reap_timings['stats'] = time.perf_counter() - t0
+
+      t0 = time.perf_counter()
       statsd.event(
         "pipeline.worker.task_done", runtime=task_run_time, cpu=task_cpu_time, gpu=task_gpu_time,
         memory=task_memory_gb, gpu_memory=task_gpu_memory_gb, tags={'task_id': self.job})
+      self.reap_timings['event'] = time.perf_counter() - t0
       print(f"[worker] finished miniray task from job {self.job} stats: "
             f"elapsed={task_run_time:0.2f}s cpu={task_cpu_time:0.2f}s gpu={task_gpu_time:0.2f}s "
             f"mem={task_memory_gb:0.2f}GB gpumem={task_gpu_memory_gb:0.2f}GB")
 
+    t0 = time.perf_counter()
     if self._error:
       error_type, error_msg = self._error
       result_header = MinirayResultHeader(self.job, False, HOST_NAME, error_type, error_msg, self.task_uuid)
@@ -374,9 +391,11 @@ class Task:
       submitted_at=0.0, started_at=self.start_time,
     )
     self.r_master.hsetex(tasks_key, self.task_uuid, json.dumps(done_record), ex=3600)
+    self.reap_timings['redis'] = time.perf_counter() - t0
 
     # Cleanup shared memory and temp directories
     if self.alloc_id is not None:
+      t0 = time.perf_counter()
       while True:
         try:
           cleanup_shm_by_gid(self.alloc_id, self.triton_client, self.task_gid)
@@ -386,7 +405,10 @@ class Task:
           if exiting:
             break
           time.sleep(1)
+      self.reap_timings['shm'] = time.perf_counter() - t0
+    t0 = time.perf_counter()
     self.rm.release(self.task_uuid)
+    self.reap_timings['release'] = time.perf_counter() - t0
 
 
 # Divide the interval [0, 1) amongst the available jobs, weighted by job priority.
@@ -625,7 +647,12 @@ def main():
 
         if proc:
           t0 = time.perf_counter()
-          if proc.check_done():
+          done = proc.check_done()
+          for k, v in proc.reap_timings.items():
+            timings[f'reap.{k}'] = timings.get(f'reap.{k}', 0.0) + v
+          if done:
+            for k, v in proc.reap_timings.items():
+              statsd.hist(f'pipeline.worker.reap.{k}', v)
             procs[i] = None
             backoff.reset()
           timings['reap'] += time.perf_counter() - t0
