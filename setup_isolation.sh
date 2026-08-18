@@ -1,6 +1,5 @@
 #!/bin/bash -e
 
-# cap log size
 cat > /etc/logrotate.d/miniray-worker <<'EOF'
 /var/log/slurm/miniray-worker.*.log {
   size 1G
