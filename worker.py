@@ -590,6 +590,7 @@ def main():
 
   sigterm_handler = SigTermHandler(callback=sig_callback)
   backoff = ExponentialBackoff(SLEEP_TIME_MAX, DEBUG)
+  retry_at: dict[str, float] = {}
 
   r_master = StrictRedis(host=REDIS_HOST, port=6379, db=1)
   r_results = StrictRedis(host=REDIS_HOST, port=6379, db=5)
@@ -667,15 +668,17 @@ def main():
 
         task = None
         if current_group is not None:
-          ready_jobs = [j for j in groups[current_group] if j in venvs]
+          ready_jobs = [j for j in groups[current_group] if j in venvs and retry_at.get(j, 0) <= time.monotonic()]
           if ready_jobs:
             job = random.choice(ready_jobs)
             t0 = time.perf_counter()
             task = get_task(
               rm, r_master, r_results, r_claimed, job, job_metadatas, job_errors, venvs, i, triton_client)
             timings['get_task'] += time.perf_counter() - t0
+            if task is None: retry_at[job] = time.monotonic() + SLEEP_TIME_MAX
         if task is None:
-          ready_groups = {g: [j for j in js if j in venvs] for g, js in groups.items()}
+          ready_groups = {g: [j for j in js if j in venvs and retry_at.get(j, 0) <= time.monotonic()]
+                          for g, js in groups.items()}
           ready_groups = {g: js for g, js in ready_groups.items() if js}
           group = get_randomly_scheduled_group(ready_groups, job_metadatas)
           if group is not None:
@@ -683,6 +686,7 @@ def main():
             t0 = time.perf_counter()
             task = get_task(rm, r_master, r_results, r_claimed, job, job_metadatas, job_errors, venvs, i, triton_client)
             timings['get_task'] += time.perf_counter() - t0
+            if task is None: retry_at[job] = time.monotonic() + SLEEP_TIME_MAX
         if task is None:
           continue
 
