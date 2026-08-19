@@ -35,6 +35,7 @@ only-include = [
   "miniray/executor.py",
   "miniray/worker.py",
   "miniray/lib",
+  "miniray/tests",
 ]
 
 [tool.pytest.ini_options]
