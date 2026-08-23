@@ -38,7 +38,7 @@ from miniray.lib.resource_manager import ResourceManager, ResourceLimitError
 from miniray.lib.worker_helpers import ExponentialBackoff
 from miniray.lib.triton_helpers import TRITON_SERVER_ADDRESS, check_triton_server_health, wait_for_triton_server
 from miniray.lib.system_helpers import (
-  get_cgroup_cpu_usage, get_cgroup_mem_usage, get_gpu_stats, get_gpu_mem_usage, get_gpu_utilization,
+  get_cgroup_cpu_usage, get_cgroup_mem_usage,
 )
 from miniray.lib.statsd_helpers import statsd
 from miniray.lib.helpers import (
@@ -345,21 +345,17 @@ class Task:
     task_run_time = time.perf_counter() - self.start_time
     if self.proc is not None:
       t0 = time.perf_counter()
-      task_gpu_stats = get_gpu_stats(self.proc.pid, [gpu.handle for gpu in self.rm.gpus])
       task_cpu_time = get_cgroup_cpu_usage(self.cgroup_name)
-      task_gpu_time = get_gpu_utilization(task_gpu_stats) * task_run_time
       task_memory_gb = get_cgroup_mem_usage(self.cgroup_name) * 1e-9
-      task_gpu_memory_gb = get_gpu_mem_usage(task_gpu_stats) * 1e-9
       self.reap_timings['stats'] = time.perf_counter() - t0
 
       t0 = time.perf_counter()
       statsd.event(
-        "pipeline.worker.task_done", runtime=task_run_time, cpu=task_cpu_time, gpu=task_gpu_time,
-        memory=task_memory_gb, gpu_memory=task_gpu_memory_gb, tags={'task_id': self.job})
+        "pipeline.worker.task_done", runtime=task_run_time, cpu=task_cpu_time,
+        memory=task_memory_gb, tags={'task_id': self.job})
       self.reap_timings['event'] = time.perf_counter() - t0
       print(f"[worker] finished miniray task from job {self.job} stats: "
-            f"elapsed={task_run_time:0.2f}s cpu={task_cpu_time:0.2f}s gpu={task_gpu_time:0.2f}s "
-            f"mem={task_memory_gb:0.2f}GB gpumem={task_gpu_memory_gb:0.2f}GB")
+            f"elapsed={task_run_time:0.2f}s cpu={task_cpu_time:0.2f}s mem={task_memory_gb:0.2f}GB")
 
     t0 = time.perf_counter()
     if self._error:
