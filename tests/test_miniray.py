@@ -52,6 +52,45 @@ def get_executor(job_name: str) -> miniray.Executor:
 
 # Tests
 
+def test_runtime_is_local():
+  def runtime_paths():
+    import __main__
+    import re
+    import subprocess
+    import sys
+    import tempfile
+    from pathlib import Path
+
+    with tempfile.TemporaryDirectory() as tmp:
+      trace = Path(tmp) / "trace"
+      proc = subprocess.run(
+        [
+          "strace", "-f", "-qq", "-s", "4096", "-yy", "-e", "trace=%file", "-o", str(trace),
+          sys.executable, "-c", "import miniray; print(miniray.__file__)",
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+      )
+      code_paths = {Path(path) for path in re.findall(r'["<](/[^"<>]+[.]pyc?)[">]', trace.read_text())}
+
+    local_roots = [Path(sys.prefix), Path(sys.base_prefix)]
+    if sys.pycache_prefix:
+      local_roots.append(Path(sys.pycache_prefix))
+    unexpected = sorted(str(path) for path in code_paths if not any(path.is_relative_to(root) for root in local_roots))
+    return sys.prefix, __main__.__file__, proc.stdout.strip(), unexpected
+
+  with get_executor(job_name="miniray_test_runtime_is_local") as executor:
+    prefix, bootstrap, module, unexpected = executor.submit(runtime_paths).result(timeout=120)
+
+  assert Path(bootstrap).is_relative_to(prefix), (
+    f"task bootstrap is outside the job venv: {bootstrap!r} (expected under {prefix!r})"
+  )
+  assert Path(module).is_relative_to(prefix), (
+    f"miniray was imported from outside the job venv: {module!r} (expected under {prefix!r})"
+  )
+  assert not unexpected, f"Python code loaded from outside the allowed runtime roots: {unexpected}"
+
 def test_map_matches_local_and_threadpool():
   args = np.arange(100)
   results_loop = [is_even(n) for n in args]
