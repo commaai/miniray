@@ -30,21 +30,3 @@ def get_mem_usage():
   if sys.platform != 'linux':
     raise Exception("rusage units unknown")
   return maxrss * 1024 # linux is in KB
-
-def get_gpu_stats(pid, devices):
-  import pynvml
-  try:
-    for device in devices:
-      try:
-        return pynvml.nvmlDeviceGetAccountingStats(device, pid)
-      except pynvml.NVMLError_NotFound:  # ty: ignore[unresolved-attribute]
-        continue
-  except pynvml.NVMLError:
-    pass
-  return None
-
-def get_gpu_mem_usage(stats):
-  return stats.maxMemoryUsage if stats else 0
-
-def get_gpu_utilization(stats):
-  return stats.gpuUtilization / 100 if stats else 0
