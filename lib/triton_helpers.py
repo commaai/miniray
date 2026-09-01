@@ -28,6 +28,24 @@ def _check_triton_server_health(url: str, timeout: int = 3, scheme: str = "http"
     url = f"{scheme}://{url}"
   urllib.request.urlopen(f"{url}/v2/health/live", timeout=timeout)
 
+class TritonHealthMonitor:
+  def __init__(self, grace_seconds: float, clock: Callable[[], float] = time.monotonic):
+    self.grace_seconds = grace_seconds
+    self._clock = clock
+    self._unhealthy_since: Optional[float] = None
+
+  def check(self, url: str) -> None:
+    try:
+      _check_triton_server_health(url)
+    except (TimeoutError, ConnectionResetError):
+      now = self._clock()
+      if self._unhealthy_since is None:
+        self._unhealthy_since = now
+      if now - self._unhealthy_since >= self.grace_seconds:
+        raise
+    else:
+      self._unhealthy_since = None
+
 def _is_model_loading(client: InferenceServerClient, model_name: str):
   repo_index = client.get_model_repository_index()
   for entry in repo_index:

@@ -36,7 +36,7 @@ from miniray.lib.cgroup import (
 from miniray.lib.sig_term_handler import SigTermHandler
 from miniray.lib.resource_manager import ResourceManager, ResourceLimitError
 from miniray.lib.worker_helpers import ExponentialBackoff
-from miniray.lib.triton_helpers import TRITON_SERVER_ADDRESS, check_triton_server_health, wait_for_triton_server
+from miniray.lib.triton_helpers import TRITON_SERVER_ADDRESS, TritonHealthMonitor, wait_for_triton_server
 from miniray.lib.system_helpers import (
   get_cgroup_cpu_usage, get_cgroup_mem_usage,
 )
@@ -57,6 +57,8 @@ REDIS_HOST = os.getenv('REDIS_HOST', 'redis.comma.internal')
 PIPELINE_QUEUE = os.getenv('PIPELINE_QUEUE', 'local'+"-"+HOST_NAME)   # override this in systemd
 SLEEP_TIME_MAX = int(os.getenv('SLEEP_TIME_MAX', '2'))
 SIGKILL_GRACE_SECONDS = 60
+# Loading or unloading models can temporarily block Triton's live endpoint.
+TRITON_HEALTH_GRACE_SECONDS = 90
 
 EMPTY_DIR = Path("/tmp/empty")  # Run worker_task.py from an empty directory so relative path lookups don't hit code.nfs
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -558,6 +560,7 @@ def main():
 
   # NOTE: This won't attempt to connect to triton until a request is made
   triton_client = InferenceServerClient(TRITON_SERVER_ADDRESS, verbose=False) if TRITON_SERVER_ENABLED else None
+  triton_health_monitor = TritonHealthMonitor(TRITON_HEALTH_GRACE_SECONDS)
   rm = ResourceManager(triton_client=triton_client)
 
   venvs: LRU[str, str] = LRU(JOB_CACHE_SIZE)
@@ -607,7 +610,7 @@ def main():
 
       if triton_client is not None:
         try:
-          check_triton_server_health(url=TRITON_SERVER_ADDRESS)
+          triton_health_monitor.check(url=TRITON_SERVER_ADDRESS)
         except (TimeoutError, ConnectionResetError):
           if sigterm_handler.raised:
             break
