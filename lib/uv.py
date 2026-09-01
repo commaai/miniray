@@ -26,7 +26,10 @@ def pycache_dir_for_venv(venv_name: str, user_id: int) -> Path:
 def sync_venv_cache(codedir: Union[str, Path], user_id: int, venv_name: str):
   venv_dir = base_venv_path(user_id) / venv_name
   # TODO: Try hardlink mode once the uv cache and job venvs share one writable mount.
-  sync_cmd = ['uv', 'sync', '--project', codedir, '--frozen', '--link-mode', 'symlink']
+  sync_cmd = [
+    'uv', 'sync', '--project', codedir, '--frozen', '--link-mode', 'symlink',
+    '--config-setting=--global-option=egg_info --egg-base /tmp',
+  ]
 
   errs = []
   for i in range(N_RETRIES):
