@@ -19,6 +19,7 @@ TRITON_SERVER_ADDRESS = os.getenv('TRITON_SERVER_ADDRESS', '127.0.0.1:8000')
 TRITON_SHM_DIR = Path('/dev/shm')
 TRITON_MODEL_REPOSITORY = Path(os.getenv('TRITON_MODEL_REPOSITORY', '/dev/shm/model-repository'))
 TRITON_MODEL_STALE_AFTER_SECONDS_PARAMETER = 'stale_after_seconds'
+TRITON_MODEL_STALE_AFTER_SECONDS_ENV = 'TRITON_MODEL_STALE_AFTER_SECONDS'
 
 IOConfig = TypedDict('IOConfig', {'name': str, 'data_type': str, 'dims': list[int]})
 ModelConfig = TypedDict('ModelConfig', {'input': list[IOConfig], 'output': list[IOConfig]})
@@ -136,6 +137,10 @@ def cleanup_triton(client: InferenceServerClient) -> None:
   unlink_triton_shm_files()
 
 def unload_stale_models(triton_client: InferenceServerClient, redis_client: StrictRedis, keep_model_name: str) -> None:
+  stale_after_seconds_override = os.getenv(TRITON_MODEL_STALE_AFTER_SECONDS_ENV)
+  if stale_after_seconds_override is not None and float(stale_after_seconds_override) < 0:
+    return
+
   for model in get_triton_inference_stats(triton_client):
     last_inference_time = model['last_inference']//1000
     try: model_mtime = Path(TRITON_MODEL_REPOSITORY / model['name'] / '1').stat().st_mtime
@@ -143,8 +148,9 @@ def unload_stale_models(triton_client: InferenceServerClient, redis_client: Stri
     try: parameters = triton_client.get_model_config(model['name']).get('parameters', {})
     except InferenceServerException: continue
     model_stale_after_seconds = float(
+      stale_after_seconds_override or
       parameters.get(TRITON_MODEL_STALE_AFTER_SECONDS_PARAMETER, {}).get('string_value', 60))
-    if model['name'] != keep_model_name and (
+    if model_stale_after_seconds >= 0 and model['name'] != keep_model_name and (
       time.time() - max(last_inference_time, model_mtime) > model_stale_after_seconds):
       with redis_client.lock(model['name'], timeout=60):
         unload_triton_model(triton_client, model['name'])
