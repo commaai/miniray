@@ -36,7 +36,9 @@ from miniray.lib.cgroup import (
 from miniray.lib.sig_term_handler import SigTermHandler
 from miniray.lib.resource_manager import ResourceManager, ResourceLimitError
 from miniray.lib.worker_helpers import ExponentialBackoff
-from miniray.lib.triton_helpers import TRITON_SERVER_ADDRESS, check_triton_server_health, wait_for_triton_server
+from miniray.lib.triton_helpers import (
+  TRITON_MODEL_STALE_AFTER_SECONDS_ENV, TRITON_SERVER_ADDRESS, check_triton_server_health, wait_for_triton_server,
+)
 from miniray.lib.system_helpers import (
   get_cgroup_cpu_usage, get_cgroup_mem_usage,
 )
@@ -242,6 +244,7 @@ class Task:
         'DISABLE_FILEREADER_CACHE': '1',
         'PWD': str(EMPTY_DIR),
         **self.job_metadata.env,
+        TRITON_MODEL_STALE_AFTER_SECONDS_ENV: '-1',
       }
       python3_exe = str(Path(self.venv_cache[self.job]) / "bin/python3")
 
