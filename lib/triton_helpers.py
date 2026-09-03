@@ -143,7 +143,7 @@ def unload_stale_models(triton_client: InferenceServerClient, redis_client: Stri
     try: parameters = triton_client.get_model_config(model['name']).get('parameters', {})
     except InferenceServerException: continue
     model_stale_after_seconds = float(
-      parameters.get(TRITON_MODEL_STALE_AFTER_SECONDS_PARAMETER, {}).get('string_value', 60))
+      parameters.get(TRITON_MODEL_STALE_AFTER_SECONDS_PARAMETER, {}).get('string_value', 30*60))
     if model['name'] != keep_model_name and (
       time.time() - max(last_inference_time, model_mtime) > model_stale_after_seconds):
       with redis_client.lock(model['name'], timeout=60):
