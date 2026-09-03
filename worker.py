@@ -608,10 +608,13 @@ def main():
       if triton_client is not None:
         try:
           check_triton_server_health(url=TRITON_SERVER_ADDRESS)
-        except (TimeoutError, ConnectionResetError):
+        except (TimeoutError, ConnectionResetError) as e:
           if sigterm_handler.raised:
             break
-          raise
+          # transient triton failures shouldn't crash the worker: slurm would --requeue it,
+          # restarting the job in a tight loop and filling the log with tracebacks
+          print(f"[worker] triton health check failed, retrying: {type(e).__name__}: {e}")
+          continue
       timings['triton'] = time.perf_counter() - worker_loop_start
 
       t0 = time.perf_counter()
