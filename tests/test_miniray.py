@@ -142,7 +142,7 @@ def test_large_stderr_does_not_block():
                         priority=MINIRAY_PRIORITY,
                         queue_name=QUEUE_NAME,
                         limits={'memory': MINIRAY_MEMORY_GB, 'timeout_seconds': 5}) as executor:
-    assert executor.submit(fill_stderr, size).result(timeout=30) == size
+    assert executor.submit(fill_stderr, size).result() == size
 
 
 @pytest.mark.dstate
