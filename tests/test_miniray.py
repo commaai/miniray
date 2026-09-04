@@ -38,6 +38,7 @@ def slow_sleep(seconds: float) -> str:
 
 def fill_stderr(size: int) -> int:
   chunk = b'x' * 4096
+  os.write(2, b'MINIRAY_STDERR_TEST\n')
   for _ in range(size // len(chunk)):
     os.write(2, chunk)
   return size
