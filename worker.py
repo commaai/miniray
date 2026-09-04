@@ -10,6 +10,7 @@ os.environ['OPENBLAS_NUM_THREADS'] = '1'
 
 import random
 import json
+import sys
 import time
 import base64
 import signal
@@ -103,6 +104,11 @@ def create_tmp_dir(path: Path, uid, gid):
 def get_tmp_dir_for_task(alloc_id):
   return TMP_DIR_ROOT / alloc_id
 
+def print_output(path: Path, destination: BinaryIO):
+  with path.open('rb') as output:
+    shutil.copyfileobj(output, destination)
+  destination.flush()
+
 def cleanup_shm_by_gid(alloc_id, triton_client, gid):
   with os.scandir("/dev/shm") as it:
     shm_entries = [(de, de.stat(follow_symlinks=False)) for de in it]
@@ -130,6 +136,8 @@ class Task:
   task_gid: int
   cgroup_name: str
   result_file: Path
+  stdout_file: Path
+  stderr_file: Path
   start_time: float
   tmp_dir: Path
   venv_dir: str
@@ -203,6 +211,8 @@ class Task:
       self.init_timings["cgroup"] = time.perf_counter() - t0
 
       self.result_file = self.tmp_dir / "task_result"
+      self.stdout_file = self.tmp_dir / "stdout"
+      self.stderr_file = self.tmp_dir / "stderr"
       return True
     except BaseException as e:
       traceback.print_exc()
@@ -249,9 +259,10 @@ class Task:
       if DEBUG: print("[worker]", " ".join(p_args))
 
       t0 = time.perf_counter()
-      self.proc = subprocess.Popen(
-        p_args, user=TASK_UID, group=self.task_gid, extra_groups=task_extra_groups, cwd=str(EMPTY_DIR), env=p_env,
-        start_new_session=True, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+      with self.stdout_file.open('wb') as stdout, self.stderr_file.open('wb') as stderr:
+        self.proc = subprocess.Popen(
+          p_args, user=TASK_UID, group=self.task_gid, extra_groups=task_extra_groups, cwd=str(EMPTY_DIR), env=p_env,
+          start_new_session=True, stdin=subprocess.PIPE, stdout=stdout, stderr=stderr)
       cgroup_add_pid(self.cgroup_name, self.proc.pid)
       assert self.proc.stdin is not None
       stdin = cast(BinaryIO, self.proc.stdin)
@@ -287,14 +298,15 @@ class Task:
 
     t0 = time.perf_counter()
     try:
-      stdout, stderr = self.proc.communicate(timeout=1)
-      if stdout:
-        print(stdout.decode())
-      if stderr:
-        print(stderr.decode())
+      self.proc.wait(timeout=1)
     except subprocess.TimeoutExpired:
-      print('Task proc communicate timed out, might be a zombie?')
-    self.reap_timings['communicate'] = time.perf_counter() - t0
+      print('Task proc wait timed out, might be a zombie?')
+    self.reap_timings['wait'] = time.perf_counter() - t0
+
+    t0 = time.perf_counter()
+    print_output(self.stdout_file, sys.stdout.buffer)
+    print_output(self.stderr_file, sys.stderr.buffer)
+    self.reap_timings['output'] = time.perf_counter() - t0
 
     # Read result file
     t0 = time.perf_counter()
