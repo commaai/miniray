@@ -36,6 +36,12 @@ def slow_sleep(seconds: float) -> str:
   time.sleep(seconds)
   return "done"
 
+def fill_stderr(size: int) -> int:
+  chunk = b'x' * 4096
+  for _ in range(size // len(chunk)):
+    os.write(2, chunk)
+  return size
+
 def spawn_zombie():
   pid = os.fork()
   if pid == 0:
@@ -127,6 +133,15 @@ def test_timeout():
     with pytest.raises(miniray.MinirayError) as excinfo:
       future.result()
     assert excinfo.value.exception_type == "TimeoutError"
+
+
+def test_large_stderr_does_not_block():
+  size = 128 * 1024
+  with miniray.Executor(job_name='miniray_test_stderr',
+                        priority=MINIRAY_PRIORITY,
+                        queue_name=QUEUE_NAME,
+                        limits={'memory': MINIRAY_MEMORY_GB, 'timeout_seconds': 5}) as executor:
+    assert executor.submit(fill_stderr, size).result(timeout=30) == size
 
 
 @pytest.mark.dstate
