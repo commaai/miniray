@@ -28,10 +28,10 @@ def _check_triton_server_health(url: str, timeout: int = 3, scheme: str = "http"
     url = f"{scheme}://{url}"
   urllib.request.urlopen(f"{url}/v2/health/live", timeout=timeout)
 
-def _is_model_loading(client: InferenceServerClient, model_name: str):
+def _is_model_loading(client: InferenceServerClient, model_name: str, model_version: str):
   repo_index = client.get_model_repository_index()
   for entry in repo_index:
-    if entry.get("name", "") == model_name and entry.get("state", "") == "LOADING":
+    if entry.get("name") == model_name and entry.get("version") == model_version and entry.get("state") == "LOADING":
       return True
   return False
 
@@ -51,14 +51,29 @@ def get_triton_inference_stats(client: InferenceServerClient):
   return client.get_inference_statistics()['model_stats']
 
 @retry(stop=stop_after_attempt(3), wait=wait_random(1, 2), reraise=True)
-def load_triton_model(client: InferenceServerClient, model: str, config: ModelConfig, load_timeout = 60):
-  if _is_model_loading(client, model):
+def load_triton_model(client: InferenceServerClient, model: str, config: ModelConfig,
+                      load_timeout = 60, model_version: str = '1'):
+  if _is_model_loading(client, model, model_version):
     deadline = time.perf_counter() + load_timeout
-    while time.perf_counter() < deadline and _is_model_loading(client, model):
+    while time.perf_counter() < deadline and _is_model_loading(client, model, model_version):
       time.sleep(min(5, load_timeout))
-    assert client.is_model_ready(model)
+    assert client.is_model_ready(model, model_version)
     return
   return client.load_model(model, config=json.dumps(config))
+
+def cleanup_triton_model_versions(client: InferenceServerClient, model: str, unload_timeout: float = 60):
+  deadline = time.monotonic() + unload_timeout
+  while True:
+    versions = [entry for entry in client.get_model_repository_index() if entry['name'] == model]
+    if not any(entry.get('state') == 'UNLOADING' for entry in versions):
+      break
+    if time.monotonic() >= deadline:
+      raise TimeoutError(f'Triton model {model} did not finish unloading within {unload_timeout} seconds: {versions}')
+    time.sleep(0.1)
+  active = {entry['version'] for entry in versions if entry.get('state') in ('READY', 'LOADING')}
+  for version_dir in (TRITON_MODEL_REPOSITORY / model).glob('*'):
+    if version_dir.is_dir() and version_dir.name.isdigit() and version_dir.name not in active:
+      shutil.rmtree(version_dir)
 
 def setup_triton_model(func: Callable[..., ModelConfig]):
   @wraps(func)
@@ -66,37 +81,48 @@ def setup_triton_model(func: Callable[..., ModelConfig]):
     client: InferenceServerClient,
     model: str,
     redis: Optional[StrictRedis] = None,
-    load_timeout = 60) -> None:
-      model_dir = TRITON_MODEL_REPOSITORY / model / '1'
-      if client.is_model_ready(model):  # if the model is already loaded, bump the mtime and return
-        mtime = time.time()
-        try: os.utime(model_dir, (mtime, mtime))
-        except OSError: pass
-        return
+    load_timeout = 60,
+    model_version: str = '1') -> None:
+      model_dir = TRITON_MODEL_REPOSITORY / model / model_version
+      keep_count = int(os.getenv('TRITON_MAX_CHECKPOINTS_PER_EID', '1'))
+      if keep_count < 1:
+        raise ValueError('TRITON_MAX_CHECKPOINTS_PER_EID must be at least 1')
+      version_policy = {'latest': {'num_versions': keep_count}}
       if redis is None:
         redis = StrictRedis(host=TRITON_REDIS_HOST, port=6379, db=8)
       with redis.lock(model, timeout=10*60):
-        if client.is_model_ready(model):
-          return  # check if the model is ready both before and after acquiring the lock
-        shutil.rmtree(model_dir, ignore_errors=True)
-        model_dir.mkdir(parents=True, exist_ok=True)
-        config = func(*self, model_dir)
-        load_triton_model(client, model, config, load_timeout=load_timeout)
-        assert client.is_model_ready(model)
+        ready = client.is_model_ready(model, model_version)
+        if ready:
+          config = client.get_model_config(model, model_version)
+        else:
+          cleanup_triton_model_versions(client, model)
+          shutil.rmtree(model_dir, ignore_errors=True)
+          model_dir.mkdir(parents=True, exist_ok=True)
+          config = func(*self, model_dir)
+        if not ready or config.get('version_policy') != version_policy:
+          config['version_policy'] = version_policy
+          load_triton_model(client, model, config, load_timeout=load_timeout, model_version=model_version)
+        cleanup_triton_model_versions(client, model)
+        if not client.is_model_ready(model, model_version):
+          raise RuntimeError(f'Triton model {model} version {model_version} is outside the latest-{keep_count} window')
+        mtime = time.time()
+        try: os.utime(model_dir, (mtime, mtime))
+        except OSError: pass
   return wrapper
 
 def unload_triton_model(client: InferenceServerClient, model: str):
   client.unload_model(model)
+  cleanup_triton_model_versions(client, model)
   try: shutil.rmtree(TRITON_MODEL_REPOSITORY / model)
   except FileNotFoundError: pass
   for f in Path("/dev/shm").glob(f"{model}_*.parameters"):
     f.unlink(missing_ok=True)
 
 def unload_triton_models(client: InferenceServerClient, model: Optional[str] = None):
-  for model_stats in get_triton_inference_stats(client):
-    if model is None or model == model_stats['name']:
-      print(f"Unloading {model_stats['name']}")
-      unload_triton_model(client, model_stats['name'])
+  for name in {stats['name'] for stats in get_triton_inference_stats(client)}:
+    if model is None or model == name:
+      print(f"Unloading {name}")
+      unload_triton_model(client, name)
 
   if model is None:
     for subdir in TRITON_MODEL_REPOSITORY.iterdir():
@@ -136,18 +162,22 @@ def cleanup_triton(client: InferenceServerClient) -> None:
   unlink_triton_shm_files()
 
 def unload_stale_models(triton_client: InferenceServerClient, redis_client: StrictRedis, keep_model_name: str) -> None:
+  last_used = {}
   for model in get_triton_inference_stats(triton_client):
     last_inference_time = model['last_inference']//1000
-    try: model_mtime = Path(TRITON_MODEL_REPOSITORY / model['name'] / '1').stat().st_mtime
+    try: model_mtime = (TRITON_MODEL_REPOSITORY / model['name'] / model['version']).stat().st_mtime
     except FileNotFoundError: model_mtime = 0
-    try: parameters = triton_client.get_model_config(model['name']).get('parameters', {})
+    last_used[model['name']] = max(last_used.get(model['name'], 0), last_inference_time, model_mtime)
+  for name, last_inference_time in last_used.items():
+    if name == keep_model_name:
+      continue
+    try: parameters = triton_client.get_model_config(name).get('parameters', {})
     except InferenceServerException: continue
     model_stale_after_seconds = float(
       parameters.get(TRITON_MODEL_STALE_AFTER_SECONDS_PARAMETER, {}).get('string_value', 30*60))
-    if model['name'] != keep_model_name and (
-      time.time() - max(last_inference_time, model_mtime) > model_stale_after_seconds):
-      with redis_client.lock(model['name'], timeout=60):
-        unload_triton_model(triton_client, model['name'])
+    if time.time() - last_inference_time > model_stale_after_seconds:
+      with redis_client.lock(name, timeout=10*60):
+        unload_triton_model(triton_client, name)
 
 if __name__ == '__main__':
   import argparse
