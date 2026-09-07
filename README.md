@@ -25,10 +25,4 @@ for a, b, c in zip(results_loop, results_map, results_submit):
 ### want to use?
 If you have tasks that you rant to parallelize across multiple machines, miniray might be right for you! Contact harald@comma.ai if miniray is missing something you would like.
 
-### Triton model loading
-
-Model loads use gRPC so initialization and compilation do not block Triton's HTTP inference workers.
-`TRITON_SERVER_ADDRESS` selects the HTTP endpoint (default `127.0.0.1:8000`).
-The gRPC endpoint defaults to the same host on port 8001; set `TRITON_GRPC_SERVER_ADDRESS`
-when that port is mapped differently. Model-loading RPCs have a ten-minute deadline.
 
