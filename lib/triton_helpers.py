@@ -1,4 +1,5 @@
 import os
+import re
 import sys
 import json
 import time
@@ -19,6 +20,7 @@ TRITON_SERVER_ADDRESS = os.getenv('TRITON_SERVER_ADDRESS', '127.0.0.1:8000')
 TRITON_SHM_DIR = Path('/dev/shm')
 TRITON_MODEL_REPOSITORY = Path(os.getenv('TRITON_MODEL_REPOSITORY', '/dev/shm/model-repository'))
 TRITON_MODEL_STALE_AFTER_SECONDS_PARAMETER = 'stale_after_seconds'
+TRITON_CHECKPOINT_PATTERN = re.compile(r'([\da-fA-F]{8}(?:-[\da-fA-F]{4}){3}-[\da-fA-F]{12})_(-1|[0-9]+)_.+')
 
 IOConfig = TypedDict('IOConfig', {'name': str, 'data_type': str, 'dims': list[int]})
 ModelConfig = TypedDict('ModelConfig', {'input': list[IOConfig], 'output': list[IOConfig]})
@@ -60,6 +62,28 @@ def load_triton_model(client: InferenceServerClient, model: str, config: ModelCo
     return
   return client.load_model(model, config=json.dumps(config))
 
+def retain_recent_checkpoints(client: InferenceServerClient, redis: StrictRedis, model_name: str):
+  """Evict older epochs; the caller holds the EID lock through eviction and loading."""
+  match = TRITON_CHECKPOINT_PATTERN.fullmatch(model_name)
+  if match is None:
+    return
+  eid, epoch = match[1].lower(), int(match[2])
+  keep_count = int(os.getenv('TRITON_MAX_CHECKPOINTS_PER_EID', '1'))
+  if keep_count < 1:
+    raise ValueError('TRITON_MAX_CHECKPOINTS_PER_EID must be at least 1')
+  checkpoints = {}
+  for model in client.get_model_repository_index():
+    other = TRITON_CHECKPOINT_PATTERN.fullmatch(model['name'])
+    if other and other[1].lower() == eid and model.get('state') in ('READY', 'LOADING', 'UNLOADING'):
+      checkpoints[model['name']] = int(other[2])
+  retained = sorted({epoch, *checkpoints.values()}, reverse=True)[:keep_count]
+  for name, other_epoch in checkpoints.items():
+    if other_epoch not in retained:
+      with redis.lock(name, timeout=10*60):
+        unload_triton_model(client, name)
+  if epoch not in retained:
+    raise RuntimeError(f'Checkpoint {eid}/{epoch} is outside the Triton retention window: {retained}')
+
 def setup_triton_model(func: Callable[..., ModelConfig]):
   @wraps(func)
   def wrapper(*self: Any,
@@ -68,25 +92,33 @@ def setup_triton_model(func: Callable[..., ModelConfig]):
     redis: Optional[StrictRedis] = None,
     load_timeout = 60) -> None:
       model_dir = TRITON_MODEL_REPOSITORY / model / '1'
-      if client.is_model_ready(model):  # if the model is already loaded, bump the mtime and return
-        mtime = time.time()
-        try: os.utime(model_dir, (mtime, mtime))
-        except OSError: pass
-        return
       if redis is None:
         redis = StrictRedis(host=TRITON_REDIS_HOST, port=6379, db=8)
-      with redis.lock(model, timeout=10*60):
-        if client.is_model_ready(model):
-          return  # check if the model is ready both before and after acquiring the lock
-        shutil.rmtree(model_dir, ignore_errors=True)
-        model_dir.mkdir(parents=True, exist_ok=True)
-        config = func(*self, model_dir)
-        load_triton_model(client, model, config, load_timeout=load_timeout)
-        assert client.is_model_ready(model)
+      checkpoint = TRITON_CHECKPOINT_PATTERN.fullmatch(model)
+      model_group = checkpoint[1].lower() if checkpoint else model
+      with redis.lock(f'triton-checkpoints/{model_group}', timeout=10*60):
+        retain_recent_checkpoints(client, redis, model)
+        with redis.lock(model, timeout=10*60):
+          if client.is_model_ready(model):  # if already loaded, bump the mtime and return
+            mtime = time.time()
+            try: os.utime(model_dir, (mtime, mtime))
+            except OSError: pass
+            return
+          shutil.rmtree(model_dir, ignore_errors=True)
+          model_dir.mkdir(parents=True, exist_ok=True)
+          config = func(*self, model_dir)
+          load_triton_model(client, model, config, load_timeout=load_timeout)
+          assert client.is_model_ready(model)
   return wrapper
 
-def unload_triton_model(client: InferenceServerClient, model: str):
+def unload_triton_model(client: InferenceServerClient, model: str, unload_timeout: float = 60):
   client.unload_model(model)
+  deadline = time.monotonic() + unload_timeout
+  while any(entry['name'] == model and entry.get('state', 'UNAVAILABLE') != 'UNAVAILABLE'
+            for entry in client.get_model_repository_index()):
+    if time.monotonic() >= deadline:
+      raise TimeoutError(f'Triton model {model} did not unload within {unload_timeout} seconds')
+    time.sleep(0.1)
   try: shutil.rmtree(TRITON_MODEL_REPOSITORY / model)
   except FileNotFoundError: pass
   for f in Path("/dev/shm").glob(f"{model}_*.parameters"):
@@ -146,7 +178,7 @@ def unload_stale_models(triton_client: InferenceServerClient, redis_client: Stri
       parameters.get(TRITON_MODEL_STALE_AFTER_SECONDS_PARAMETER, {}).get('string_value', 30*60))
     if model['name'] != keep_model_name and (
       time.time() - max(last_inference_time, model_mtime) > model_stale_after_seconds):
-      with redis_client.lock(model['name'], timeout=60):
+      with redis_client.lock(model['name'], timeout=10*60):
         unload_triton_model(triton_client, model['name'])
 
 if __name__ == '__main__':
