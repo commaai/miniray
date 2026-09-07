@@ -34,9 +34,6 @@ def triton_servers(monkeypatch):
       self.end_headers()
       self.wfile.write(b'[]' if self.path.endswith('/index') else b'{}')
 
-    def log_message(self, *_args):
-      pass
-
   class GrpcHandler(service_pb2_grpc.GRPCInferenceServiceServicer):
     def RepositoryModelLoad(self, request, context):  # noqa: N802
       if request.model_name == 'invalid':
@@ -67,7 +64,9 @@ def triton_servers(monkeypatch):
 
 def test_model_load_keeps_http_responsive(triton_servers):
   http_address, loading, release, requests = triton_servers
-  config = {'backend': 'python', 'parameters': {'compile': {'string_value': 'true'}}}
+  config = triton_helpers.ModelConfig(
+    input=[{'name': 'INPUT', 'data_type': 'TYPE_FP32', 'dims': [1]}], output=[],
+  )
 
   def load_model():
     with InferenceServerClient(http_address) as client:
@@ -95,4 +94,4 @@ def test_model_load_surfaces_server_errors(triton_servers):
   http_address, *_ = triton_servers
   with InferenceServerClient(http_address) as client:
     with pytest.raises(InferenceServerException, match='invalid model config'):
-      triton_helpers.load_triton_model(client, 'invalid', {})
+      triton_helpers.load_triton_model(client, 'invalid', {'input': [], 'output': []})
