@@ -152,13 +152,14 @@ def sync_local_codedir(job_desc: str) -> str:
   ])
   return str(cache_dir)
 
+def _execute_task(fn, *args, **kwargs) -> MiniraySubTaskResult:
+  try:
+    return MiniraySubTaskResult(True, "", "", fn(*args, **kwargs))
+  except BaseException as e:
+    return MiniraySubTaskResult(False, type(e).__name__, traceback.format_exc(), None)
+
 def _execute_batch(fn, *batch, **kwargs):
-  results = []
-  for args in batch:
-    try:
-      results.append(MiniraySubTaskResult(True, "", "", fn(*args, **kwargs)))
-    except BaseException as e:
-      results.append(MiniraySubTaskResult(False, type(e).__name__, traceback.format_exc(), None))
+  results = [_execute_task(fn, *args, **kwargs) for args in batch]
   return _wrap_result_local_redis(results, timeout_seconds=DEFAULT_RESULT_PAYLOAD_TIMEOUT_SECONDS)
 
 def _wrap_result_local_redis(data: Any, timeout_seconds: int) -> tuple[str, str]:
@@ -181,10 +182,22 @@ def _local_worker_init():
 def _get_redis_client(hostname: str) -> StrictRedis:
   return StrictRedis(host=hostname, db=10)
 
+class _LocalFuture(Future):
+  def __init__(self, process_future: Future):
+    super().__init__()
+    self._process_future = process_future
+
+  def cancel(self) -> bool:
+    if not self._process_future.cancel():
+      return False
+    return super().cancel()
+
 class LocalExecutor(ProcessPoolExecutor):
-  def __init__(self, env: dict[str, str]):
+  def __init__(self, env: dict[str, str], job: str = "local"):
     # need to set env before spawn, because it imports stuff before initializer is run
     self._saved_env = {k: os.environ.get(k) for k in env}
+    self._job = job
+    self._worker = socket.gethostname()
     os.environ.update(env)
     ctx = mp.get_context("spawn")
     # separate processes per task to avoid leaking states (simulating a behaviour from distributed run)
@@ -194,6 +207,30 @@ class LocalExecutor(ProcessPoolExecutor):
       max_tasks_per_child=1,
       initializer=_local_worker_init,
     )
+
+  def submit(self, fn: Callable, /, *args, **kwargs) -> Future:
+    process_future = super().submit(_execute_task, fn, *args, **kwargs)
+    local_future = _LocalFuture(process_future)
+
+    def resolve(future: Future) -> None:
+      if future.cancelled():
+        local_future.cancel()
+        return
+      try:
+        result: MiniraySubTaskResult = future.result()
+      except BaseException as e:
+        exception_desc = ''.join(traceback.format_exception(type(e), e, e.__traceback__))
+        local_future.set_exception(MinirayError(
+          type(e).__name__, exception_desc, self._job, self._worker))
+      else:
+        if result.succeeded:
+          local_future.set_result(result.result)
+        else:
+          local_future.set_exception(MinirayError(
+            result.exception_type, result.exception_desc, self._job, self._worker))
+
+    process_future.add_done_callback(resolve)
+    return local_future
 
   def shutdown(self, *args, **kwargs):
     super().shutdown(*args, **kwargs)
@@ -214,9 +251,12 @@ class Executor(BaseExecutor):
     if FORCE_LOCAL or force_local:
       config = kwargs.get('config') or (args[0] if args else None)
       env: dict[str, str] = config.env if isinstance(config, JobConfig) else {}
+      job = config.job_name if isinstance(config, JobConfig) else 'local'
       if 'env' in kwargs:
         env = cast(dict[str, str], kwargs['env'])
-      return LocalExecutor(env=env)
+      if 'job_name' in kwargs:
+        job = cast(str, kwargs['job_name'])
+      return LocalExecutor(env=env, job=job)
     return super().__new__(cls)
 
   def __init__(self, config: Optional[JobConfig] = None, **kwargs) -> None:
