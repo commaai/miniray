@@ -5,11 +5,13 @@ import types
 import resource
 import threading
 import pynvml
+from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
 from ctypes import _Pointer
 from dataclasses import dataclass
+from tritonclient.http import InferenceServerClient
 
-from miniray.lib.triton_helpers import cleanup_triton
+from miniray.lib.triton_helpers import TRITON_SERVER_ADDRESS, cleanup_triton
 from miniray.lib.helpers import Limits, GB_TO_BYTES
 
 class ResourceLimitError(Exception):
@@ -51,8 +53,9 @@ class TaskAllocation:
 
 
 class ResourceManager():
-  def __init__(self, mem_limit_multiplier=0.8, triton_client=None):
-    self._triton_client = triton_client
+  def __init__(self, mem_limit_multiplier=0.8, triton_enabled=False):
+    self._cleanup_executor = ThreadPoolExecutor(max_workers=1) if triton_enabled else None
+    self._cleanup_future: Future[None] | None = None
     self.gpu_status = types.SimpleNamespace(valid=True, last_reading=time.time())
 
     self.cpu_totals = self._get_cpu_info_by_node()
@@ -113,6 +116,19 @@ class ResourceManager():
   def get_limits(self, task_uuid: str) -> Limits:
     return self._tasks[task_uuid].limits
 
+  def _cleanup_triton(self) -> None:
+    # Triton's HTTP client must stay in the thread that created it.
+    with InferenceServerClient(TRITON_SERVER_ADDRESS, verbose=False) as client:
+      cleanup_triton(client)
+
+  def check_cleanup(self) -> None:
+    if self._cleanup_future is not None and self._cleanup_future.done():
+      self._cleanup_future.result()
+
+  def shutdown(self) -> None:
+    if self._cleanup_executor is not None:
+      self._cleanup_executor.shutdown()
+
   def consume(self, limits: Limits, job: str, task_uuid: str) -> None:
     if self.gpus:
       try:
@@ -141,7 +157,7 @@ class ResourceManager():
     if small_gpu_mem_bytes > 0 and (self.small_gpus or self.big_gpus):
       small_gpu = min(self.small_gpus or self.big_gpus, key=lambda gpu: gpu_mem_usages[gpu.index])  # fall back
 
-    if limits.triton and self._triton_client is None:
+    if limits.triton and self._cleanup_executor is None:
       raise ResourceLimitError("Triton client is not available for this ResourceManager")
     candidate_nodes = []
     for node in self.cpu_totals:
@@ -170,12 +186,18 @@ class ResourceManager():
         f"big gpu memory request of {big_gpu_mem_bytes} will exceed limit of "
         f"{big_gpu.memory if big_gpu else 0.0}")
 
-    # Store allocation (no exceptions should be raised below this line)
-    if self.gpu_locked_job != job and limits.requires_gpu():
+    if limits.requires_gpu():
+      if self._cleanup_executor is not None:
+        if self._cleanup_future is None and self.gpu_locked_job != job:
+          self._cleanup_future = self._cleanup_executor.submit(self._cleanup_triton)
+        if self._cleanup_future is not None:
+          if not self._cleanup_future.done():
+            raise ResourceLimitError("Waiting for Triton cleanup")
+          self._cleanup_future.result()
+          self._cleanup_future = None
       self.gpu_locked_job = job
-      if self._triton_client is not None:
-        cleanup_triton(self._triton_client)
 
+    # Store allocation (no exceptions should be raised below this line)
     self._tasks[task_uuid] = TaskAllocation(
       limits=limits,
       numa_node=numa_node,

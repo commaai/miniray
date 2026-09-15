@@ -570,7 +570,7 @@ def main():
 
   # NOTE: This won't attempt to connect to triton until a request is made
   triton_client = InferenceServerClient(TRITON_SERVER_ADDRESS, verbose=False) if TRITON_SERVER_ENABLED else None
-  rm = ResourceManager(triton_client=triton_client)
+  rm = ResourceManager(triton_enabled=bool(TRITON_SERVER_ENABLED))
 
   venvs: LRU[str, str] = LRU(JOB_CACHE_SIZE)
   populate_venv_cache_from_disk(venvs, TASK_UID)
@@ -616,6 +616,8 @@ def main():
       worker_loop_start = time.perf_counter()
       last_init_timings = {}
       timings = {'triton': 0.0, 'redis_sched': 0.0, 'reap': 0.0, 'get_task': 0.0, 'start_task': 0.0}
+
+      rm.check_cleanup()
 
       if triton_client is not None:
         try:
@@ -717,6 +719,8 @@ def main():
         if proc and proc.check_done(exiting=True):
           procs[i] = None
       time.sleep(1)
+
+    rm.shutdown()
 
     if fatal_error is not None:
       raise fatal_error
