@@ -617,8 +617,6 @@ def main():
       last_init_timings = {}
       timings = {'triton': 0.0, 'redis_sched': 0.0, 'reap': 0.0, 'get_task': 0.0, 'start_task': 0.0}
 
-      rm.check_cleanup()
-
       if triton_client is not None:
         try:
           check_triton_server_health(url=TRITON_SERVER_ADDRESS)
@@ -719,8 +717,6 @@ def main():
         if proc and proc.check_done(exiting=True):
           procs[i] = None
       time.sleep(1)
-
-    rm.shutdown()
 
     if fatal_error is not None:
       raise fatal_error
