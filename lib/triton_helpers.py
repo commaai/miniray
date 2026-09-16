@@ -124,7 +124,7 @@ def unlink_triton_shm_files() -> None:
 
 def get_triton_container_id() -> str:
   container_ids = subprocess.check_output(
-    ["docker", "ps", "--format", "{{.ID}}", "--filter", "name=tritonserver"]).decode('utf-8').strip()
+    ["docker", "ps", "--format", "{{.ID}}", "--filter", "name=tritonserver"], timeout=5).decode('utf-8').strip()
   if not container_ids:
     raise RuntimeError("No tritonserver container found")
   return container_ids.split('\n')[0]
