@@ -124,16 +124,18 @@ def unlink_triton_shm_files() -> None:
 
 def get_triton_container_id() -> str:
   container_ids = subprocess.check_output(
-    ["docker", "ps", "--format", "{{.ID}}", "--filter", "name=tritonserver"]).decode('utf-8').strip()
+    ["docker", "ps", "--format", "{{.ID}}", "--filter", "name=tritonserver"], timeout=5).decode('utf-8').strip()
   if not container_ids:
     raise RuntimeError("No tritonserver container found")
   return container_ids.split('\n')[0]
 
-def cleanup_triton(client: InferenceServerClient) -> None:
-  kill_triton_processes_by_name("VLLM::EngineCore")
-  unload_triton_models(client)
-  kill_triton_processes_by_name("triton_python_backend_stub")
-  unlink_triton_shm_files()
+def cleanup_triton() -> None:
+  # Triton's HTTP client must stay in the thread that created it.
+  with InferenceServerClient(TRITON_SERVER_ADDRESS, verbose=False) as client:
+    kill_triton_processes_by_name("VLLM::EngineCore")
+    unload_triton_models(client)
+    kill_triton_processes_by_name("triton_python_backend_stub")
+    unlink_triton_shm_files()
 
 def unload_stale_models(triton_client: InferenceServerClient, redis_client: StrictRedis, keep_model_name: str) -> None:
   for model in get_triton_inference_stats(triton_client):

@@ -570,7 +570,7 @@ def main():
 
   # NOTE: This won't attempt to connect to triton until a request is made
   triton_client = InferenceServerClient(TRITON_SERVER_ADDRESS, verbose=False) if TRITON_SERVER_ENABLED else None
-  rm = ResourceManager(triton_client=triton_client)
+  rm = ResourceManager(triton_enabled=bool(TRITON_SERVER_ENABLED))
 
   venvs: LRU[str, str] = LRU(JOB_CACHE_SIZE)
   populate_venv_cache_from_disk(venvs, TASK_UID)
