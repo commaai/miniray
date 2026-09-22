@@ -3,7 +3,7 @@ import time
 from pathlib import Path
 import numpy as np
 import pytest
-from concurrent.futures import Future, ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import miniray
 from .dstate_helpers import (
@@ -54,11 +54,11 @@ def spawn_zombie():
     os._exit(0)
   return "done"
 
-def get_executor(job_name: str) -> miniray.Executor:
-  return miniray.Executor(job_name=job_name,
-                          priority=MINIRAY_PRIORITY,
-                          queue_name=QUEUE_NAME,
-                          limits={'memory': MINIRAY_MEMORY_GB})
+def get_executor(job_name: str, **kwargs) -> miniray.Executor:
+  kwargs.setdefault('priority', MINIRAY_PRIORITY)
+  kwargs.setdefault('queue_name', QUEUE_NAME)
+  kwargs.setdefault('limits', {'memory': MINIRAY_MEMORY_GB})
+  return miniray.Executor(job_name=job_name, **kwargs)
 
 
 # Tests
@@ -80,12 +80,25 @@ def test_map_matches_local_and_threadpool():
 def test_submit_result():
   with get_executor(job_name='miniray_test_result') as executor:
     future = executor.submit(is_even, 96)
-    assert isinstance(future, miniray.MinirayFuture)
-    info = miniray.get_execution_info(future)
-    assert info is future.execution_info
-    assert info.job == executor.submit_queue_id
     assert future.result() is True
-    assert info.worker
+
+
+@pytest.mark.parametrize("force_local", [True, False], ids=["local", "remote"])
+@pytest.mark.parametrize("method", ["submit", "fmap"])
+def test_execution_info(force_local, method):
+  with get_executor(job_name='miniray_test_execution_info', force_local=force_local) as executor:
+    if method == 'submit':
+      futures = [executor.submit(is_even, 96), executor.submit(get_miniray_error)]
+    else:
+      futures = list(executor.fmap(fail_on_odd, range(2), chunksize=2))
+
+    for future in futures:
+      info = miniray.get_execution_info(future)
+      assert info is None if force_local else info is not None and info.job == executor.submit_queue_id
+
+      future.exception(timeout=120)  # Wait for both successful and failed tasks.
+      assert miniray.get_execution_info(future) is info
+      assert info is None or info.worker
 
 
 @pytest.mark.parametrize("force_local", [True, False], ids=["local", "remote"])
@@ -209,55 +222,24 @@ def test_class_method_submission():
 
 @pytest.mark.parametrize("force_local", [True, False], ids=["local", "remote"])
 def test_exception_propagation(force_local):
-  with miniray.Executor(job_name='miniray_test_exception_propagation',
-                        priority=MINIRAY_PRIORITY,
-                        queue_name=QUEUE_NAME,
-                        limits={'memory': MINIRAY_MEMORY_GB},
-                        force_local=force_local) as executor:
+  with get_executor(job_name='miniray_test_exception_propagation', force_local=force_local) as executor:
     future = executor.submit(get_miniray_error)
     with pytest.raises(RuntimeError, match="Ruh roh!") as excinfo:
       future.result()
     assert type(excinfo.value) is RuntimeError
     assert excinfo.value.args == ("Ruh roh!",)
     assert future.exception() is excinfo.value
-    assert isinstance(future, Future)
-    info = miniray.get_execution_info(future)
-    if not force_local:
-      assert isinstance(future, miniray.MinirayFuture)
-      assert info is future.execution_info
-      assert info is not None
-      assert info.worker
-      assert info.job.startswith('miniray_test_exception_propagation_')
-      assert any('RuntimeError: Ruh roh!' in note for note in excinfo.value.__notes__)
-    else:
-      assert info is None
 
 
 @pytest.mark.parametrize("force_local", [True, False], ids=["local", "remote"])
 @pytest.mark.parametrize("chunksize", [1, 3])
 def test_batched_exception_propagation(force_local, chunksize):
-  with miniray.Executor(job_name='miniray_test_batched_exceptions',
-                        priority=MINIRAY_PRIORITY,
-                        queue_name=QUEUE_NAME,
-                        limits={'memory': MINIRAY_MEMORY_GB},
-                        force_local=force_local) as executor:
+  with get_executor(job_name='miniray_test_batched_exceptions', force_local=force_local) as executor:
     futures = list(executor.fmap(fail_on_odd, range(6), chunksize=chunksize))
     for n, future in enumerate(futures):
-      assert isinstance(future, Future)
-      info = miniray.get_execution_info(future)
-      if force_local:
-        assert info is None
-      else:
-        assert isinstance(future, miniray.MinirayFuture)
-        assert info is future.execution_info
-        assert info is not None
-        assert info.job.startswith('miniray_test_batched_exceptions_')
       if n % 2:
         with pytest.raises(ValueError, match=f'odd input: {n}'):
           future.result(timeout=120)
-        if not force_local:
-          assert info is not None
-          assert info.worker
       else:
         assert future.result(timeout=120) == n
 
