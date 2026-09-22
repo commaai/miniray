@@ -3,7 +3,7 @@ import time
 from pathlib import Path
 import numpy as np
 import pytest
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 
 import miniray
 from .dstate_helpers import (
@@ -25,6 +25,11 @@ class MinirayTestClass:
 
 def get_miniray_error():
   raise RuntimeError("Ruh roh!")
+
+def fail_on_odd(n):
+  if n % 2:
+    raise ValueError(f"odd input: {n}")
+  return n
 
 def is_even(n):
   return n % 2 == 0
@@ -75,7 +80,12 @@ def test_map_matches_local_and_threadpool():
 def test_submit_result():
   with get_executor(job_name='miniray_test_result') as executor:
     future = executor.submit(is_even, 96)
+    assert isinstance(future, miniray.MinirayFuture)
+    info = miniray.get_execution_info(future)
+    assert info is future.execution_info
+    assert info.job == executor.submit_queue_id
     assert future.result() is True
+    assert info.worker
 
 
 @pytest.mark.parametrize("force_local", [True, False], ids=["local", "remote"])
@@ -197,12 +207,62 @@ def test_class_method_submission():
         assert future.result() == expected
 
 
-def test_exception_propagation():
-  with get_executor(job_name='miniray_test_exception_propagation') as executor:
+@pytest.mark.parametrize("force_local", [True, False], ids=["local", "remote"])
+def test_exception_propagation(force_local):
+  with miniray.Executor(job_name='miniray_test_exception_propagation',
+                        priority=MINIRAY_PRIORITY,
+                        queue_name=QUEUE_NAME,
+                        limits={'memory': MINIRAY_MEMORY_GB},
+                        force_local=force_local) as executor:
     future = executor.submit(get_miniray_error)
-    with pytest.raises(miniray.MinirayError) as excinfo:
+    with pytest.raises(RuntimeError, match="Ruh roh!") as excinfo:
       future.result()
-    assert 'RuntimeError: Ruh roh!' in str(excinfo.value)
+    assert type(excinfo.value) is RuntimeError
+    assert excinfo.value.args == ("Ruh roh!",)
+    assert future.exception() is excinfo.value
+    assert isinstance(future, Future)
+    info = miniray.get_execution_info(future)
+    if not force_local:
+      assert isinstance(future, miniray.MinirayFuture)
+      assert info is future.execution_info
+      assert info is not None
+      assert info.worker
+      assert info.job.startswith('miniray_test_exception_propagation_')
+      assert any('RuntimeError: Ruh roh!' in note for note in excinfo.value.__notes__)
+    else:
+      assert info is None
+
+
+@pytest.mark.parametrize("force_local", [True, False], ids=["local", "remote"])
+@pytest.mark.parametrize("chunksize", [1, 3])
+def test_batched_exception_propagation(force_local, chunksize):
+  with miniray.Executor(job_name='miniray_test_batched_exceptions',
+                        priority=MINIRAY_PRIORITY,
+                        queue_name=QUEUE_NAME,
+                        limits={'memory': MINIRAY_MEMORY_GB},
+                        force_local=force_local) as executor:
+    futures = list(executor.fmap(fail_on_odd, range(6), chunksize=chunksize))
+    for n, future in enumerate(futures):
+      assert isinstance(future, Future)
+      info = miniray.get_execution_info(future)
+      if force_local:
+        assert info is None
+      else:
+        assert isinstance(future, miniray.MinirayFuture)
+        assert info is future.execution_info
+        assert info is not None
+        assert info.job.startswith('miniray_test_batched_exceptions_')
+      if n % 2:
+        with pytest.raises(ValueError, match=f'odd input: {n}'):
+          future.result(timeout=120)
+        if not force_local:
+          assert info is not None
+          assert info.worker
+      else:
+        assert future.result(timeout=120) == n
+
+    with pytest.raises(ValueError, match='odd input: 1'):
+      list(executor.map(fail_on_odd, range(3), chunksize=chunksize))
 
 
 def test_memory_limit():
