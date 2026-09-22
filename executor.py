@@ -532,14 +532,14 @@ def log(iterable: Iterable[Future], logger: Any = DEFAULT_LOGGER,
       statuses["Succeeded"] += 1
       results.append(result)
     except BaseException as e:
+      if not future.done() or future.cancelled() or future.exception() is not e:
+        raise
+
+      info = get_execution_info(future) or ExecutionInfo(job='local', worker='local')
+      job, worker = info.job, info.worker
       if isinstance(e, MinirayError):
-        job, worker = e.job, e.worker
         exception_type, exception_desc = e.exception_type, e.exception_desc
       else:
-        info = get_execution_info(future)
-        if info is None or not future.done() or future.cancelled() or future.exception() is not e:
-          raise
-        job, worker = info.job, info.worker
         exception_type, exception_desc = type(e).__name__, ''.join(traceback.format_exception(e))
       error = extract_error(exception_type)
       statuses[error] += 1
