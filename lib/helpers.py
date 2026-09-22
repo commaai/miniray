@@ -1,6 +1,8 @@
 import re
 import sys
 import logging
+import traceback
+from concurrent.futures import Future
 from typing import Optional
 from dataclasses import dataclass, asdict
 
@@ -51,10 +53,27 @@ def get_stream_logger(name, level=None):
   return logger
 
 
-def desc(e):
+def error_desc(e):
   return f"{type(e).__name__}: {str(e)}"
 
-def extract_error(e):
+
+def is_task_exception(future: Future, exc: BaseException) -> bool:
+  return future.done() and not future.cancelled() and future.exception() is exc
+
+
+def format_task_error(future: Future, exc: BaseException, *, prefix: str = 'FAILED TASK') -> str:
+  from miniray.executor import ExecutionInfo, MinirayError, get_execution_info
+
+  info = get_execution_info(future) or ExecutionInfo(job='local', worker='local')
+  desc = exc.exception_desc if isinstance(exc, MinirayError) else ''.join(traceback.format_exception(exc))
+  return f"{prefix} {info.job} [{info.worker}]\n{desc}"
+
+
+def extract_error(e: BaseException | str) -> str:
+  from miniray.executor import MinirayError
+
+  if isinstance(e, BaseException):
+    e = e.exception_type if isinstance(e, MinirayError) else type(e).__name__
   lines = e.strip().split('\n')
   last_line = lines[-1].split(':', 1)
   cls = last_line[0].split('.')[-1]

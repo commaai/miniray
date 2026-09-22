@@ -28,7 +28,7 @@ from tqdm import tqdm
 from types import TracebackType
 from typing import Any, Callable, Iterable, Iterator, NamedTuple, Optional, Sequence, cast
 
-from miniray.lib.helpers import Limits, extract_error, get_stream_logger
+from miniray.lib.helpers import Limits, extract_error, get_stream_logger, is_task_exception, format_task_error
 
 MAX_ARG_STRLEN = 131071  # max length for unix string arguments, see https://stackoverflow.com/a/29802900
 REDIS_HOST = os.getenv('REDIS_HOST', 'redis.comma.internal')
@@ -532,19 +532,14 @@ def log(iterable: Iterable[Future], logger: Any = DEFAULT_LOGGER,
       statuses["Succeeded"] += 1
       results.append(result)
     except BaseException as e:
-      if not future.done() or future.cancelled() or future.exception() is not e:
+      if not is_task_exception(future, e):
         raise
 
       info = get_execution_info(future) or ExecutionInfo(job='local', worker='local')
-      job, worker = info.job, info.worker
-      if isinstance(e, MinirayError):
-        exception_type, exception_desc = e.exception_type, e.exception_desc
-      else:
-        exception_type, exception_desc = type(e).__name__, ''.join(traceback.format_exception(e))
-      error = extract_error(exception_type)
+      error = extract_error(e)
       statuses[error] += 1
-      statuses_hosts[error].append(worker)
-      logger.error(f"FAILED TASK {job} [{worker}]\n{exception_desc}")
+      statuses_hosts[error].append(info.worker)
+      logger.error(format_task_error(future, e))
 
   logger.info("\n\n=== Miniray job summary ===")
   logger.info(f"Total segments: {sum(statuses.values())}")
