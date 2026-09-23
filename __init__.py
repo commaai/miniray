@@ -15,7 +15,7 @@ from miniray.executor import (
   get_tasks_key,
   log,
 )
-from miniray.lib.helpers import Limits, is_task_exception, format_task_error
+from miniray.lib.helpers import Limits, get_exception_details, is_task_exception, format_task_error
 
 __all__ = [
   "Executor",
@@ -30,6 +30,7 @@ __all__ = [
   "JobMetadata",
   "REMOTE_QUEUE",
   "get_execution_info",
+  "get_exception_details",
   "is_task_exception",
   "format_task_error",
   "get_metadata_key",

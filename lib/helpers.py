@@ -57,23 +57,29 @@ def error_desc(e):
   return f"{type(e).__name__}: {str(e)}"
 
 
+def get_exception_details(exc: BaseException) -> tuple[str, str]:
+  from miniray.executor import MinirayError
+
+  if isinstance(exc, MinirayError):
+    return exc.exception_type, exc.exception_desc
+  return type(exc).__name__, ''.join(traceback.format_exception(exc))
+
+
 def is_task_exception(future: Future, exc: BaseException) -> bool:
   return future.done() and not future.cancelled() and future.exception() is exc
 
 
 def format_task_error(future: Future, exc: BaseException, *, prefix: str = 'FAILED TASK') -> str:
-  from miniray.executor import ExecutionInfo, MinirayError, get_execution_info
+  from miniray.executor import ExecutionInfo, get_execution_info
 
   info = get_execution_info(future) or ExecutionInfo(job='local', worker='local')
-  desc = exc.exception_desc if isinstance(exc, MinirayError) else ''.join(traceback.format_exception(exc))
+  _, desc = get_exception_details(exc)
   return f"{prefix} {info.job} [{info.worker}]\n{desc}"
 
 
 def extract_error(e: BaseException | str) -> str:
-  from miniray.executor import MinirayError
-
   if isinstance(e, BaseException):
-    e = e.exception_type if isinstance(e, MinirayError) else type(e).__name__
+    e, _ = get_exception_details(e)
   lines = e.strip().split('\n')
   last_line = lines[-1].split(':', 1)
   cls = last_line[0].split('.')[-1]
