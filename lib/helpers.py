@@ -33,12 +33,10 @@ class Limits:
 
 
 class MinirayError(Exception):
-  def __init__(self, exception_type: str, exception_desc: str, job: str, worker: str):
-    super().__init__(f"Task execution failed: {job} [{worker}]\n{exception_desc}")
+  def __init__(self, exception_type: str, exception_desc: str):
+    super().__init__(f"Task execution failed:\n{exception_desc}")
     self.exception_type = exception_type
     self.exception_desc = exception_desc
-    self.job = job
-    self.worker = worker
 
 
 @dataclass

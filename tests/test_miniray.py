@@ -194,7 +194,9 @@ def test_d_state_task_crashes_worker():
 
   assert excinfo.value.exception_type == "RuntimeError"
   assert "task lost" in excinfo.value.exception_desc
-  wait_for_worker_to_disappear(QUEUE_NAME, excinfo.value.worker)
+  info = miniray.get_execution_info(future)
+  assert info is not None
+  wait_for_worker_to_disappear(QUEUE_NAME, info.worker)
 
 
 def test_class_method_submission():

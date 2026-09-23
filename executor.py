@@ -410,7 +410,7 @@ class Executor(BaseExecutor):
           worker = claimed.decode() if claimed else ""
           for future in futures:
             future.execution_info.worker = worker
-            future.set_exception(MinirayError("RuntimeError", f"task lost ({task_uuid})", self.submit_queue_id, worker))
+            future.set_exception(MinirayError("RuntimeError", f"task lost ({task_uuid})"))
 
   def _pack_task(self, function_ptr: str, pickled_fn: bytes,
     args: Sequence[Any], kwargs: dict[str, Any], task_uuid: str) -> tuple[str, bytes]:
@@ -469,8 +469,7 @@ class Executor(BaseExecutor):
             self._resubmit_task(futures, header, record, reason='result payload lost (worker redis recreated)')
           else:
             for future in futures:
-              future.set_exception(MinirayError(
-                "MinirayError", MISSING_RESULT_PAYLOAD_ERROR, header.job, header.worker))
+              future.set_exception(MinirayError("MinirayError", MISSING_RESULT_PAYLOAD_ERROR))
         else:
           subtasks = cloudpickle.loads(result_payload)
           for future, subtask in zip(futures, subtasks, strict=True):
@@ -482,11 +481,11 @@ class Executor(BaseExecutor):
         self._resubmit_task(futures, header, record, 'killed by worker shutdown')
       else:
         for future in futures:
-          future.set_exception(MinirayError(header.exception_type, header.exception_desc, header.job, header.worker))
+          future.set_exception(MinirayError(header.exception_type, header.exception_desc))
     except RedisConnectionError:
       for future in futures:
         future.set_exception(MinirayError(
-          "RedisConnectionError", "lost connection to redis while fetching result payload", header.job, header.worker))
+          "RedisConnectionError", "lost connection to redis while fetching result payload"))
     except Exception as e:
       for future in futures:
         future.set_exception(e)
