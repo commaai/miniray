@@ -1,7 +1,6 @@
 from miniray.executor import (
   Executor,
   LocalExecutor,
-  MinirayError,
   MinirayResultHeader,
   TaskRecord,
   TaskState,
@@ -12,18 +11,27 @@ from miniray.executor import (
   get_tasks_key,
   log,
 )
-from miniray.lib.helpers import Limits
+from miniray.lib.helpers import (
+  Limits, MinirayError, MinirayFuture, ExecutionInfo,
+  get_execution_info, get_exception_details, is_task_exception, format_task_error,
+)
 
 __all__ = [
   "Executor",
   "LocalExecutor",
   "MinirayError",
+  "MinirayFuture",
   "MinirayResultHeader",
+  "ExecutionInfo",
   "TaskRecord",
   "TaskState",
   "JobConfig",
   "JobMetadata",
   "REMOTE_QUEUE",
+  "get_execution_info",
+  "get_exception_details",
+  "is_task_exception",
+  "format_task_error",
   "get_metadata_key",
   "get_tasks_key",
   "log",

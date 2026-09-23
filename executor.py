@@ -19,6 +19,7 @@ from dataclasses import dataclass, asdict, field, replace
 from datetime import datetime
 from collections import Counter, defaultdict
 from concurrent.futures import Future, Executor as BaseExecutor, ProcessPoolExecutor, as_completed
+from concurrent.futures.process import _ExceptionWithTraceback
 from functools import partial, cache
 from itertools import batched, islice
 from pathlib import Path
@@ -28,7 +29,10 @@ from tqdm import tqdm
 from types import TracebackType
 from typing import Any, Callable, Iterable, Iterator, NamedTuple, Optional, Sequence, cast
 
-from miniray.lib.helpers import Limits, extract_error, get_stream_logger
+from miniray.lib.helpers import (
+  Limits, MinirayError, ExecutionInfo, MinirayFuture, get_execution_info,
+  extract_error, get_stream_logger, is_task_exception, format_task_error,
+)
 
 MAX_ARG_STRLEN = 131071  # max length for unix string arguments, see https://stackoverflow.com/a/29802900
 REDIS_HOST = os.getenv('REDIS_HOST', 'redis.comma.internal')
@@ -53,15 +57,6 @@ XX_BASEPATH = Path(__file__).resolve().parent.parent
 XX_BASEDIR = str(XX_BASEPATH)
 CACHE_ROOT = Path("/code.nfs/branches/caches")
 DEFAULT_CODEDIR = Path('/code.nfs/xx')
-
-
-class MinirayError(Exception):
-  def __init__(self, exception_type: str, exception_desc: str, job: str, worker: str):
-    super().__init__(f"Task execution failed: {job} [{worker}]\n{exception_desc}")
-    self.exception_type = exception_type
-    self.exception_desc = exception_desc
-    self.job = job
-    self.worker = worker
 
 
 class ShutdownMode(StrEnum):
@@ -108,10 +103,8 @@ class MinirayResultHeader(NamedTuple):
   task_uuid: str
 
 class MiniraySubTaskResult(NamedTuple):
-  succeeded: bool
-  exception_type: str
-  exception_desc: str
-  result: Any
+  result: Any = None
+  exception: Optional[BaseException | _ExceptionWithTraceback] = None
 
 @dataclass
 class JobConfig:
@@ -156,9 +149,9 @@ def _execute_batch(fn, *batch, **kwargs):
   results = []
   for args in batch:
     try:
-      results.append(MiniraySubTaskResult(True, "", "", fn(*args, **kwargs)))
+      results.append(MiniraySubTaskResult(result=fn(*args, **kwargs)))
     except BaseException as e:
-      results.append(MiniraySubTaskResult(False, type(e).__name__, traceback.format_exc(), None))
+      results.append(MiniraySubTaskResult(exception=_ExceptionWithTraceback(e, cast(TracebackType, e.__traceback__))))
   return _wrap_result_local_redis(results, timeout_seconds=DEFAULT_RESULT_PAYLOAD_TIMEOUT_SECONDS)
 
 def _wrap_result_local_redis(data: Any, timeout_seconds: int) -> tuple[str, str]:
@@ -247,7 +240,7 @@ class Executor(BaseExecutor):
     self.submit_queue_id = f'{job_desc}-{self.config.queue_name}'
     self.result_queue_id = f'fq-{self.submit_queue_id}'
 
-    self._futures: dict[str, tuple[list[Future], bool, bytes]] = {}
+    self._futures: dict[str, tuple[list[MinirayFuture], bool, bytes]] = {}
     self._submit_redis_master = StrictRedis(host=self.config.redis_host, port=6379, db=1, socket_keepalive=True)
     self._result_redis = StrictRedis(host=self.config.redis_host, port=6379, db=5, socket_keepalive=True)
     self._claimed_redis = StrictRedis(host=self.config.redis_host, port=6379, db=2, socket_keepalive=True)
@@ -308,9 +301,9 @@ class Executor(BaseExecutor):
       self._submit_redis_master.delete(
         get_tasks_key(self.submit_queue_id), self.submit_queue_id, get_metadata_key(self.submit_queue_id))
 
-  def submit(self, fn: Callable, /, *args, **kwargs) -> Future:
+  def submit(self, fn: Callable, /, *args, **kwargs) -> MinirayFuture:
     assert not self._shutdown_reader_thread, "Cannot submit new tasks after shutdown has started"
-    future: Future = Future()
+    future = MinirayFuture(job=self.submit_queue_id)
     task_uuid = str(uuid.uuid4())
     function_ptr = self._cache_func_in_redis(fn)
     task = self._pack_task(function_ptr, b'', [args], kwargs, task_uuid)
@@ -333,10 +326,10 @@ class Executor(BaseExecutor):
     self._submit_redis_master.set(function_ptr, pickled_fn, ex=7*24*60*60)
     return function_ptr
 
-  def fmap(self, fn: Callable, *iterables: Iterable[Any], chunksize: int = 1) -> Iterator[Future]:
+  def fmap(self, fn: Callable, *iterables: Iterable[Any], chunksize: int = 1) -> Iterator[MinirayFuture]:
     assert not self._shutdown_reader_thread, "Cannot submit new tasks after shutdown has started"
     function_ptr = self._cache_func_in_redis(fn)
-    submitted_queue: Queue[Optional[Future]] = Queue()
+    submitted_queue: Queue[Optional[MinirayFuture]] = Queue()
     writer_thread = threading.Thread(
       target=self._writer_loop, args=(submitted_queue, function_ptr, list(iterables), chunksize), daemon=True)
     writer_thread.start()
@@ -349,7 +342,7 @@ class Executor(BaseExecutor):
 
   # Worker threads
 
-  def _writer_loop(self, submitted_queue: Queue[Optional[Future]],
+  def _writer_loop(self, submitted_queue: Queue[Optional[MinirayFuture]],
     function_ptr: str, iterables: list[Iterable[Any]], chunksize: int) -> None:
     try:
       args_iterator = zip(*iterables, strict=True)
@@ -361,7 +354,7 @@ class Executor(BaseExecutor):
         for batch in batched(args, chunksize):
           task_uuid = str(uuid.uuid4())
           task_args[task_uuid] = batch
-          task_futures[task_uuid] = [Future() for _ in batch]
+          task_futures[task_uuid] = [MinirayFuture(job=self.submit_queue_id) for _ in batch]
           for future in task_futures[task_uuid]:
             submitted_queue.put(future)
         tasks = {}
@@ -414,7 +407,8 @@ class Executor(BaseExecutor):
           claimed = cast(Optional[bytes], self._claimed_redis.get(f"claimed:{task_uuid}"))
           worker = claimed.decode() if claimed else ""
           for future in futures:
-            future.set_exception(MinirayError("RuntimeError", f"task lost ({task_uuid})", self.submit_queue_id, worker))
+            future.execution_info.worker = worker
+            future.set_exception(MinirayError("RuntimeError", f"task lost ({task_uuid})"))
 
   def _pack_task(self, function_ptr: str, pickled_fn: bytes,
     args: Sequence[Any], kwargs: dict[str, Any], task_uuid: str) -> tuple[str, bytes]:
@@ -445,7 +439,8 @@ class Executor(BaseExecutor):
       results[header.task_uuid] = (header, dat[1] if len(dat) > 1 else b'')
     return results
 
-  def _resubmit_task(self, futures: list[Future], header: MinirayResultHeader, record: bytes, reason: str) -> None:
+  def _resubmit_task(self, futures: list[MinirayFuture],
+    header: MinirayResultHeader, record: bytes, reason: str) -> None:
     new_uuid = str(uuid.uuid4())
     record = json.dumps(TaskRecord(*json.loads(record))._replace(uuid=new_uuid), ensure_ascii=False).encode('utf-8')
     self._submit_tasks([(new_uuid, record)])
@@ -457,6 +452,9 @@ class Executor(BaseExecutor):
       print(f"[ERROR] finished unstarted task: {header.task_uuid} [{header.worker}]", file=sys.stderr)
       return
     futures, _, record = self._futures.pop(header.task_uuid)
+    for future in futures:
+      future.execution_info.job = header.job
+      future.execution_info.worker = header.worker
 
     try:
       if header.succeeded:
@@ -469,25 +467,23 @@ class Executor(BaseExecutor):
             self._resubmit_task(futures, header, record, reason='result payload lost (worker redis recreated)')
           else:
             for future in futures:
-              future.set_exception(MinirayError(
-                "MinirayError", MISSING_RESULT_PAYLOAD_ERROR, header.job, header.worker))
+              future.set_exception(MinirayError("MinirayError", MISSING_RESULT_PAYLOAD_ERROR))
         else:
           subtasks = cloudpickle.loads(result_payload)
           for future, subtask in zip(futures, subtasks, strict=True):
-            if subtask.succeeded:
+            if subtask.exception is None:
               future.set_result(subtask.result)
             else:
-              future.set_exception(MinirayError(
-                subtask.exception_type, subtask.exception_desc, header.job, header.worker))
+              future.set_exception(subtask.exception)
       elif header.exception_type == "WorkerShutdown":
         self._resubmit_task(futures, header, record, 'killed by worker shutdown')
       else:
         for future in futures:
-          future.set_exception(MinirayError(header.exception_type, header.exception_desc, header.job, header.worker))
+          future.set_exception(MinirayError(header.exception_type, header.exception_desc))
     except RedisConnectionError:
       for future in futures:
         future.set_exception(MinirayError(
-          "RedisConnectionError", "lost connection to redis while fetching result payload", header.job, header.worker))
+          "RedisConnectionError", "lost connection to redis while fetching result payload"))
     except Exception as e:
       for future in futures:
         future.set_exception(e)
@@ -509,11 +505,15 @@ def log(iterable: Iterable[Future], logger: Any = DEFAULT_LOGGER,
       result = future.result()
       statuses["Succeeded"] += 1
       results.append(result)
-    except MinirayError as e:
-      error = extract_error(e.exception_type)
+    except BaseException as e:
+      if not is_task_exception(future, e):
+        raise
+
+      info = get_execution_info(future) or ExecutionInfo(job='local', worker='local')
+      error = extract_error(e)
       statuses[error] += 1
-      statuses_hosts[error].append(e.worker)
-      logger.error(f"FAILED TASK {e.job} [{e.worker}]\n{e.exception_desc}")
+      statuses_hosts[error].append(info.worker)
+      logger.error(format_task_error(future, e))
 
   logger.info("\n\n=== Miniray job summary ===")
   logger.info(f"Total segments: {sum(statuses.values())}")

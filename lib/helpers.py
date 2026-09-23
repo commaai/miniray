@@ -1,6 +1,9 @@
 import re
 import sys
 import logging
+import traceback
+from concurrent.futures import Future
+from concurrent.futures.process import _RemoteTraceback
 from typing import Optional
 from dataclasses import dataclass, asdict
 
@@ -30,6 +33,32 @@ class Limits:
     return self.small_gpu_memory > 0 or self.big_gpu_memory > 0 or self.triton
 
 
+class MinirayError(Exception):
+  def __init__(self, exception_type: str, exception_desc: str):
+    super().__init__(f"Task execution failed:\n{exception_desc}")
+    self.exception_type = exception_type
+    self.exception_desc = exception_desc
+
+  def __reduce__(self):
+    return type(self), (self.exception_type, self.exception_desc), self.__dict__
+
+
+@dataclass
+class ExecutionInfo:
+  job: str
+  worker: str = ''
+
+
+class MinirayFuture(Future):
+  def __init__(self, job: str = ''):
+    super().__init__()
+    self.execution_info = ExecutionInfo(job)
+
+
+def get_execution_info(future: Future) -> Optional[ExecutionInfo]:
+  return future.execution_info if isinstance(future, MinirayFuture) else None
+
+
 def set_random_seeds(seed: int):
   import os
   import random
@@ -51,10 +80,33 @@ def get_stream_logger(name, level=None):
   return logger
 
 
-def desc(e):
+def error_desc(e):
   return f"{type(e).__name__}: {str(e)}"
 
-def extract_error(e):
+
+def get_exception_details(exc: BaseException) -> tuple[str, str]:
+  if isinstance(exc, MinirayError):
+    return exc.exception_type, exc.exception_desc
+  if isinstance(exc.__cause__, _RemoteTraceback):
+    desc = str(exc.__cause__).removeprefix('\n"""\n').removesuffix('"""')
+  else:
+    desc = ''.join(traceback.format_exception(exc))
+  return type(exc).__name__, desc
+
+
+def is_task_exception(future: Future, exc: BaseException) -> bool:
+  return future.done() and not future.cancelled() and future.exception() is exc
+
+
+def format_task_error(future: Future, exc: BaseException, *, prefix: str = 'FAILED TASK') -> str:
+  info = get_execution_info(future) or ExecutionInfo(job='local', worker='local')
+  _, desc = get_exception_details(exc)
+  return f"{prefix} {info.job} [{info.worker}]\n{desc}"
+
+
+def extract_error(e: BaseException | str) -> str:
+  if isinstance(e, BaseException):
+    e, _ = get_exception_details(e)
   lines = e.strip().split('\n')
   last_line = lines[-1].split(':', 1)
   cls = last_line[0].split('.')[-1]

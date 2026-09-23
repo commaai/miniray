@@ -43,7 +43,7 @@ from miniray.lib.system_helpers import (
 )
 from miniray.lib.statsd_helpers import statsd
 from miniray.lib.helpers import (
-  Limits, desc, GB_TO_BYTES, MAX_WORKER_LOOP_SECONDS, TASK_TIMEOUT_GRACE_SECONDS, JOB_CACHE_SIZE,
+  Limits, error_desc, GB_TO_BYTES, MAX_WORKER_LOOP_SECONDS, TASK_TIMEOUT_GRACE_SECONDS, JOB_CACHE_SIZE,
 )
 from miniray.lib.uv import sync_venv_cache, cleanup_venvs, populate_venv_cache_from_disk, pycache_dir_for_venv
 from miniray.executor import (
@@ -383,9 +383,9 @@ class Task:
         result_header = MinirayResultHeader(self.job, True, HOST_NAME, "", "", self.task_uuid)
         self.r_results.lpush(f'fq-{self.job}', json.dumps(result_header).encode() + b'\x00' + payload)
       else:
-        error_type, error_desc = json.loads(payload)
+        error_type, error_msg = json.loads(payload)
         statsd.event('pipeline.worker.task_error', tags={'task_id': self.job, 'type': error_type})
-        result_header = MinirayResultHeader(self.job, False, HOST_NAME, error_type, error_desc, self.task_uuid)
+        result_header = MinirayResultHeader(self.job, False, HOST_NAME, error_type, error_msg, self.task_uuid)
         self.r_results.lpush(f'fq-{self.job}', json.dumps(result_header))
 
       self.r_results.expire(f'fq-{self.job}', 86400)  # extend availability for 24 hours
@@ -409,7 +409,7 @@ class Task:
           cleanup_shm_by_gid(self.alloc_id, self.triton_client, self.task_gid)
           break
         except Exception as e:
-          print(f"[worker] {self.cgroup_name} /dev/shm cleanup failed: {desc(e)}")
+          print(f"[worker] {self.cgroup_name} /dev/shm cleanup failed: {error_desc(e)}")
           if exiting:
             break
           time.sleep(1)
@@ -494,7 +494,7 @@ def update_job_metadatas(r_master: StrictRedis, jobs: list[str],
         job_errors[job] = None
       except Exception as e:
         job_metadatas[job] = JobMetadata(False, 1, "", "", Limits().asdict(), {}, "")
-        job_errors[job] = ("JobMetadataError", f"{job}: {desc(e)}")
+        job_errors[job] = ("JobMetadataError", f"{job}: {error_desc(e)}")
 
 def get_task(resource_manager: ResourceManager, r_master: StrictRedis,
   r_results: StrictRedis, r_claimed: StrictRedis, job: str,
@@ -505,7 +505,7 @@ def get_task(resource_manager: ResourceManager, r_master: StrictRedis,
   try:
     resource_manager.consume(limits, job, task_uuid=temp_key)
   except ResourceLimitError as e:
-    print(f"[worker] {MINIRAY_TARGET_NAME} resource limit: {desc(e)}")
+    print(f"[worker] {MINIRAY_TARGET_NAME} resource limit: {error_desc(e)}")
     return None
 
   raw_task_uuid = cast(Optional[bytes], r_master.rpop(job))
@@ -553,7 +553,7 @@ def ensure_venvs(jobs: list[str], job_metadatas: LRU[str, JobMetadata], job_erro
       try:
         venv_cache[job] = pending.pop(job).result()
       except Exception as e:
-        job_errors[job] = ("VenvSyncError", f"Failed to sync venv for job {job}: {desc(e)}")
+        job_errors[job] = ("VenvSyncError", f"Failed to sync venv for job {job}: {error_desc(e)}")
         venv_cache[job] = ""
         print(f"[worker] venv sync failed for job {job}: {e}")
   for job in jobs:

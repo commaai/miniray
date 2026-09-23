@@ -26,6 +26,11 @@ class MinirayTestClass:
 def get_miniray_error():
   raise RuntimeError("Ruh roh!")
 
+def fail_on_odd(n):
+  if n % 2:
+    raise ValueError(f"odd input: {n}")
+  return n
+
 def is_even(n):
   return n % 2 == 0
 
@@ -49,11 +54,11 @@ def spawn_zombie():
     os._exit(0)
   return "done"
 
-def get_executor(job_name: str) -> miniray.Executor:
-  return miniray.Executor(job_name=job_name,
-                          priority=MINIRAY_PRIORITY,
-                          queue_name=QUEUE_NAME,
-                          limits={'memory': MINIRAY_MEMORY_GB})
+def get_executor(job_name: str, **kwargs) -> miniray.Executor:
+  kwargs.setdefault('priority', MINIRAY_PRIORITY)
+  kwargs.setdefault('queue_name', QUEUE_NAME)
+  kwargs.setdefault('limits', {'memory': MINIRAY_MEMORY_GB})
+  return miniray.Executor(job_name=job_name, **kwargs)
 
 
 # Tests
@@ -79,18 +84,31 @@ def test_submit_result():
 
 
 @pytest.mark.parametrize("force_local", [True, False], ids=["local", "remote"])
+@pytest.mark.parametrize("method", ["submit", "fmap"])
+def test_execution_info(force_local, method):
+  with get_executor(job_name='miniray_test_execution_info', force_local=force_local) as executor:
+    if method == 'submit':
+      futures = [executor.submit(is_even, 96), executor.submit(get_miniray_error)]
+    else:
+      futures = list(executor.fmap(fail_on_odd, range(2), chunksize=2))
+
+    for future in futures:
+      info = miniray.get_execution_info(future)
+      assert info is None if force_local else info is not None and info.job == executor.submit_queue_id
+
+      future.exception(timeout=120)  # Wait for both successful and failed tasks.
+      assert miniray.get_execution_info(future) is info
+      assert info is None or info.worker
+
+
+@pytest.mark.parametrize("force_local", [True, False], ids=["local", "remote"])
 def test_env_propagates_to_task_runtime(monkeypatch, force_local):
   key = "MINIRAY_TEST_LOCAL_ENV"
   value = "local_env_is_forwarded"
   monkeypatch.delenv(key, raising=False)
   timeout_seconds = 120
 
-  with miniray.Executor(job_name='miniray_test_env',
-                        priority=MINIRAY_PRIORITY,
-                        queue_name=QUEUE_NAME,
-                        limits={'memory': MINIRAY_MEMORY_GB},
-                        env={key: value},
-                        force_local=force_local) as executor:
+  with get_executor(job_name='miniray_test_env', env={key: value}, force_local=force_local) as executor:
     future = executor.submit(os.getenv, key)
     assert future.result(timeout=timeout_seconds) == value
 
@@ -125,10 +143,8 @@ def test_large_payloads():
 def test_timeout():
   timeout_seconds = 1
   sleep_seconds = 2
-  with miniray.Executor(job_name='miniray_test_timeout',
-                        priority=MINIRAY_PRIORITY,
-                        queue_name=QUEUE_NAME,
-                        limits={'memory': MINIRAY_MEMORY_GB, 'timeout_seconds': timeout_seconds}) as executor:
+  with get_executor(job_name='miniray_test_timeout',
+                    limits={'memory': MINIRAY_MEMORY_GB, 'timeout_seconds': timeout_seconds}) as executor:
     future = executor.submit(slow_sleep, sleep_seconds)
     with pytest.raises(miniray.MinirayError) as excinfo:
       future.result()
@@ -138,10 +154,8 @@ def test_timeout():
 @pytest.mark.parametrize(("stream", "fd"), [("stdout", 1), ("stderr", 2)])
 def test_large_output_does_not_block(stream, fd):
   size = 128 * 1024
-  with miniray.Executor(job_name=f'miniray_test_{stream}',
-                        priority=MINIRAY_PRIORITY,
-                        queue_name=QUEUE_NAME,
-                        limits={'memory': MINIRAY_MEMORY_GB, 'timeout_seconds': 5}) as executor:
+  with get_executor(job_name=f'miniray_test_{stream}',
+                    limits={'memory': MINIRAY_MEMORY_GB, 'timeout_seconds': 5}) as executor:
     assert executor.submit(fill_output, fd, size).result() == size
 
 
@@ -150,10 +164,8 @@ def test_d_state_tasks_do_not_crash_worker():
   hold_seconds = 30
   timeout_seconds = 10
 
-  with miniray.Executor(job_name="miniray_test_dstate_no_crash",
-                        priority=MINIRAY_PRIORITY,
-                        queue_name=QUEUE_NAME,
-                        limits={"memory": MINIRAY_MEMORY_GB, "timeout_seconds": timeout_seconds}) as executor:
+  with get_executor(job_name="miniray_test_dstate_no_crash",
+                    limits={"memory": MINIRAY_MEMORY_GB, "timeout_seconds": timeout_seconds}) as executor:
     futures = [executor.submit(block_in_frozen_filesystem, hold_seconds) for _ in range(DSTATE_TASK_COUNT)]
     t0 = time.monotonic()
     errors = []
@@ -174,17 +186,17 @@ def test_d_state_task_crashes_worker():
   hold_seconds = 90
   timeout_seconds = 10
 
-  with miniray.Executor(job_name="miniray_test_dstate_crash",
-                        priority=MINIRAY_PRIORITY,
-                        queue_name=QUEUE_NAME,
-                        limits={"memory": MINIRAY_MEMORY_GB, "timeout_seconds": timeout_seconds}) as executor:
+  with get_executor(job_name="miniray_test_dstate_crash",
+                    limits={"memory": MINIRAY_MEMORY_GB, "timeout_seconds": timeout_seconds}) as executor:
     future = executor.submit(block_in_frozen_filesystem, hold_seconds)
     with pytest.raises(miniray.MinirayError) as excinfo:
       future.result(timeout=hold_seconds + 120)
 
   assert excinfo.value.exception_type == "RuntimeError"
   assert "task lost" in excinfo.value.exception_desc
-  wait_for_worker_to_disappear(QUEUE_NAME, excinfo.value.worker)
+  info = miniray.get_execution_info(future)
+  assert info is not None
+  wait_for_worker_to_disappear(QUEUE_NAME, info.worker)
 
 
 def test_class_method_submission():
@@ -197,12 +209,31 @@ def test_class_method_submission():
         assert future.result() == expected
 
 
-def test_exception_propagation():
-  with get_executor(job_name='miniray_test_exception_propagation') as executor:
+@pytest.mark.parametrize("force_local", [True, False], ids=["local", "remote"])
+def test_exception_propagation(force_local):
+  with get_executor(job_name='miniray_test_exception_propagation', force_local=force_local) as executor:
     future = executor.submit(get_miniray_error)
-    with pytest.raises(miniray.MinirayError) as excinfo:
+    with pytest.raises(RuntimeError, match="Ruh roh!") as excinfo:
       future.result()
-    assert 'RuntimeError: Ruh roh!' in str(excinfo.value)
+    assert type(excinfo.value) is RuntimeError
+    assert excinfo.value.args == ("Ruh roh!",)
+    assert future.exception() is excinfo.value
+
+
+@pytest.mark.parametrize("force_local", [True, False], ids=["local", "remote"])
+@pytest.mark.parametrize("chunksize", [1, 3])
+def test_batched_exception_propagation(force_local, chunksize):
+  with get_executor(job_name='miniray_test_batched_exceptions', force_local=force_local) as executor:
+    futures = list(executor.fmap(fail_on_odd, range(6), chunksize=chunksize))
+    for n, future in enumerate(futures):
+      if n % 2:
+        with pytest.raises(ValueError, match=f'odd input: {n}'):
+          future.result(timeout=120)
+      else:
+        assert future.result(timeout=120) == n
+
+    with pytest.raises(ValueError, match='odd input: 1'):
+      list(executor.map(fail_on_odd, range(3), chunksize=chunksize))
 
 
 def test_memory_limit():
@@ -216,10 +247,7 @@ def test_memory_limit():
   import hashlib
   def allocate_and_hash(size): return hashlib.md5(os.urandom(size)).hexdigest()
 
-  with miniray.Executor(job_name='miniray_test_memory_limit',
-                        priority=MINIRAY_PRIORITY,
-                        queue_name=QUEUE_NAME,
-                        limits={'memory': memory_limit_gb}) as executor:
+  with get_executor(job_name='miniray_test_memory_limit', limits={'memory': memory_limit_gb}) as executor:
     # 10% under the limit should pass
     future_under = executor.submit(allocate_and_hash, under_limit_bytes)
     assert len(future_under.result()) == 32  # md5 hex digest length
@@ -272,11 +300,7 @@ def test_nonexistent_codedir():
   """Tasks submitted with a codedir that doesn't exist on the worker should fail, not crash the worker."""
   import tempfile
   tmpdir = tempfile.mkdtemp()
-  executor = miniray.Executor(job_name='miniray_test_bad_codedir',
-                              priority=MINIRAY_PRIORITY,
-                              queue_name=QUEUE_NAME,
-                              codedir=tmpdir,
-                              limits={'memory': MINIRAY_MEMORY_GB})
+  executor = get_executor(job_name='miniray_test_bad_codedir', codedir=tmpdir)
   executor.__enter__()
   try:
     Path(tmpdir).rmdir()  # remove so it doesn't exist when the worker tries to use it
@@ -296,10 +320,7 @@ def test_malformed_job_metadata_does_not_crash_worker():
   from redis import StrictRedis
   from miniray.executor import get_metadata_key
 
-  with miniray.Executor(job_name='miniray_test_malformed_metadata',
-                        priority=MINIRAY_PRIORITY, queue_name=QUEUE_NAME,
-                        limits={'memory': MINIRAY_MEMORY_GB},
-                        queue_timeout=60) as ex:
+  with get_executor(job_name='miniray_test_malformed_metadata', queue_timeout=60) as ex:
     r = StrictRedis(host=ex.config.redis_host, port=6379, db=1)
     r.set(get_metadata_key(ex.submit_queue_id), b'not valid json')
 
