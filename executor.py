@@ -19,6 +19,7 @@ from dataclasses import dataclass, asdict, field, replace
 from datetime import datetime
 from collections import Counter, defaultdict
 from concurrent.futures import Future, Executor as BaseExecutor, ProcessPoolExecutor, as_completed
+from concurrent.futures.process import _ExceptionWithTraceback
 from functools import partial, cache
 from itertools import batched, islice
 from pathlib import Path
@@ -103,7 +104,7 @@ class MinirayResultHeader(NamedTuple):
 
 class MiniraySubTaskResult(NamedTuple):
   result: Any = None
-  exception: Optional[BaseException] = None
+  exception: Optional[BaseException | _ExceptionWithTraceback] = None
 
 @dataclass
 class JobConfig:
@@ -150,10 +151,7 @@ def _execute_batch(fn, *batch, **kwargs):
     try:
       results.append(MiniraySubTaskResult(result=fn(*args, **kwargs)))
     except BaseException as e:
-      # Tracebacks are not pickled, but exception notes are.
-      e.add_note(traceback.format_exc())
-      e.__traceback__ = None
-      results.append(MiniraySubTaskResult(exception=e))
+      results.append(MiniraySubTaskResult(exception=_ExceptionWithTraceback(e, cast(TracebackType, e.__traceback__))))
   return _wrap_result_local_redis(results, timeout_seconds=DEFAULT_RESULT_PAYLOAD_TIMEOUT_SECONDS)
 
 def _wrap_result_local_redis(data: Any, timeout_seconds: int) -> tuple[str, str]:
