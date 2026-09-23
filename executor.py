@@ -28,7 +28,10 @@ from tqdm import tqdm
 from types import TracebackType
 from typing import Any, Callable, Iterable, Iterator, NamedTuple, Optional, Sequence, cast
 
-from miniray.lib.helpers import Limits, extract_error, get_stream_logger, is_task_exception, format_task_error
+from miniray.lib.helpers import (
+  Limits, MinirayError, ExecutionInfo, MinirayFuture, get_execution_info,
+  extract_error, get_stream_logger, is_task_exception, format_task_error,
+)
 
 MAX_ARG_STRLEN = 131071  # max length for unix string arguments, see https://stackoverflow.com/a/29802900
 REDIS_HOST = os.getenv('REDIS_HOST', 'redis.comma.internal')
@@ -53,32 +56,6 @@ XX_BASEPATH = Path(__file__).resolve().parent.parent
 XX_BASEDIR = str(XX_BASEPATH)
 CACHE_ROOT = Path("/code.nfs/branches/caches")
 DEFAULT_CODEDIR = Path('/code.nfs/xx')
-
-
-class MinirayError(Exception):
-  def __init__(self, exception_type: str, exception_desc: str, job: str, worker: str):
-    super().__init__(f"Task execution failed: {job} [{worker}]\n{exception_desc}")
-    self.exception_type = exception_type
-    self.exception_desc = exception_desc
-    self.job = job
-    self.worker = worker
-
-
-@dataclass
-class ExecutionInfo:
-  job: str
-  worker: str = ''
-
-
-class MinirayFuture(Future):
-  def __init__(self, job: str = ''):
-    super().__init__()
-    self.execution_info = ExecutionInfo(job)
-
-
-def get_execution_info(future: Future) -> Optional[ExecutionInfo]:
-  """Return remote execution info, or None for futures from other executors."""
-  return future.execution_info if isinstance(future, MinirayFuture) else None
 
 
 class ShutdownMode(StrEnum):

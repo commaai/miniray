@@ -32,6 +32,31 @@ class Limits:
     return self.small_gpu_memory > 0 or self.big_gpu_memory > 0 or self.triton
 
 
+class MinirayError(Exception):
+  def __init__(self, exception_type: str, exception_desc: str, job: str, worker: str):
+    super().__init__(f"Task execution failed: {job} [{worker}]\n{exception_desc}")
+    self.exception_type = exception_type
+    self.exception_desc = exception_desc
+    self.job = job
+    self.worker = worker
+
+
+@dataclass
+class ExecutionInfo:
+  job: str
+  worker: str = ''
+
+
+class MinirayFuture(Future):
+  def __init__(self, job: str = ''):
+    super().__init__()
+    self.execution_info = ExecutionInfo(job)
+
+
+def get_execution_info(future: Future) -> Optional[ExecutionInfo]:
+  return future.execution_info if isinstance(future, MinirayFuture) else None
+
+
 def set_random_seeds(seed: int):
   import os
   import random
@@ -58,8 +83,6 @@ def error_desc(e):
 
 
 def get_exception_details(exc: BaseException) -> tuple[str, str]:
-  from miniray.executor import MinirayError
-
   if isinstance(exc, MinirayError):
     return exc.exception_type, exc.exception_desc
   return type(exc).__name__, ''.join(traceback.format_exception(exc))
@@ -70,8 +93,6 @@ def is_task_exception(future: Future, exc: BaseException) -> bool:
 
 
 def format_task_error(future: Future, exc: BaseException, *, prefix: str = 'FAILED TASK') -> str:
-  from miniray.executor import ExecutionInfo, get_execution_info
-
   info = get_execution_info(future) or ExecutionInfo(job='local', worker='local')
   _, desc = get_exception_details(exc)
   return f"{prefix} {info.job} [{info.worker}]\n{desc}"
