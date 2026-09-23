@@ -3,6 +3,7 @@ import sys
 import logging
 import traceback
 from concurrent.futures import Future
+from concurrent.futures.process import _RemoteTraceback
 from typing import Optional
 from dataclasses import dataclass, asdict
 
@@ -86,7 +87,11 @@ def error_desc(e):
 def get_exception_details(exc: BaseException) -> tuple[str, str]:
   if isinstance(exc, MinirayError):
     return exc.exception_type, exc.exception_desc
-  return type(exc).__name__, ''.join(traceback.format_exception(exc))
+  if isinstance(exc.__cause__, _RemoteTraceback):
+    desc = str(exc.__cause__).removeprefix('\n"""\n').removesuffix('"""')
+  else:
+    desc = ''.join(traceback.format_exception(exc))
+  return type(exc).__name__, desc
 
 
 def is_task_exception(future: Future, exc: BaseException) -> bool:
