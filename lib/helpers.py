@@ -38,6 +38,9 @@ class MinirayError(Exception):
     self.exception_type = exception_type
     self.exception_desc = exception_desc
 
+  def __reduce__(self):
+    return type(self), (self.exception_type, self.exception_desc), self.__dict__
+
 
 @dataclass
 class ExecutionInfo:
