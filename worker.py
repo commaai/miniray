@@ -37,7 +37,10 @@ from miniray.lib.cgroup import (
 from miniray.lib.sig_term_handler import SigTermHandler
 from miniray.lib.resource_manager import ResourceManager, ResourceLimitError
 from miniray.lib.worker_helpers import ExponentialBackoff
-from miniray.lib.triton_helpers import TRITON_SERVER_ADDRESS, check_triton_server_health, wait_for_triton_server
+from miniray.lib.triton_helpers import (
+  TRITON_SERVER_ADDRESS, check_triton_server_health, wait_for_triton_server,
+  get_triton_container_id, get_triton_start_time, restart_triton_server, TritonServerError,
+)
 from miniray.lib.system_helpers import (
   get_cgroup_cpu_usage, get_cgroup_mem_usage,
 )
@@ -114,11 +117,14 @@ def cleanup_shm_by_gid(alloc_id, triton_client, gid):
     shm_entries = [(de, de.stat(follow_symlinks=False)) for de in it]
     shm_entries_for_gid = [(de, s) for de, s in shm_entries if s.st_gid == gid]
 
-  if TRITON_SERVER_ENABLED and len(shm_entries_for_gid) > 0:
-    triton_shm_entries = {x['name'] for x in triton_client.get_system_shared_memory_status()}
-    for de, s in shm_entries_for_gid:
-      if de.name in triton_shm_entries and not stat.S_ISDIR(s.st_mode):
-        triton_client.unregister_system_shared_memory(de.name)
+  if triton_client is not None and len(shm_entries_for_gid) > 0:
+    try:
+      triton_shm_entries = {x['name'] for x in triton_client.get_system_shared_memory_status()}
+      for de, s in shm_entries_for_gid:
+        if de.name in triton_shm_entries and not stat.S_ISDIR(s.st_mode):
+          triton_client.unregister_system_shared_memory(de.name)
+    except Exception as e:
+      raise TritonServerError(f"Triton failed during task cleanup: {e}") from e
 
   for de, s in shm_entries_for_gid:
     if stat.S_ISDIR(s.st_mode):
@@ -285,7 +291,7 @@ class Task:
     if self._kill_deadline is None:
       t0 = time.perf_counter()
       self.proc.poll()
-      if self.proc.returncode is None and not self._timed_out:
+      if self.proc.returncode is None and not self._timed_out and self._error is None:
         self.reap_timings['poll'] = time.perf_counter() - t0
         return False  # still running
       cgroup_kill(self.cgroup_name)
@@ -318,6 +324,8 @@ class Task:
     self.reap_timings['result'] = time.perf_counter() - t0
 
     # Determine result/error state
+    if self._error is not None:
+      return True
     if self._timed_out:
       self._error = ("TimeoutError", f"TimeoutError: task timed out after {self.limits.timeout_seconds} seconds")
     elif self.proc.returncode != 0 and exiting:
@@ -332,9 +340,12 @@ class Task:
 
     return True
 
-  def check_done(self, exiting=False) -> bool:
+  def check_done(self, exiting=False, error: Exception | None = None) -> bool:
     self.reap_timings = {}
     if not self._reaped:
+      if error is not None:
+        self._error = (type(error).__name__, str(error))
+        self.triton_client = None
       if self._reap(exiting):
         self._reaped = True
         self.finish(exiting)
@@ -402,12 +413,16 @@ class Task:
     self.reap_timings['redis'] = time.perf_counter() - t0
 
     # Cleanup shared memory and temp directories
+    triton_error = None
     if self.alloc_id is not None:
       t0 = time.perf_counter()
       while True:
         try:
           cleanup_shm_by_gid(self.alloc_id, self.triton_client, self.task_gid)
           break
+        except TritonServerError as e:
+          self.triton_client = None
+          triton_error = e
         except Exception as e:
           print(f"[worker] {self.cgroup_name} /dev/shm cleanup failed: {error_desc(e)}")
           if exiting:
@@ -417,6 +432,8 @@ class Task:
     t0 = time.perf_counter()
     self.rm.release(self.task_uuid)
     self.reap_timings['release'] = time.perf_counter() - t0
+    if triton_error is not None and not exiting:
+      raise triton_error
 
 
 # Divide the interval [0, 1) amongst the available jobs, weighted by job priority.
@@ -605,8 +622,11 @@ def main():
 
   procs: dict[int, Optional[Task]] = dict.fromkeys(range(sum(rm.cpu_totals.values())))
 
+  triton_container_id = triton_start_time = ""
   if triton_client is not None:
+    triton_container_id = get_triton_container_id()
     wait_for_triton_server(url=TRITON_SERVER_ADDRESS)
+    triton_start_time = get_triton_start_time(triton_container_id)
 
   try:
     while not sigterm_handler.raised:
@@ -620,10 +640,12 @@ def main():
       if triton_client is not None:
         try:
           check_triton_server_health(url=TRITON_SERVER_ADDRESS)
-        except (TimeoutError, ConnectionResetError):
+        except OSError as e:
           if sigterm_handler.raised:
             break
-          raise
+          raise TritonServerError(f"Triton health check failed: {e}") from e
+        if get_triton_start_time(triton_container_id) != triton_start_time:
+          raise TritonServerError("Triton restarted while tasks were running")
       timings['triton'] = time.perf_counter() - worker_loop_start
 
       t0 = time.perf_counter()
@@ -706,17 +728,27 @@ def main():
   except Exception as e:
     fatal_error = e
   finally:
+    triton_error = fatal_error if isinstance(fatal_error, TritonServerError) else None
+    if triton_error is not None:
+      cgroup_kill(CGROUP_NODE)
     # send sigterm to all remaining processes
     for proc in procs.values():
-      if proc and proc.proc:
+      if proc and proc.proc and triton_error is None:
         os.killpg(proc.proc.pid, signal.SIGTERM)
 
     # wait for tasks to finish
     while any(procs.values()):
       for i, proc in procs.items():
-        if proc and proc.check_done(exiting=True):
+        if proc and proc.check_done(exiting=True, error=triton_error):
           procs[i] = None
       time.sleep(1)
+
+    if triton_error is not None and not sigterm_handler.raised:
+      print(f"[worker] {triton_error}; restarting Triton and worker")
+      rm.shutdown()
+      venv_executor.shutdown()
+      restart_triton_server(triton_container_id)
+      os.execv(sys.executable, [sys.executable, *sys.orig_argv[1:]])
 
     if fatal_error is not None:
       raise fatal_error
