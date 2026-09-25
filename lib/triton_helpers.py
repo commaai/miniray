@@ -144,7 +144,6 @@ def restart_triton_server(container_id: str) -> None:
       f.unlink(missing_ok=True)
     shutil.rmtree(model_dir)
   subprocess.run(["docker", "start", container_id], check=True, timeout=30)
-  wait_for_triton_server(url=TRITON_SERVER_ADDRESS)
 
 def cleanup_triton() -> None:
   # Triton's HTTP client must stay in the thread that created it.

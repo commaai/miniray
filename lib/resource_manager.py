@@ -10,7 +10,7 @@ from pathlib import Path
 from ctypes import _Pointer
 from dataclasses import dataclass
 
-from miniray.lib.triton_helpers import cleanup_triton, restart_triton_server, TritonServerError
+from miniray.lib.triton_helpers import cleanup_triton, TritonServerError
 from miniray.lib.helpers import Limits, GB_TO_BYTES
 
 class ResourceLimitError(Exception):
@@ -182,8 +182,7 @@ class ResourceManager():
           self._cleanup_future.result()
         except Exception as e:
           raise TritonServerError(f"Triton cleanup failed: {e}") from e
-        finally:
-          self._cleanup_future = None
+        self._cleanup_future = None
 
     # Store allocation (no exceptions should be raised below this line)
     if limits.requires_gpu():
@@ -202,13 +201,9 @@ class ResourceManager():
     if task_uuid in self._tasks:
       del self._tasks[task_uuid]
 
-  def restart_triton(self, container_id: str) -> None:
-    assert self._cleanup_executor is not None
-    # Serialize the restart with any model cleanup still running.
-    self._cleanup_future = self._cleanup_executor.submit(restart_triton_server, container_id)
-    self._cleanup_future.result()
-    self._cleanup_future = None
-    self.gpu_locked_job = None
+  def shutdown(self) -> None:
+    if self._cleanup_executor is not None:
+      self._cleanup_executor.shutdown()
 
   def get_utilization(self):
     cpu_usages = self._get_cpu_usage_by_node()

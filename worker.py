@@ -39,7 +39,7 @@ from miniray.lib.resource_manager import ResourceManager, ResourceLimitError
 from miniray.lib.worker_helpers import ExponentialBackoff
 from miniray.lib.triton_helpers import (
   TRITON_SERVER_ADDRESS, check_triton_server_health, wait_for_triton_server,
-  get_triton_container_id, get_triton_start_time, TritonServerError,
+  get_triton_container_id, get_triton_start_time, restart_triton_server, TritonServerError,
 )
 from miniray.lib.system_helpers import (
   get_cgroup_cpu_usage, get_cgroup_mem_usage,
@@ -283,14 +283,6 @@ class Task:
       self._error = (type(e).__name__, traceback.format_exc())
       return False
 
-  def abort(self, error: tuple[str, str]) -> None:
-    if self._reaped:
-      return
-    self._error = error
-    self.triton_client = None
-    cgroup_kill(self.cgroup_name)
-    self._kill_deadline = time.perf_counter() + SIGKILL_GRACE_SECONDS
-
   def _reap(self, exiting=False) -> bool:
     assert self.proc
 
@@ -299,7 +291,7 @@ class Task:
     if self._kill_deadline is None:
       t0 = time.perf_counter()
       self.proc.poll()
-      if self.proc.returncode is None and not self._timed_out:
+      if self.proc.returncode is None and not self._timed_out and self._error is None:
         self.reap_timings['poll'] = time.perf_counter() - t0
         return False  # still running
       cgroup_kill(self.cgroup_name)
@@ -348,9 +340,12 @@ class Task:
 
     return True
 
-  def check_done(self, exiting=False) -> bool:
+  def check_done(self, exiting=False, error: Exception | None = None) -> bool:
     self.reap_timings = {}
     if not self._reaped:
+      if error is not None:
+        self._error = (type(error).__name__, str(error))
+        self.triton_client = None
       if self._reap(exiting):
         self._reaped = True
         self.finish(exiting)
@@ -439,17 +434,6 @@ class Task:
     self.reap_timings['release'] = time.perf_counter() - t0
     if triton_error is not None and not exiting:
       raise triton_error
-
-
-def fail_tasks(procs: dict[int, Optional[Task]], error: tuple[str, str]) -> None:
-  for proc in procs.values():
-    if proc is not None:
-      proc.abort(error)
-  while any(procs.values()):
-    for i, proc in procs.items():
-      if proc is not None and proc.check_done():
-        procs[i] = None
-    time.sleep(0.1)
 
 
 # Divide the interval [0, 1) amongst the available jobs, weighted by job priority.
@@ -646,131 +630,125 @@ def main():
 
   try:
     while not sigterm_handler.raised:
-      try:
-        r_master.set(ACTIVE_KEY, 1, ex=SLEEP_TIME_MAX+1)
-        backoff.sleep()
+      r_master.set(ACTIVE_KEY, 1, ex=SLEEP_TIME_MAX+1)
+      backoff.sleep()
 
-        worker_loop_start = time.perf_counter()
-        last_init_timings = {}
-        timings = {'triton': 0.0, 'redis_sched': 0.0, 'reap': 0.0, 'get_task': 0.0, 'start_task': 0.0}
+      worker_loop_start = time.perf_counter()
+      last_init_timings = {}
+      timings = {'triton': 0.0, 'redis_sched': 0.0, 'reap': 0.0, 'get_task': 0.0, 'start_task': 0.0}
 
-        if triton_client is not None:
-          try:
-            check_triton_server_health(url=TRITON_SERVER_ADDRESS)
-          except OSError as e:
-            if sigterm_handler.raised:
-              break
-            raise TritonServerError(f"Triton health check failed: {e}") from e
-          if get_triton_start_time(triton_container_id) != triton_start_time:
-            raise TritonServerError("Triton restarted while tasks were running")
-        timings['triton'] = time.perf_counter() - worker_loop_start
+      if triton_client is not None:
+        try:
+          check_triton_server_health(url=TRITON_SERVER_ADDRESS)
+        except OSError as e:
+          if sigterm_handler.raised:
+            break
+          raise TritonServerError(f"Triton health check failed: {e}") from e
+        if get_triton_start_time(triton_container_id) != triton_start_time:
+          raise TritonServerError("Triton restarted while tasks were running")
+      timings['triton'] = time.perf_counter() - worker_loop_start
 
-        t0 = time.perf_counter()
-        # TODO: with >JOB_CACHE_SIZE jobs, this drops the tail of the sorted list, so prioritization is broken
-        all_keys = cast(list[bytes], r_master.keys(f"*{PIPELINE_QUEUE}"))
-        job_keys = [key.decode() for key in all_keys if b":" not in key]
-        jobs = sorted(job_keys)[:JOB_CACHE_SIZE]
-        update_job_metadatas(r_master, jobs, job_metadatas, job_errors)
-        filtered_jobs = []
-        for j in jobs:
-          whitelist = job_metadatas[j].limits.get('node_whitelist')
-          if not whitelist or HOST_NAME in whitelist:
-            filtered_jobs.append(j)
-        jobs = filtered_jobs
-        groups = group_jobs(jobs, job_metadatas)
-        current_group = get_globally_scheduled_group(r_master, groups, job_metadatas)
-        timings['redis_sched'] = time.perf_counter() - t0
+      t0 = time.perf_counter()
+      # TODO: with >JOB_CACHE_SIZE jobs, this drops the tail of the sorted list, so prioritization is broken
+      all_keys = cast(list[bytes], r_master.keys(f"*{PIPELINE_QUEUE}"))
+      job_keys = [key.decode() for key in all_keys if b":" not in key]
+      jobs = sorted(job_keys)[:JOB_CACHE_SIZE]
+      update_job_metadatas(r_master, jobs, job_metadatas, job_errors)
+      filtered_jobs = []
+      for j in jobs:
+        whitelist = job_metadatas[j].limits.get('node_whitelist')
+        if not whitelist or HOST_NAME in whitelist:
+          filtered_jobs.append(j)
+      jobs = filtered_jobs
+      groups = group_jobs(jobs, job_metadatas)
+      current_group = get_globally_scheduled_group(r_master, groups, job_metadatas)
+      timings['redis_sched'] = time.perf_counter() - t0
 
-        ensure_venvs(jobs, job_metadatas, job_errors, venvs, pending_venv_syncs, venv_executor)
+      ensure_venvs(jobs, job_metadatas, job_errors, venvs, pending_venv_syncs, venv_executor)
 
-        for i, proc in procs.items():
-          if time.perf_counter() - worker_loop_start > MAX_WORKER_LOOP_SECONDS:
-            sorted_timings = sorted(last_init_timings.items(), key=lambda x: -x[1])
-            start_breakdown = ", ".join(f"{k}={v:.2f}s" for k, v in sorted_timings) if last_init_timings else "n/a"
-            sorted_loop = sorted(((k, v) for k, v in timings.items() if v > 0.01), key=lambda x: -x[1])
-            loop_breakdown = ", ".join(f"{k}={v:.2f}s" for k, v in sorted_loop)
-            print(f"[worker] loop breakdown: {loop_breakdown} | last start_task: {start_breakdown}")
-            raise RuntimeError("Did not loop over processes fast enough, cannot garantuee task integrity")
+      for i, proc in procs.items():
+        if time.perf_counter() - worker_loop_start > MAX_WORKER_LOOP_SECONDS:
+          sorted_timings = sorted(last_init_timings.items(), key=lambda x: -x[1])
+          start_breakdown = ", ".join(f"{k}={v:.2f}s" for k, v in sorted_timings) if last_init_timings else "n/a"
+          sorted_loop = sorted(((k, v) for k, v in timings.items() if v > 0.01), key=lambda x: -x[1])
+          loop_breakdown = ", ".join(f"{k}={v:.2f}s" for k, v in sorted_loop)
+          print(f"[worker] loop breakdown: {loop_breakdown} | last start_task: {start_breakdown}")
+          raise RuntimeError("Did not loop over processes fast enough, cannot garantuee task integrity")
 
-          if proc:
-            t0 = time.perf_counter()
-            done = proc.check_done()
-            for k, v in proc.reap_timings.items():
-              timings[f'reap.{k}'] = timings.get(f'reap.{k}', 0.0) + v
-            if done:
-              for k, v in proc.reap_timings.items():
-                statsd.hist(f'pipeline.worker.reap.{k}', v)
-              procs[i] = None
-              backoff.reset()
-            timings['reap'] += time.perf_counter() - t0
-
-          # If running behind focus on finishing
-          # TODO just make starting faster
-          if time.perf_counter() - worker_loop_start > MAX_WORKER_LOOP_SECONDS/2:
-            continue
-
-          if proc is not None:
-            continue
-
-          task = None
-          if current_group is not None:
-            ready_jobs = [j for j in groups[current_group] if j in venvs]
-            if ready_jobs:
-              job = random.choice(ready_jobs)
-              t0 = time.perf_counter()
-              task = get_task(
-                rm, r_master, r_results, r_claimed, job, job_metadatas, job_errors, venvs, i, triton_client)
-              timings['get_task'] += time.perf_counter() - t0
-          if task is None:
-            ready_groups = {g: [j for j in js if j in venvs] for g, js in groups.items()}
-            ready_groups = {g: js for g, js in ready_groups.items() if js}
-            group = get_randomly_scheduled_group(ready_groups, job_metadatas)
-            if group is not None:
-              job = random.choice(ready_groups[group])
-              t0 = time.perf_counter()
-              task = get_task(
-                rm, r_master, r_results, r_claimed, job, job_metadatas, job_errors, venvs, i, triton_client)
-              timings['get_task'] += time.perf_counter() - t0
-          if task is None:
-            continue
-
-          print(f"[worker] starting miniray task from job {task.job} on proc{i}")
+        if proc:
           t0 = time.perf_counter()
-          if task.init() and task.start():
-            procs[i] = task
+          done = proc.check_done()
+          for k, v in proc.reap_timings.items():
+            timings[f'reap.{k}'] = timings.get(f'reap.{k}', 0.0) + v
+          if done:
+            for k, v in proc.reap_timings.items():
+              statsd.hist(f'pipeline.worker.reap.{k}', v)
+            procs[i] = None
             backoff.reset()
-          else:
-            task.finish()
-          timings['start_task'] += time.perf_counter() - t0
-          last_init_timings = task.init_timings
-      except TritonServerError as e:
-        if sigterm_handler.raised:
-          break
-        print(f"[worker] {e}; failing active tasks and restarting Triton")
-        fail_tasks(procs, ("TritonServerError", str(e)))
-        if sigterm_handler.raised:
-          break
-        assert triton_client is not None
-        triton_client.close()
-        rm.restart_triton(triton_container_id)
-        triton_start_time = get_triton_start_time(triton_container_id)
-        triton_client = InferenceServerClient(TRITON_SERVER_ADDRESS, verbose=False)
-        backoff.reset()
-        print("[worker] Triton restarted; resuming task scheduling")
+          timings['reap'] += time.perf_counter() - t0
+
+        # If running behind focus on finishing
+        # TODO just make starting faster
+        if time.perf_counter() - worker_loop_start > MAX_WORKER_LOOP_SECONDS/2:
+          continue
+
+        if proc is not None:
+          continue
+
+        task = None
+        if current_group is not None:
+          ready_jobs = [j for j in groups[current_group] if j in venvs]
+          if ready_jobs:
+            job = random.choice(ready_jobs)
+            t0 = time.perf_counter()
+            task = get_task(
+              rm, r_master, r_results, r_claimed, job, job_metadatas, job_errors, venvs, i, triton_client)
+            timings['get_task'] += time.perf_counter() - t0
+        if task is None:
+          ready_groups = {g: [j for j in js if j in venvs] for g, js in groups.items()}
+          ready_groups = {g: js for g, js in ready_groups.items() if js}
+          group = get_randomly_scheduled_group(ready_groups, job_metadatas)
+          if group is not None:
+            job = random.choice(ready_groups[group])
+            t0 = time.perf_counter()
+            task = get_task(rm, r_master, r_results, r_claimed, job, job_metadatas, job_errors, venvs, i, triton_client)
+            timings['get_task'] += time.perf_counter() - t0
+        if task is None:
+          continue
+
+        print(f"[worker] starting miniray task from job {task.job} on proc{i}")
+        t0 = time.perf_counter()
+        if task.init() and task.start():
+          procs[i] = task
+          backoff.reset()
+        else:
+          task.finish()
+        timings['start_task'] += time.perf_counter() - t0
+        last_init_timings = task.init_timings
   except Exception as e:
     fatal_error = e
   finally:
+    triton_error = fatal_error if isinstance(fatal_error, TritonServerError) else None
+    if triton_error is not None:
+      cgroup_kill(CGROUP_NODE)
     # send sigterm to all remaining processes
     for proc in procs.values():
-      if proc and proc.proc:
+      if proc and proc.proc and triton_error is None:
         os.killpg(proc.proc.pid, signal.SIGTERM)
 
     # wait for tasks to finish
     while any(procs.values()):
       for i, proc in procs.items():
-        if proc and proc.check_done(exiting=True):
+        if proc and proc.check_done(exiting=True, error=triton_error):
           procs[i] = None
       time.sleep(1)
+
+    if triton_error is not None and not sigterm_handler.raised:
+      print(f"[worker] {triton_error}; restarting Triton and worker")
+      rm.shutdown()
+      venv_executor.shutdown()
+      restart_triton_server(triton_container_id)
+      os.execv(sys.executable, [sys.executable, *sys.orig_argv[1:]])
 
     if fatal_error is not None:
       raise fatal_error
