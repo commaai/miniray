@@ -23,6 +23,9 @@ TRITON_MODEL_STALE_AFTER_SECONDS_PARAMETER = 'stale_after_seconds'
 IOConfig = TypedDict('IOConfig', {'name': str, 'data_type': str, 'dims': list[int]})
 ModelConfig = TypedDict('ModelConfig', {'input': list[IOConfig], 'output': list[IOConfig]})
 
+class TritonServerError(RuntimeError):
+  pass
+
 def _check_triton_server_health(url: str, timeout: int = 3, scheme: str = "http") -> None:
   if "://" not in url:
     url = f"{scheme}://{url}"
@@ -128,6 +131,20 @@ def get_triton_container_id() -> str:
   if not container_ids:
     raise RuntimeError("No tritonserver container found")
   return container_ids.split('\n')[0]
+
+def get_triton_start_time(container_id: str) -> str:
+  return subprocess.check_output(
+    ["docker", "inspect", "--format", "{{.State.StartedAt}}", container_id], timeout=5).decode().strip()
+
+def restart_triton_server(container_id: str) -> None:
+  subprocess.run(["docker", "stop", "--time", "5", container_id], check=True, timeout=30)
+  unlink_triton_shm_files()
+  for model_dir in TRITON_MODEL_REPOSITORY.iterdir():
+    for f in TRITON_SHM_DIR.glob(f"{model_dir.name}_*.parameters"):
+      f.unlink(missing_ok=True)
+    shutil.rmtree(model_dir)
+  subprocess.run(["docker", "start", container_id], check=True, timeout=30)
+  wait_for_triton_server(url=TRITON_SERVER_ADDRESS)
 
 def cleanup_triton() -> None:
   # Triton's HTTP client must stay in the thread that created it.
