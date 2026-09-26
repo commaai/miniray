@@ -11,6 +11,7 @@ import random
 import subprocess
 import threading
 import traceback
+import copyreg
 import cloudpickle
 import multiprocessing as mp
 from enum import StrEnum
@@ -26,6 +27,7 @@ from pathlib import Path
 from queue import Queue
 from redis import StrictRedis, ConnectionError as RedisConnectionError
 from tqdm import tqdm
+from tritonclient.utils import InferenceServerException
 from types import TracebackType
 from typing import Any, Callable, Iterable, Iterator, NamedTuple, Optional, Sequence, cast
 
@@ -33,6 +35,11 @@ from miniray.lib.helpers import (
   Limits, MinirayError, ExecutionInfo, MinirayFuture, get_execution_info,
   extract_error, get_stream_logger, is_task_exception, format_task_error,
 )
+
+# Triton constructs errors with keyword arguments, leaving Exception.args empty.
+copyreg.pickle(InferenceServerException, lambda exc: (
+  InferenceServerException, (exc.message(), exc.status(), exc.debug_details()), exc.__dict__,
+))
 
 MAX_ARG_STRLEN = 131071  # max length for unix string arguments, see https://stackoverflow.com/a/29802900
 REDIS_HOST = os.getenv('REDIS_HOST', 'redis.comma.internal')
