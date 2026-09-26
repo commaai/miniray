@@ -23,6 +23,6 @@ for a, b, c in zip(results_loop, results_map, results_submit):
 ```
 
 ### want to use?
-If you have tasks that you rant to parallelize across multiple machines, miniray might be right for you! Contact harald@comma.ai if miniray is missing something you would like.
+If you have tasks that you want to parallelize across multiple machines, miniray might be right for you! Contact harald@comma.ai if miniray is missing something you would like.
 
 
