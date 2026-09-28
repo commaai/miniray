@@ -382,6 +382,33 @@ class Task:
       print(f"[worker] finished miniray task from job {self.job} stats: "
             f"elapsed={task_run_time:0.2f}s cpu={task_cpu_time:0.2f}s mem={task_memory_gb:0.2f}GB")
 
+    # Cleanup shared memory and temp directories
+    try:
+      if self.alloc_id is not None:
+        t0 = time.perf_counter()
+        while True:
+          try:
+            cleanup_shm_by_gid(self.alloc_id, self.triton_client, self.task_gid)
+            break
+          except TritonServerError as e:
+            self._error = get_exception_details(e)
+            if not exiting:
+              raise
+            break
+          except Exception as e:
+            print(f"[worker] {self.cgroup_name} /dev/shm cleanup failed: {error_desc(e)}")
+            if exiting:
+              break
+            time.sleep(1)
+        self.reap_timings['shm'] = time.perf_counter() - t0
+    finally:
+      t0 = time.perf_counter()
+      self.rm.release(self.task_uuid)
+      self.reap_timings['release'] = time.perf_counter() - t0
+
+      self._publish_result()
+
+  def _publish_result(self):
     t0 = time.perf_counter()
     if self._error:
       error_type, error_msg = self._error
@@ -413,29 +440,6 @@ class Task:
     )
     self.r_master.hsetex(tasks_key, self.task_uuid, json.dumps(done_record), ex=3600)
     self.reap_timings['redis'] = time.perf_counter() - t0
-
-    # Cleanup shared memory and temp directories
-    try:
-      if self.alloc_id is not None:
-        t0 = time.perf_counter()
-        while True:
-          try:
-            cleanup_shm_by_gid(self.alloc_id, self.triton_client, self.task_gid)
-            break
-          except TritonServerError:
-            if not exiting:
-              raise
-            break
-          except Exception as e:
-            print(f"[worker] {self.cgroup_name} /dev/shm cleanup failed: {error_desc(e)}")
-            if exiting:
-              break
-            time.sleep(1)
-        self.reap_timings['shm'] = time.perf_counter() - t0
-    finally:
-      t0 = time.perf_counter()
-      self.rm.release(self.task_uuid)
-      self.reap_timings['release'] = time.perf_counter() - t0
 
 
 # Divide the interval [0, 1) amongst the available jobs, weighted by job priority.
@@ -526,6 +530,17 @@ def get_task(resource_manager: ResourceManager, r_master: StrictRedis,
   except ResourceLimitError as e:
     print(f"[worker] {MINIRAY_TARGET_NAME} resource limit: {error_desc(e)}")
     return None
+  except TritonServerError as e:
+    raw_task_uuid = cast(Optional[bytes], r_master.rpop(job))
+    if raw_task_uuid is not None:
+      task_data = cast(Optional[bytes], r_master.hget(get_tasks_key(job), raw_task_uuid.decode()))
+      if task_data is not None:
+        task = Task(
+          TaskRecord(*json.loads(task_data)), limits, proc_index, resource_manager, r_master, r_results,
+          job_metadatas[job], get_exception_details(e), venvs, triton_client)
+        task.init()
+        task.finish(exiting=True)
+    raise
 
   raw_task_uuid = cast(Optional[bytes], r_master.rpop(job))
   if raw_task_uuid is None:  # something else grabbed the last task
@@ -642,9 +657,7 @@ def main():
       if triton_client is not None:
         try:
           check_triton_server_health(url=TRITON_SERVER_ADDRESS)
-        except OSError as e:
-          if sigterm_handler.raised:
-            break
+        except Exception as e:
           raise TritonServerError(f"Triton health check failed: {e}") from e
         if get_triton_start_time(triton_container_id) != triton_start_time:
           raise TritonServerError("Triton restarted while tasks were running")
