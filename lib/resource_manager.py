@@ -10,7 +10,7 @@ from pathlib import Path
 from ctypes import _Pointer
 from dataclasses import dataclass
 
-from miniray.lib.triton_helpers import cleanup_triton, TritonServerError
+from miniray.lib.triton_helpers import cleanup_triton
 from miniray.lib.helpers import Limits, GB_TO_BYTES
 
 class ResourceLimitError(Exception):
@@ -178,10 +178,7 @@ class ResourceManager():
       if self._cleanup_future is not None:
         if not self._cleanup_future.done():
           raise ResourceLimitError("Waiting for Triton cleanup")
-        try:
-          self._cleanup_future.result()
-        except Exception as e:
-          raise TritonServerError(f"Triton cleanup failed: {e}") from e
+        self._cleanup_future.result()
         self._cleanup_future = None
 
     # Store allocation (no exceptions should be raised below this line)

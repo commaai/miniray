@@ -90,9 +90,12 @@ def setup_triton_model(func: Callable[..., ModelConfig]):
 
 def unload_triton_model(client: InferenceServerClient, model: str):
   client.unload_model(model)
+  remove_triton_model_files(model)
+
+def remove_triton_model_files(model: str) -> None:
   try: shutil.rmtree(TRITON_MODEL_REPOSITORY / model)
   except FileNotFoundError: pass
-  for f in Path("/dev/shm").glob(f"{model}_*.parameters"):
+  for f in TRITON_SHM_DIR.glob(f"{model}_*.parameters"):
     f.unlink(missing_ok=True)
 
 def unload_triton_models(client: InferenceServerClient, model: Optional[str] = None):
@@ -140,18 +143,19 @@ def restart_triton_server(container_id: str) -> None:
   subprocess.run(["docker", "stop", "--time", "5", container_id], check=True, timeout=30)
   unlink_triton_shm_files()
   for model_dir in TRITON_MODEL_REPOSITORY.iterdir():
-    for f in TRITON_SHM_DIR.glob(f"{model_dir.name}_*.parameters"):
-      f.unlink(missing_ok=True)
-    shutil.rmtree(model_dir)
+    remove_triton_model_files(model_dir.name)
   subprocess.run(["docker", "start", container_id], check=True, timeout=30)
 
 def cleanup_triton() -> None:
   # Triton's HTTP client must stay in the thread that created it.
-  with InferenceServerClient(TRITON_SERVER_ADDRESS, verbose=False) as client:
-    kill_triton_processes_by_name("VLLM::EngineCore")
-    unload_triton_models(client)
-    kill_triton_processes_by_name("triton_python_backend_stub")
-    unlink_triton_shm_files()
+  try:
+    with InferenceServerClient(TRITON_SERVER_ADDRESS, verbose=False) as client:
+      kill_triton_processes_by_name("VLLM::EngineCore")
+      unload_triton_models(client)
+      kill_triton_processes_by_name("triton_python_backend_stub")
+      unlink_triton_shm_files()
+  except Exception as e:
+    raise TritonServerError(f"Triton cleanup failed: {e}") from e
 
 def unload_stale_models(triton_client: InferenceServerClient, redis_client: StrictRedis, keep_model_name: str) -> None:
   for model in get_triton_inference_stats(triton_client):
