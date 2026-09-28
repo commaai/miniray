@@ -37,7 +37,10 @@ from miniray.lib.cgroup import (
 from miniray.lib.sig_term_handler import SigTermHandler
 from miniray.lib.resource_manager import ResourceManager, ResourceLimitError
 from miniray.lib.worker_helpers import ExponentialBackoff
-from miniray.lib.triton_helpers import TRITON_SERVER_ADDRESS, check_triton_server_health, wait_for_triton_server
+from miniray.lib.triton_helpers import (
+  TRITON_SERVER_ADDRESS, check_triton_server_health, wait_for_triton_server,
+  get_triton_container_id, get_triton_start_time, TritonServerError,
+)
 from miniray.lib.system_helpers import (
   get_cgroup_cpu_usage, get_cgroup_mem_usage,
 )
@@ -115,21 +118,24 @@ def cleanup_shm_by_gid(alloc_id, triton_client, gid):
     shm_entries = [(de, de.stat(follow_symlinks=False)) for de in it]
     shm_entries_for_gid = [(de, s) for de, s in shm_entries if s.st_gid == gid]
 
-  if TRITON_SERVER_ENABLED and len(shm_entries_for_gid) > 0:
-    triton_shm_entries = {x['name'] for x in triton_client.get_system_shared_memory_status()}
+  try:
+    if triton_client is not None and len(shm_entries_for_gid) > 0:
+      triton_shm_entries = {x['name'] for x in triton_client.get_system_shared_memory_status()}
+      for de, s in shm_entries_for_gid:
+        if de.name in triton_shm_entries and not stat.S_ISDIR(s.st_mode):
+          triton_client.unregister_system_shared_memory(de.name)
+  except Exception as e:
+    raise TritonServerError(f"Triton failed during task cleanup: {e}") from e
+  finally:
     for de, s in shm_entries_for_gid:
-      if de.name in triton_shm_entries and not stat.S_ISDIR(s.st_mode):
-        triton_client.unregister_system_shared_memory(de.name)
+      if stat.S_ISDIR(s.st_mode):
+        shutil.rmtree(de)
+      else:
+        Path(de.path).unlink()
 
-  for de, s in shm_entries_for_gid:
-    if stat.S_ISDIR(s.st_mode):
-      shutil.rmtree(de)
-    else:
-      Path(de.path).unlink()
-
-  tmp_dir = get_tmp_dir_for_task(alloc_id)
-  if tmp_dir.exists():
-    shutil.rmtree(tmp_dir)
+    tmp_dir = get_tmp_dir_for_task(alloc_id)
+    if tmp_dir.exists():
+      shutil.rmtree(tmp_dir)
 
 class Task:
   proc: Optional[subprocess.Popen]
@@ -340,6 +346,8 @@ class Task:
     if not self._reaped:
       if error is not None:
         self._error = get_exception_details(error)
+        if isinstance(error, TritonServerError):
+          self.triton_client = None
       if self._reap(exiting):
         self._reaped = True
         self.finish(exiting)
@@ -374,6 +382,33 @@ class Task:
       print(f"[worker] finished miniray task from job {self.job} stats: "
             f"elapsed={task_run_time:0.2f}s cpu={task_cpu_time:0.2f}s mem={task_memory_gb:0.2f}GB")
 
+    # Cleanup shared memory and temp directories
+    try:
+      if self.alloc_id is not None:
+        t0 = time.perf_counter()
+        while True:
+          try:
+            cleanup_shm_by_gid(self.alloc_id, self.triton_client, self.task_gid)
+            break
+          except TritonServerError as e:
+            self._error = get_exception_details(e)
+            if not exiting:
+              raise
+            break
+          except Exception as e:
+            print(f"[worker] {self.cgroup_name} /dev/shm cleanup failed: {error_desc(e)}")
+            if exiting:
+              break
+            time.sleep(1)
+        self.reap_timings['shm'] = time.perf_counter() - t0
+    finally:
+      t0 = time.perf_counter()
+      self.rm.release(self.task_uuid)
+      self.reap_timings['release'] = time.perf_counter() - t0
+
+      self._publish_result()
+
+  def _publish_result(self):
     t0 = time.perf_counter()
     if self._error:
       error_type, error_msg = self._error
@@ -405,23 +440,6 @@ class Task:
     )
     self.r_master.hsetex(tasks_key, self.task_uuid, json.dumps(done_record), ex=3600)
     self.reap_timings['redis'] = time.perf_counter() - t0
-
-    # Cleanup shared memory and temp directories
-    if self.alloc_id is not None:
-      t0 = time.perf_counter()
-      while True:
-        try:
-          cleanup_shm_by_gid(self.alloc_id, self.triton_client, self.task_gid)
-          break
-        except Exception as e:
-          print(f"[worker] {self.cgroup_name} /dev/shm cleanup failed: {error_desc(e)}")
-          if exiting:
-            break
-          time.sleep(1)
-      self.reap_timings['shm'] = time.perf_counter() - t0
-    t0 = time.perf_counter()
-    self.rm.release(self.task_uuid)
-    self.reap_timings['release'] = time.perf_counter() - t0
 
 
 # Divide the interval [0, 1) amongst the available jobs, weighted by job priority.
@@ -512,6 +530,17 @@ def get_task(resource_manager: ResourceManager, r_master: StrictRedis,
   except ResourceLimitError as e:
     print(f"[worker] {MINIRAY_TARGET_NAME} resource limit: {error_desc(e)}")
     return None
+  except TritonServerError as e:
+    raw_task_uuid = cast(Optional[bytes], r_master.rpop(job))
+    if raw_task_uuid is not None:
+      task_data = cast(Optional[bytes], r_master.hget(get_tasks_key(job), raw_task_uuid.decode()))
+      if task_data is not None:
+        task = Task(
+          TaskRecord(*json.loads(task_data)), limits, proc_index, resource_manager, r_master, r_results,
+          job_metadatas[job], get_exception_details(e), venvs, triton_client)
+        task.init()
+        task.finish(exiting=True)
+    raise
 
   raw_task_uuid = cast(Optional[bytes], r_master.rpop(job))
   if raw_task_uuid is None:  # something else grabbed the last task
@@ -610,8 +639,11 @@ def main():
 
   procs: dict[int, Optional[Task]] = dict.fromkeys(range(sum(rm.cpu_totals.values())))
 
+  triton_container_id = triton_start_time = ""
   if triton_client is not None:
+    triton_container_id = get_triton_container_id()
     wait_for_triton_server(url=TRITON_SERVER_ADDRESS)
+    triton_start_time = get_triton_start_time(triton_container_id)
 
   try:
     while not sigterm_handler.raised:
@@ -625,10 +657,10 @@ def main():
       if triton_client is not None:
         try:
           check_triton_server_health(url=TRITON_SERVER_ADDRESS)
-        except (TimeoutError, ConnectionResetError):
-          if sigterm_handler.raised:
-            break
-          raise
+        except Exception as e:
+          raise TritonServerError(f"Triton health check failed: {e}") from e
+        if get_triton_start_time(triton_container_id) != triton_start_time:
+          raise TritonServerError("Triton restarted while tasks were running")
       timings['triton'] = time.perf_counter() - worker_loop_start
 
       t0 = time.perf_counter()

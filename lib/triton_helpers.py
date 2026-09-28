@@ -10,9 +10,8 @@ from functools import wraps
 from pathlib import Path
 from typing import Any, Callable, Optional, TypedDict
 from redis import StrictRedis
-from tenacity import retry, stop_after_attempt, stop_after_delay, wait_fixed, wait_random
+from tenacity import retry, stop_after_delay, wait_fixed
 from tritonclient.http import InferenceServerClient
-from tritonclient.utils import InferenceServerException
 
 TRITON_REDIS_HOST = os.getenv('TRITON_REDIS_HOST', '127.0.0.1')
 TRITON_SERVER_ADDRESS = os.getenv('TRITON_SERVER_ADDRESS', '127.0.0.1:8000')
@@ -23,7 +22,10 @@ TRITON_MODEL_STALE_AFTER_SECONDS_PARAMETER = 'stale_after_seconds'
 IOConfig = TypedDict('IOConfig', {'name': str, 'data_type': str, 'dims': list[int]})
 ModelConfig = TypedDict('ModelConfig', {'input': list[IOConfig], 'output': list[IOConfig]})
 
-def _check_triton_server_health(url: str, timeout: int = 3, scheme: str = "http") -> None:
+class TritonServerError(RuntimeError):
+  pass
+
+def check_triton_server_health(url: str, timeout: int = 3, scheme: str = "http") -> None:
   if "://" not in url:
     url = f"{scheme}://{url}"
   urllib.request.urlopen(f"{url}/v2/health/live", timeout=timeout)
@@ -35,22 +37,15 @@ def _is_model_loading(client: InferenceServerClient, model_name: str):
       return True
   return False
 
-check_triton_server_health = retry(
-  stop=stop_after_delay(15),
-  wait=wait_fixed(1),
-  reraise=True,
-)(_check_triton_server_health)
 wait_for_triton_server = retry(
   stop=stop_after_delay(60),
   wait=wait_fixed(2),
   reraise=True,
-)(_check_triton_server_health)
+)(check_triton_server_health)
 
-@retry(stop=stop_after_attempt(3), wait=wait_random(1, 2), reraise=True)
 def get_triton_inference_stats(client: InferenceServerClient):
   return client.get_inference_statistics()['model_stats']
 
-@retry(stop=stop_after_attempt(3), wait=wait_random(1, 2), reraise=True)
 def load_triton_model(client: InferenceServerClient, model: str, config: ModelConfig, load_timeout = 60):
   if _is_model_loading(client, model):
     deadline = time.perf_counter() + load_timeout
@@ -129,21 +124,27 @@ def get_triton_container_id() -> str:
     raise RuntimeError("No tritonserver container found")
   return container_ids.split('\n')[0]
 
+def get_triton_start_time(container_id: str) -> str:
+  return subprocess.check_output(
+    ["docker", "inspect", "--format", "{{.State.StartedAt}}", container_id], timeout=5).decode().strip()
+
 def cleanup_triton() -> None:
   # Triton's HTTP client must stay in the thread that created it.
-  with InferenceServerClient(TRITON_SERVER_ADDRESS, verbose=False) as client:
-    kill_triton_processes_by_name("VLLM::EngineCore")
-    unload_triton_models(client)
-    kill_triton_processes_by_name("triton_python_backend_stub")
-    unlink_triton_shm_files()
+  try:
+    with InferenceServerClient(TRITON_SERVER_ADDRESS, verbose=False) as client:
+      kill_triton_processes_by_name("VLLM::EngineCore")
+      unload_triton_models(client)
+      kill_triton_processes_by_name("triton_python_backend_stub")
+      unlink_triton_shm_files()
+  except Exception as e:
+    raise TritonServerError(f"Triton cleanup failed: {e}") from e
 
 def unload_stale_models(triton_client: InferenceServerClient, redis_client: StrictRedis, keep_model_name: str) -> None:
   for model in get_triton_inference_stats(triton_client):
     last_inference_time = model['last_inference']//1000
     try: model_mtime = Path(TRITON_MODEL_REPOSITORY / model['name'] / '1').stat().st_mtime
     except FileNotFoundError: model_mtime = 0
-    try: parameters = triton_client.get_model_config(model['name']).get('parameters', {})
-    except InferenceServerException: continue
+    parameters = triton_client.get_model_config(model['name']).get('parameters', {})
     model_stale_after_seconds = float(
       parameters.get(TRITON_MODEL_STALE_AFTER_SECONDS_PARAMETER, {}).get('string_value', 60))
     if model['name'] != keep_model_name and (
