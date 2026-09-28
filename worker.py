@@ -44,6 +44,7 @@ from miniray.lib.system_helpers import (
 from miniray.lib.statsd_helpers import statsd
 from miniray.lib.helpers import (
   Limits, error_desc, GB_TO_BYTES, MAX_WORKER_LOOP_SECONDS, TASK_TIMEOUT_GRACE_SECONDS, JOB_CACHE_SIZE,
+  get_exception_details,
 )
 from miniray.lib.uv import sync_venv_cache, cleanup_venvs, populate_venv_cache_from_disk, pycache_dir_for_venv
 from miniray.executor import (
@@ -285,7 +286,7 @@ class Task:
     if self._kill_deadline is None:
       t0 = time.perf_counter()
       self.proc.poll()
-      if self.proc.returncode is None and not self._timed_out:
+      if self.proc.returncode is None and not self._timed_out and self._error is None:
         self.reap_timings['poll'] = time.perf_counter() - t0
         return False  # still running
       cgroup_kill(self.cgroup_name)
@@ -318,6 +319,8 @@ class Task:
     self.reap_timings['result'] = time.perf_counter() - t0
 
     # Determine result/error state
+    if self._error is not None:
+      return True
     if self._timed_out:
       self._error = ("TimeoutError", f"TimeoutError: task timed out after {self.limits.timeout_seconds} seconds")
     elif self.proc.returncode != 0 and exiting:
@@ -332,9 +335,11 @@ class Task:
 
     return True
 
-  def check_done(self, exiting=False) -> bool:
+  def check_done(self, exiting=False, error: Exception | None = None) -> bool:
     self.reap_timings = {}
     if not self._reaped:
+      if error is not None:
+        self._error = get_exception_details(error)
       if self._reap(exiting):
         self._reaped = True
         self.finish(exiting)
@@ -705,23 +710,22 @@ def main():
         last_init_timings = task.init_timings
   except Exception as e:
     fatal_error = e
+    cgroup_kill(CGROUP_NODE)
+    raise
   finally:
     # send sigterm to all remaining processes
     for proc in procs.values():
-      if proc and proc.proc:
+      if proc and proc.proc and fatal_error is None:
         os.killpg(proc.proc.pid, signal.SIGTERM)
 
     # wait for tasks to finish
     while any(procs.values()):
       for i, proc in procs.items():
-        if proc and proc.check_done(exiting=True):
+        if proc and proc.check_done(exiting=True, error=fatal_error):
           procs[i] = None
       time.sleep(1)
 
-    if fatal_error is not None:
-      raise fatal_error
-    else:
-      print(f"[worker] exited due to signal: {sigterm_handler.raised}")
+  print(f"[worker] exited due to signal: {sigterm_handler.raised}")
 
 
 if __name__ == '__main__':
