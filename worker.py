@@ -47,6 +47,7 @@ from miniray.lib.system_helpers import (
 from miniray.lib.statsd_helpers import statsd
 from miniray.lib.helpers import (
   Limits, error_desc, GB_TO_BYTES, MAX_WORKER_LOOP_SECONDS, TASK_TIMEOUT_GRACE_SECONDS, JOB_CACHE_SIZE,
+  get_exception_details,
 )
 from miniray.lib.uv import sync_venv_cache, cleanup_venvs, populate_venv_cache_from_disk, pycache_dir_for_venv
 from miniray.executor import (
@@ -344,8 +345,9 @@ class Task:
     self.reap_timings = {}
     if not self._reaped:
       if error is not None:
-        self._error = (type(error).__name__, str(error))
-        self.triton_client = None
+        self._error = get_exception_details(error)
+        if isinstance(error, TritonServerError):
+          self.triton_client = None
       if self._reap(exiting):
         self._reaped = True
         self.finish(exiting)
@@ -606,6 +608,7 @@ def main():
   print(f"[worker] SMALL GPU RAM:         {sum(gpu.memory for gpu in rm.small_gpus)/1e9:.2f} GB")
   print(f"[worker] TRITON_SERVER_ENABLED: {TRITON_SERVER_ENABLED}")
 
+  fatal_error = None
   cgroup_create(CGROUP_NODE)
   cgroup_set_subcontrollers(CGROUP_NODE, CGROUP_CONTROLLERS)
   cgroup_set_memory_limit(CGROUP_NODE, sum(rm.mem_totals.values()))
@@ -627,7 +630,6 @@ def main():
     wait_for_triton_server(url=TRITON_SERVER_ADDRESS)
     triton_start_time = get_triton_start_time(triton_container_id)
 
-  triton_error = None
   try:
     while not sigterm_handler.raised:
       r_master.set(ACTIVE_KEY, 1, ex=SLEEP_TIME_MAX+1)
@@ -725,20 +727,20 @@ def main():
           task.finish()
         timings['start_task'] += time.perf_counter() - t0
         last_init_timings = task.init_timings
-  except TritonServerError as e:
-    triton_error = e
+  except Exception as e:
+    fatal_error = e
     cgroup_kill(CGROUP_NODE)
     raise
   finally:
     # send sigterm to all remaining processes
     for proc in procs.values():
-      if proc and proc.proc and triton_error is None:
+      if proc and proc.proc and fatal_error is None:
         os.killpg(proc.proc.pid, signal.SIGTERM)
 
     # wait for tasks to finish
     while any(procs.values()):
       for i, proc in procs.items():
-        if proc and proc.check_done(exiting=True, error=triton_error):
+        if proc and proc.check_done(exiting=True, error=fatal_error):
           procs[i] = None
       time.sleep(1)
 
