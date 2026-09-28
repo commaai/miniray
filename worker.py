@@ -710,12 +710,11 @@ def main():
         last_init_timings = task.init_timings
   except Exception as e:
     fatal_error = e
-    cgroup_kill(CGROUP_NODE)
     raise
   finally:
     # send sigterm to all remaining processes
     for proc in procs.values():
-      if proc and proc.proc and fatal_error is None:
+      if proc and proc.proc:
         os.killpg(proc.proc.pid, signal.SIGTERM)
 
     # wait for tasks to finish
