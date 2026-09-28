@@ -39,7 +39,7 @@ from miniray.lib.resource_manager import ResourceManager, ResourceLimitError
 from miniray.lib.worker_helpers import ExponentialBackoff
 from miniray.lib.triton_helpers import (
   TRITON_SERVER_ADDRESS, check_triton_server_health, wait_for_triton_server,
-  get_triton_container_id, get_triton_start_time, restart_triton_server, TritonServerError,
+  get_triton_container_id, get_triton_start_time, TritonServerError,
 )
 from miniray.lib.system_helpers import (
   get_cgroup_cpu_usage, get_cgroup_mem_usage,
@@ -728,6 +728,7 @@ def main():
   except TritonServerError as e:
     triton_error = e
     cgroup_kill(CGROUP_NODE)
+    raise
   finally:
     # send sigterm to all remaining processes
     for proc in procs.values():
@@ -740,15 +741,6 @@ def main():
         if proc and proc.check_done(exiting=True, error=triton_error):
           procs[i] = None
       time.sleep(1)
-
-  if triton_error is not None:
-    if sigterm_handler.raised:
-      raise triton_error
-    print(f"[worker] {triton_error}; restarting Triton and worker")
-    rm.shutdown()
-    venv_executor.shutdown()
-    restart_triton_server(triton_container_id)
-    os.execv(sys.executable, [sys.executable, *sys.orig_argv[1:]])
 
   print(f"[worker] exited due to signal: {sigterm_handler.raised}")
 

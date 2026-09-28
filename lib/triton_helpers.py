@@ -90,12 +90,9 @@ def setup_triton_model(func: Callable[..., ModelConfig]):
 
 def unload_triton_model(client: InferenceServerClient, model: str):
   client.unload_model(model)
-  remove_triton_model_files(model)
-
-def remove_triton_model_files(model: str) -> None:
   try: shutil.rmtree(TRITON_MODEL_REPOSITORY / model)
   except FileNotFoundError: pass
-  for f in TRITON_SHM_DIR.glob(f"{model}_*.parameters"):
+  for f in Path("/dev/shm").glob(f"{model}_*.parameters"):
     f.unlink(missing_ok=True)
 
 def unload_triton_models(client: InferenceServerClient, model: Optional[str] = None):
@@ -138,13 +135,6 @@ def get_triton_container_id() -> str:
 def get_triton_start_time(container_id: str) -> str:
   return subprocess.check_output(
     ["docker", "inspect", "--format", "{{.State.StartedAt}}", container_id], timeout=5).decode().strip()
-
-def restart_triton_server(container_id: str) -> None:
-  subprocess.run(["docker", "stop", "--time", "5", container_id], check=True, timeout=30)
-  unlink_triton_shm_files()
-  for model_dir in TRITON_MODEL_REPOSITORY.iterdir():
-    remove_triton_model_files(model_dir.name)
-  subprocess.run(["docker", "start", container_id], check=True, timeout=30)
 
 def cleanup_triton() -> None:
   # Triton's HTTP client must stay in the thread that created it.

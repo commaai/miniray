@@ -198,10 +198,6 @@ class ResourceManager():
     if task_uuid in self._tasks:
       del self._tasks[task_uuid]
 
-  def shutdown(self) -> None:
-    if self._cleanup_executor is not None:
-      self._cleanup_executor.shutdown()
-
   def get_utilization(self):
     cpu_usages = self._get_cpu_usage_by_node()
     mem_usages = self._get_mem_usage_by_node()
