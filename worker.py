@@ -710,7 +710,8 @@ def main():
         last_init_timings = task.init_timings
   except Exception as e:
     fatal_error = e
-    raise
+    traceback.print_exc()
+    sys.exit(99)
   finally:
     # send sigterm to all remaining processes
     for proc in procs.values():
@@ -728,8 +729,4 @@ def main():
 
 
 if __name__ == '__main__':
-  try:
-    main()
-  except Exception:
-    traceback.print_exc()
-    sys.exit(99)
+  main()
