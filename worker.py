@@ -711,7 +711,7 @@ def main():
   except Exception as e:
     fatal_error = e
     traceback.print_exc()
-    sys.exit(99)
+    sys.exit(99)  # Slurm is configured to requeue jobs that exit with 99.
   finally:
     # send sigterm to all remaining processes
     for proc in procs.values():
