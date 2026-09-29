@@ -732,4 +732,4 @@ if __name__ == '__main__':
     main()
   except Exception:
     traceback.print_exc()
-    sys.exit(os.EX_TEMPFAIL)
+    sys.exit(99)
