@@ -35,7 +35,7 @@ from miniray.lib.cgroup import (
   cgroup_add_pid, cgroup_kill, cgroup_delete, cgroup_clear_all_children, cgroup_is_populated,
 )
 from miniray.lib.sig_term_handler import SigTermHandler
-from miniray.lib.resource_manager import ResourceManager, ResourceLimitError
+from miniray.lib.resource_manager import ResourceManager, ResourceLimitError, GPUHealthError
 from miniray.lib.worker_helpers import ExponentialBackoff
 from miniray.lib.triton_helpers import TRITON_SERVER_ADDRESS, check_triton_server_health, wait_for_triton_server
 from miniray.lib.system_helpers import (
@@ -708,6 +708,9 @@ def main():
           task.finish()
         timings['start_task'] += time.perf_counter() - t0
         last_init_timings = task.init_timings
+  except GPUHealthError:
+    traceback.print_exc()
+    sys.exit(1)
   except Exception as e:
     fatal_error = e
     traceback.print_exc()

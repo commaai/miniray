@@ -17,6 +17,10 @@ class ResourceLimitError(Exception):
   pass
 
 
+class GPUHealthError(Exception):
+  pass
+
+
 def check_gpu_status_worker(gpu_bus_ids, output):
   pynvml.nvmlInit()
   while True:
@@ -117,14 +121,10 @@ class ResourceManager():
 
   def consume(self, limits: Limits, job: str, task_uuid: str) -> None:
     if self.gpus:
-      try:
-        # don't start tasks if the gpus are not responding, or if the gpu status reading is stale
-        if time.time() > self.gpu_status.last_reading + 20:
-          raise Exception("waiting for gpu status reading...")
-        elif not self.gpu_status.valid:
-          raise Exception("unable to read gpu status")
-      except Exception as e:
-        raise ResourceLimitError(str(e)) from e
+      if time.time() > self.gpu_status.last_reading + 20:
+        raise GPUHealthError("GPU status reading is stale")
+      if not self.gpu_status.valid:
+        raise GPUHealthError("Unable to read GPU status")
 
     mem_bytes = limits.memory * GB_TO_BYTES
     small_gpu_mem_bytes = limits.small_gpu_memory * GB_TO_BYTES
