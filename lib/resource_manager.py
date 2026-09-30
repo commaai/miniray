@@ -1,6 +1,5 @@
 from __future__ import annotations
 import time
-import traceback
 import types
 import resource
 import threading
@@ -17,21 +16,35 @@ class ResourceLimitError(Exception):
   pass
 
 
+class GPUHealthError(Exception):
+  pass
+
+
+def check_gpu_health(gpu_bus_ids):
+  for bus_id in gpu_bus_ids:
+    try:
+      gpu_dev = pynvml.nvmlDeviceGetHandleByPciBusId(bus_id)
+      pynvml.nvmlDeviceGetTemperature(gpu_dev, pynvml.NVML_TEMPERATURE_GPU)
+      recovery = pynvml.nvmlDeviceGetFieldValues(gpu_dev, [pynvml.NVML_FI_DEV_GET_GPU_RECOVERY_ACTION])[0]
+      if recovery.nvmlReturn == pynvml.NVML_ERROR_NOT_SUPPORTED:
+        continue
+      if recovery.nvmlReturn != pynvml.NVML_SUCCESS:
+        raise pynvml.NVMLError(recovery.nvmlReturn)
+      if recovery.value.uiVal != 0:
+        raise GPUHealthError(f"GPU {bus_id} requires recovery action {recovery.value.uiVal}")
+    except pynvml.NVMLError as e:
+      raise GPUHealthError(f"GPU {bus_id} health check failed: {e}") from e
+
+
 def check_gpu_status_worker(gpu_bus_ids, output):
-  pynvml.nvmlInit()
   while True:
     try:
-      for bus_id in gpu_bus_ids:
-        gpu_dev = pynvml.nvmlDeviceGetHandleByPciBusId(bus_id)
-        pynvml.nvmlDeviceGetTemperature(gpu_dev, pynvml.NVML_TEMPERATURE_GPU)  # query to tell if it's fallen off
-      output.valid = True
-    except pynvml.NVMLError:
-      output.valid = False
-    except Exception:
-      traceback.print_exc()
-    finally:
-      output.last_reading = time.time()
-      time.sleep(10)
+      check_gpu_health(gpu_bus_ids)
+    except Exception as e:
+      output.error = str(e)
+      return
+    output.last_reading = time.monotonic()
+    time.sleep(10)
 
 
 @dataclass
@@ -55,7 +68,7 @@ class ResourceManager():
   def __init__(self, mem_limit_multiplier=0.8, triton_enabled=False):
     self._cleanup_executor = ThreadPoolExecutor(max_workers=1) if triton_enabled else None
     self._cleanup_future: Future[None] | None = None
-    self.gpu_status = types.SimpleNamespace(valid=True, last_reading=time.time())
+    self.gpu_status = types.SimpleNamespace(error=None, last_reading=time.monotonic())
 
     self.cpu_totals = self._get_cpu_info_by_node()
     self.mem_totals = self._get_mem_info_by_node(mem_limit_multiplier)
@@ -67,6 +80,8 @@ class ResourceManager():
     self.gpu_locked_job: str | None = None
 
     if self.gpus:
+      check_gpu_health([gpu.bus_id for gpu in self.gpus])
+      self.gpu_status.last_reading = time.monotonic()
       thread = threading.Thread(
         target=check_gpu_status_worker,
         args=([gpu.bus_id for gpu in self.gpus], self.gpu_status),
@@ -115,16 +130,15 @@ class ResourceManager():
   def get_limits(self, task_uuid: str) -> Limits:
     return self._tasks[task_uuid].limits
 
-  def consume(self, limits: Limits, job: str, task_uuid: str) -> None:
+  def check_gpu_status(self) -> None:
     if self.gpus:
-      try:
-        # don't start tasks if the gpus are not responding, or if the gpu status reading is stale
-        if time.time() > self.gpu_status.last_reading + 20:
-          raise Exception("waiting for gpu status reading...")
-        elif not self.gpu_status.valid:
-          raise Exception("unable to read gpu status")
-      except Exception as e:
-        raise ResourceLimitError(str(e)) from e
+      if self.gpu_status.error is not None:
+        raise GPUHealthError(self.gpu_status.error)
+      if time.monotonic() > self.gpu_status.last_reading + 20:
+        raise GPUHealthError("GPU health check has not completed for 20 seconds")
+
+  def consume(self, limits: Limits, job: str, task_uuid: str) -> None:
+    self.check_gpu_status()
 
     mem_bytes = limits.memory * GB_TO_BYTES
     small_gpu_mem_bytes = limits.small_gpu_memory * GB_TO_BYTES
