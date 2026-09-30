@@ -615,7 +615,6 @@ def main():
 
   try:
     while not sigterm_handler.raised:
-      rm.check_gpu_status()
       r_master.set(ACTIVE_KEY, 1, ex=SLEEP_TIME_MAX+1)
       backoff.sleep()
 
