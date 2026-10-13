@@ -31,7 +31,7 @@ from typing import Any, Callable, Iterable, Iterator, NamedTuple, Optional, Sequ
 
 from miniray.lib.helpers import (
   Limits, MinirayError, ExecutionInfo, MinirayFuture, get_execution_info,
-  extract_error, get_stream_logger, is_task_exception, format_task_error,
+  extract_error, get_stream_logger, format_task_error,
 )
 
 MAX_ARG_STRLEN = 131071  # max length for unix string arguments, see https://stackoverflow.com/a/29802900
@@ -501,14 +501,11 @@ def log(iterable: Iterable[Future], logger: Any = DEFAULT_LOGGER,
   statuses_hosts = defaultdict(list)
   iterable = list(iterable)
   for future in tqdm(as_completed(iterable), total=len(iterable), desc=desc, **kwargs):
-    try:
+    if (e := future.exception()) is None:
       result = future.result()
       statuses["Succeeded"] += 1
       results.append(result)
-    except BaseException as e:
-      if not is_task_exception(future, e):
-        raise
-
+    else:
       info = get_execution_info(future) or ExecutionInfo(job='local', worker='local')
       error = extract_error(e)
       statuses[error] += 1
