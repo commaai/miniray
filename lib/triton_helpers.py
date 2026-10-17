@@ -12,10 +12,14 @@ from typing import Any, Callable, Optional, TypedDict
 from redis import StrictRedis
 from tenacity import retry, stop_after_attempt, stop_after_delay, wait_fixed, wait_random
 from tritonclient.http import InferenceServerClient
+from tritonclient.grpc import InferenceServerClient as GrpcInferenceServerClient
 from tritonclient.utils import InferenceServerException
 
 TRITON_REDIS_HOST = os.getenv('TRITON_REDIS_HOST', '127.0.0.1')
 TRITON_SERVER_ADDRESS = os.getenv('TRITON_SERVER_ADDRESS', '127.0.0.1:8000')
+TRITON_GRPC_SERVER_ADDRESS = os.getenv(
+  'TRITON_GRPC_SERVER_ADDRESS', f"{TRITON_SERVER_ADDRESS.rsplit(':', 1)[0]}:8001",
+)
 TRITON_SHM_DIR = Path('/dev/shm')
 TRITON_MODEL_REPOSITORY = Path(os.getenv('TRITON_MODEL_REPOSITORY', '/dev/shm/model-repository'))
 TRITON_MODEL_STALE_AFTER_SECONDS_PARAMETER = 'stale_after_seconds'
@@ -58,7 +62,10 @@ def load_triton_model(client: InferenceServerClient, model: str, config: ModelCo
       time.sleep(min(5, load_timeout))
     assert client.is_model_ready(model)
     return
-  return client.load_model(model, config=json.dumps(config))
+  # HTTP model loading blocks its event loop throughout initialization/compilation,
+  # also stalling unrelated inference requests assigned to that HTTP worker.
+  with GrpcInferenceServerClient(TRITON_GRPC_SERVER_ADDRESS) as grpc_client:
+    return grpc_client.load_model(model, config=json.dumps(config), client_timeout=10*60)
 
 def setup_triton_model(func: Callable[..., ModelConfig]):
   @wraps(func)

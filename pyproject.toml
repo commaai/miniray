@@ -14,6 +14,9 @@ dependencies = [
     "lru-dict>=1.1.0",
     "numpy>=1.20.0",
     "tritonclient[http]>=2.30.0",
+    # The grpc extra caps grpcio/protobuf below the versions used by xx.
+    "grpcio>=1.63.0",
+    "protobuf>=5.26.1",
     "nvidia-ml-py",
     "tenacity",
     "statsd",
