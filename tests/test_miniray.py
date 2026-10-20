@@ -1,6 +1,9 @@
 import os
 import time
 from pathlib import Path
+from queue import Queue
+from threading import Event
+from unittest.mock import Mock
 import numpy as np
 import pytest
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -350,3 +353,101 @@ def test_more_jobs_than_cache_size_does_not_crash_worker():
   finally:
     for ex in executors:
       ex.shutdown(wait=False, cancel_futures=True)
+
+
+@pytest.mark.parametrize('has_submitted_task', [False, True])
+def test_submission_during_lost_task_check(monkeypatch, tmp_path, has_submitted_task):
+  redis = Mock(get=Mock(return_value=b'worker'))
+  monkeypatch.setattr('miniray.executor.StrictRedis', lambda **kwargs: redis)
+  monkeypatch.setattr('miniray.executor.FORCE_LOCAL', False)
+  executor = miniray.Executor(codedir=str(tmp_path))
+  writing, resume = Event(), Event()
+  submitted = Queue()
+  records = {}
+  previous = None
+  if has_submitted_task:
+    previous = executor.submit(is_even, 2)
+    records.update(redis.hsetex.call_args.kwargs['mapping'])
+
+  def write_records(*args, **kwargs):
+    writing.set()
+    assert resume.wait(5)
+    records.update(kwargs['mapping'])
+
+  redis.hsetex.side_effect = write_records
+  with ThreadPoolExecutor(max_workers=1) as pool:
+    writer = pool.submit(lambda: executor._writer_loop(submitted, 'function', [[42]], 1))  # noqa: SLF001
+
+    def read_records(key, task_uuids):
+      observed = [records.get(task_uuid) for task_uuid in task_uuids]
+      resume.set()
+      writer.result(timeout=5)
+      return observed
+
+    redis.hmget.side_effect = read_records
+    try:
+      assert writing.wait(5)
+      executor._check_lost_tasks()  # noqa: SLF001
+    finally:
+      resume.set()
+      writer.result(timeout=5)
+
+  task_uuid, = redis.hsetex.call_args.kwargs['mapping']
+  header = miniray.MinirayResultHeader(
+    executor.submit_queue_id, False, 'worker', 'ValueError', 'worker error', task_uuid)
+  executor._resolve_futures(header, b'')  # noqa: SLF001
+  with pytest.raises(miniray.MinirayError, match='worker error'):
+    submitted.get_nowait().result(timeout=0)
+  if previous is not None:
+    assert not previous.done()
+
+
+@pytest.mark.parametrize('method', ['submit', 'fmap', 'resubmit'])
+def test_result_during_submission(monkeypatch, tmp_path, method):
+  redis = Mock()
+  monkeypatch.setattr('miniray.executor.StrictRedis', lambda **kwargs: redis)
+  monkeypatch.setattr('miniray.executor.FORCE_LOCAL', False)
+  executor = miniray.Executor(codedir=str(tmp_path))
+
+  def finish_task(job, task_uuid):
+    header = miniray.MinirayResultHeader(job, False, 'worker', 'ValueError', 'worker error', task_uuid)
+    executor._resolve_futures(header, b'')  # noqa: SLF001
+
+  redis.lpush.side_effect = finish_task
+  if method == 'submit':
+    future = executor.submit(is_even, 42)
+  elif method == 'fmap':
+    future, = executor.fmap(is_even, [42])
+  else:
+    redis.lpush.side_effect = None
+    future = executor.submit(is_even, 42)
+    task_uuid, = redis.hsetex.call_args.kwargs['mapping']
+    redis.lpush.side_effect = finish_task
+    header = miniray.MinirayResultHeader(
+      executor.submit_queue_id, False, 'worker', 'WorkerShutdown', 'worker stopped', task_uuid)
+    executor._resolve_futures(header, b'')  # noqa: SLF001
+  with pytest.raises(miniray.MinirayError, match='worker error'):
+    future.result(timeout=0)
+  assert not executor._futures  # noqa: SLF001
+
+
+@pytest.mark.parametrize('worker', [b'worker', None])
+def test_missing_task_fails_entire_batch(monkeypatch, tmp_path, worker):
+  redis = Mock(get=Mock(return_value=worker))
+  monkeypatch.setattr('miniray.executor.StrictRedis', lambda **kwargs: redis)
+  monkeypatch.setattr('miniray.executor.FORCE_LOCAL', False)
+  executor = miniray.Executor(codedir=str(tmp_path))
+  futures = list(executor.fmap(is_even, range(10), chunksize=10))
+  task_uuid, = redis.hsetex.call_args.kwargs['mapping']
+  present = executor.submit(is_even, 42)
+  redis.hmget.side_effect = lambda key, task_uuids: [
+    None if uuid == task_uuid else b'present' for uuid in task_uuids]
+
+  executor._check_lost_tasks()  # noqa: SLF001
+
+  for future in futures:
+    with pytest.raises(miniray.MinirayError, match=f'task lost \\({task_uuid}\\)') as excinfo:
+      future.result(timeout=0)
+    assert excinfo.value.exception_type == 'RuntimeError'
+    assert future.execution_info.worker == ('worker' if worker else '')
+  assert not present.done()

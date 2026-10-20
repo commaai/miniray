@@ -240,7 +240,7 @@ class Executor(BaseExecutor):
     self.submit_queue_id = f'{job_desc}-{self.config.queue_name}'
     self.result_queue_id = f'fq-{self.submit_queue_id}'
 
-    self._futures: dict[str, tuple[list[MinirayFuture], bool, bytes]] = {}
+    self._futures: dict[str, tuple[list[MinirayFuture], bytes]] = {}
     self._submit_redis_master = StrictRedis(host=self.config.redis_host, port=6379, db=1, socket_keepalive=True)
     self._result_redis = StrictRedis(host=self.config.redis_host, port=6379, db=5, socket_keepalive=True)
     self._claimed_redis = StrictRedis(host=self.config.redis_host, port=6379, db=2, socket_keepalive=True)
@@ -294,7 +294,7 @@ class Executor(BaseExecutor):
         self._reader_thread.join()
 
       if cancel_futures:
-        for futures, _, _ in self._futures.values():
+        for futures, _ in self._futures.values():
           for future in futures:
             future.cancel()
 
@@ -307,8 +307,7 @@ class Executor(BaseExecutor):
     task_uuid = str(uuid.uuid4())
     function_ptr = self._cache_func_in_redis(fn)
     task = self._pack_task(function_ptr, b'', [args], kwargs, task_uuid)
-    self._submit_tasks([task])
-    self._futures[task_uuid] = ([future], True, task[1])
+    self._submit_tasks([task], {task_uuid: [future]})
     return future
 
   def map(self, fn: Callable, *iterables: Iterable[Any],
@@ -361,11 +360,7 @@ class Executor(BaseExecutor):
         for task_uuid, args in task_args.items():
           _, record = self._pack_task(function_ptr, b'', args, {}, task_uuid)
           tasks[task_uuid] = record
-        for task_uuid, futures in task_futures.items():
-          self._futures[task_uuid] = (futures, False, tasks[task_uuid])  # unsubmitted
-        self._submit_tasks(list(tasks.items()))
-        for task_uuid, futures in task_futures.items():
-          self._futures[task_uuid] = (futures, True, tasks[task_uuid])  # submitted
+        self._submit_tasks(list(tasks.items()), task_futures)
 
       submitted_queue.put(None)  # Signal the end of the stream
     except Exception:
@@ -395,20 +390,21 @@ class Executor(BaseExecutor):
 
   def _check_lost_tasks(self) -> None:
     self._last_lost_check = time.time()
-    if self._futures:
-      tasks_key = get_tasks_key(self.submit_queue_id)
-      sampled_task_uuids = random.sample(list(self._futures.keys()), k=min(1000, len(self._futures)))
-      task_records = cast(list[Optional[bytes]], self._submit_redis_master.hmget(tasks_key, sampled_task_uuids))
+    task_uuids = list(self._futures)
+    if not task_uuids:
+      return
+    tasks_key = get_tasks_key(self.submit_queue_id)
+    sampled_task_uuids = random.sample(task_uuids, k=min(1000, len(task_uuids)))
+    task_records = cast(list[Optional[bytes]], self._submit_redis_master.hmget(tasks_key, sampled_task_uuids))
 
-      for task_uuid, record in zip(sampled_task_uuids, task_records, strict=True):
-        futures, submitted, _ = self._futures[task_uuid]
-        if record is None and submitted:
-          self._futures.pop(task_uuid)
-          claimed = cast(Optional[bytes], self._claimed_redis.get(f"claimed:{task_uuid}"))
-          worker = claimed.decode() if claimed else ""
-          for future in futures:
-            future.execution_info.worker = worker
-            future.set_exception(MinirayError("RuntimeError", f"task lost ({task_uuid})"))
+    for task_uuid, record in zip(sampled_task_uuids, task_records, strict=True):
+      if record is None and (task := self._futures.pop(task_uuid, None)) is not None:
+        futures, _ = task
+        claimed = cast(Optional[bytes], self._claimed_redis.get(f"claimed:{task_uuid}"))
+        worker = claimed.decode() if claimed else ""
+        for future in futures:
+          future.execution_info.worker = worker
+          future.set_exception(MinirayError("RuntimeError", f"task lost ({task_uuid})"))
 
   def _pack_task(self, function_ptr: str, pickled_fn: bytes,
     args: Sequence[Any], kwargs: dict[str, Any], task_uuid: str) -> tuple[str, bytes]:
@@ -443,15 +439,15 @@ class Executor(BaseExecutor):
     header: MinirayResultHeader, record: bytes, reason: str) -> None:
     new_uuid = str(uuid.uuid4())
     record = json.dumps(TaskRecord(*json.loads(record))._replace(uuid=new_uuid), ensure_ascii=False).encode('utf-8')
-    self._submit_tasks([(new_uuid, record)])
+    self._submit_tasks([(new_uuid, record)], {new_uuid: futures})
     print(f"[miniray] task {header.task_uuid} {reason} [{header.worker}], requeued as {new_uuid}", file=sys.stderr)
-    self._futures[new_uuid] = (futures, True, record)  # leave the futures pending; the retry resolves them
 
   def _resolve_futures(self, header: MinirayResultHeader, dat: bytes) -> None:
-    if header.task_uuid not in self._futures:
+    task = self._futures.pop(header.task_uuid, None)
+    if task is None:
       print(f"[ERROR] finished unstarted task: {header.task_uuid} [{header.worker}]", file=sys.stderr)
       return
-    futures, _, record = self._futures.pop(header.task_uuid)
+    futures, record = task
     for future in futures:
       future.execution_info.job = header.job
       future.execution_info.worker = header.worker
@@ -488,11 +484,19 @@ class Executor(BaseExecutor):
       for future in futures:
         future.set_exception(e)
 
-  def _submit_tasks(self, tasks: list[tuple[str, bytes]]) -> None:
+  def _submit_tasks(self, tasks: list[tuple[str, bytes]], task_futures: dict[str, list[MinirayFuture]]) -> None:
+    # Lost-task checks must only see futures whose Redis records already exist.
     self._submit_redis_master.hsetex(
       get_tasks_key(self.submit_queue_id), mapping=dict(tasks), ex=self.config.queue_timeout)
-    uuids = [task_uuid for task_uuid, _ in tasks]
-    self._submit_redis_master.lpush(f'{self.submit_queue_id}', *uuids)
+    # Register futures before workers can consume tasks and return their results.
+    self._futures.update({task_uuid: (task_futures[task_uuid], record) for task_uuid, record in tasks})
+    try:
+      uuids = [task_uuid for task_uuid, _ in tasks]
+      self._submit_redis_master.lpush(f'{self.submit_queue_id}', *uuids)
+    except BaseException:
+      for task_uuid, _ in tasks:
+        self._futures.pop(task_uuid, None)
+      raise
 
 def log(iterable: Iterable[Future], logger: Any = DEFAULT_LOGGER,
   desc: str = 'running miniray tasks', **kwargs: Any) -> list[Any]:
