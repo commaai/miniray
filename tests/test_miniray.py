@@ -3,7 +3,7 @@ import time
 from pathlib import Path
 from queue import Queue
 from threading import Event
-from unittest.mock import Mock
+from typing import Callable
 import numpy as np
 import pytest
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -355,64 +355,70 @@ def test_more_jobs_than_cache_size_does_not_crash_worker():
       ex.shutdown(wait=False, cancel_futures=True)
 
 
-@pytest.fixture
-def submission_executor():
-  # Skip connection setup; exercise the real executor methods with fake Redis.
-  executor = object.__new__(miniray.Executor)
-  executor.config = miniray.JobConfig()
-  executor.executor = executor.submit_queue_id = 'test'
-  executor._futures = {}  # noqa: SLF001
-  executor._shutdown_reader_thread = None  # noqa: SLF001
-  executor._shutdown_writer_threads = False  # noqa: SLF001
-  executor._writer_threads = []  # noqa: SLF001
-  redis = Mock(hmget=Mock(return_value=[None]), get=Mock(return_value=b'worker'))
-  executor._submit_redis_master = executor._claimed_redis = redis  # noqa: SLF001
-  return executor, redis
-
-
-def test_submission_during_lost_task_check(submission_executor):
-  executor, redis = submission_executor
+def test_submission_during_lost_task_check():
+  executor = get_executor(job_name='miniray_test_submission_during_lost_task_check')
+  redis = executor._submit_redis_master  # noqa: SLF001
+  hsetex, hmget = redis.hsetex, redis.hmget
+  function = executor._cache_func_in_redis(abs)  # noqa: SLF001
   writing, resume = Event(), Event()
   submitted = Queue()
 
   def write_records(*args, **kwargs):
     writing.set()
     assert resume.wait(5)
+    return hsetex(*args, **kwargs)
 
-  redis.hsetex.side_effect = write_records
-  with ThreadPoolExecutor(max_workers=1) as pool:
-    writer = pool.submit(lambda: executor._writer_loop(submitted, 'function', [[42]], 1))  # noqa: SLF001
+  redis.hsetex: Callable = write_records
+  try:
+    with ThreadPoolExecutor(max_workers=1) as pool:
+      writer = pool.submit(lambda: executor._writer_loop(submitted, function, [[42]], 1))  # noqa: SLF001
 
-    def read_records(*args):
-      resume.set()
-      writer.result(timeout=5)
-      return [None]  # Deliver the pre-submission reply after submission finishes.
+      def read_records(*args):
+        records = hmget(*args)
+        resume.set()
+        writer.result(timeout=5)
+        return records  # Deliver the real pre-submission reply after submission finishes.
 
-    redis.hmget.side_effect = read_records
-    try:
-      assert writing.wait(5)
-      executor._check_lost_tasks()  # noqa: SLF001
-    finally:
-      resume.set()
-      writer.result(timeout=5)
+      redis.hmget: Callable = read_records
+      try:
+        assert writing.wait(5)
+        executor._check_lost_tasks()  # noqa: SLF001
+      finally:
+        resume.set()
+        writer.result(timeout=5)
 
-  future = submitted.get_nowait()
-  assert not future.done(), future.exception()
+    future = submitted.get_nowait()
+    assert not future.done(), future.exception()
+  finally:
+    executor.shutdown(cancel_futures=True)
 
 
 @pytest.mark.parametrize('method', ['submit', 'fmap'])
-def test_result_during_submission(submission_executor, method):
-  executor, redis = submission_executor
+def test_result_during_submission(method):
+  executor = get_executor(job_name='miniray_test_result_during_submission')
+  redis = executor._submit_redis_master  # noqa: SLF001
+  lpush, resolve = redis.lpush, executor._resolve_futures  # noqa: SLF001
+  received = Event()
 
-  def finish(job, task_uuid):
-    header = miniray.MinirayResultHeader(job, False, 'worker', 'ValueError', 'worker error', task_uuid)
-    executor._resolve_futures(header, b'')  # noqa: SLF001
+  def finish(*args):
+    resolve(*args)
+    received.set()
 
-  redis.lpush.side_effect = finish  # Return a result before enqueueing completes.
-  if method == 'submit':
-    future = executor.submit(abs, 42)
-  else:
-    future, = executor.fmap(abs, [42])
-  with pytest.raises(miniray.MinirayError, match='worker error'):
-    future.result(timeout=0)
-  assert not executor._futures  # noqa: SLF001
+  def enqueue(*args):
+    result = lpush(*args)
+    received.wait(60)  # Let the real worker's result arrive before submission returns.
+    return result
+
+  executor._resolve_futures: Callable = finish  # noqa: SLF001
+  redis.lpush: Callable = enqueue
+  executor.__enter__()
+  try:
+    if method == 'submit':
+      future = executor.submit(abs, -42)
+    else:
+      future, = executor.fmap(abs, [-42])
+    assert received.is_set(), 'Worker did not return a result during submission'
+    assert future.result(timeout=0) == 42
+    assert not executor._futures  # noqa: SLF001
+  finally:
+    executor.shutdown(cancel_futures=True)
