@@ -1,6 +1,8 @@
 import os
 import time
 from pathlib import Path
+from queue import Queue
+from threading import Event
 import numpy as np
 import pytest
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -350,3 +352,72 @@ def test_more_jobs_than_cache_size_does_not_crash_worker():
   finally:
     for ex in executors:
       ex.shutdown(wait=False, cancel_futures=True)
+
+
+def test_submission_during_lost_task_check(monkeypatch):
+  executor = get_executor(job_name='miniray_test_submission_during_lost_task_check')
+  redis = executor._submit_redis_master  # noqa: SLF001
+  hsetex, hmget = redis.hsetex, redis.hmget
+  function = executor._cache_func_in_redis(abs)  # noqa: SLF001
+  writing, resume = Event(), Event()
+  submitted = Queue()
+
+  def write_records(*args, **kwargs):
+    writing.set()
+    assert resume.wait(5)
+    return hsetex(*args, **kwargs)
+
+  monkeypatch.setattr(redis, 'hsetex', write_records)
+  try:
+    with ThreadPoolExecutor(max_workers=1) as pool:
+      writer = pool.submit(lambda: executor._writer_loop(submitted, function, [[42]], 1))  # noqa: SLF001
+
+      def read_records(*args):
+        records = hmget(*args)
+        resume.set()
+        writer.result(timeout=5)
+        return records  # deliver the real pre-submission reply after submission finishes.
+
+      monkeypatch.setattr(redis, 'hmget', read_records)
+      try:
+        assert writing.wait(5)
+        executor._check_lost_tasks()  # noqa: SLF001
+      finally:
+        resume.set()
+        writer.result(timeout=5)
+
+    future = submitted.get_nowait()
+    assert not future.done(), future.exception()
+  finally:
+    executor.shutdown(cancel_futures=True)
+
+
+@pytest.mark.parametrize('method', ['submit', 'fmap'])
+def test_result_during_submission(monkeypatch, method):
+  executor = get_executor(job_name='miniray_test_result_during_submission')
+  redis = executor._submit_redis_master  # noqa: SLF001
+  lpush, resolve = redis.lpush, executor._resolve_futures  # noqa: SLF001
+  received = Event()
+
+  def finish(*args):
+    resolve(*args)
+    received.set()
+
+  def enqueue(*args):
+    result = lpush(*args)
+    received.wait(60)  # let the real worker's result arrive before submission returns.
+    return result
+
+  monkeypatch.setattr(executor, '_resolve_futures', finish)
+  monkeypatch.setattr(redis, 'lpush', enqueue)
+  executor.__enter__()
+  try:
+    if method == 'submit':
+      future = executor.submit(abs, -42)
+    else:
+      future, = executor.fmap(abs, [-42])
+    assert received.is_set(), 'Worker did not return a result during submission'
+    assert future.result(timeout=0) == 42
+    assert not executor._futures  # noqa: SLF001
+  finally:
+    executor.shutdown(cancel_futures=True)
