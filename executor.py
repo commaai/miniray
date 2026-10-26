@@ -485,10 +485,8 @@ class Executor(BaseExecutor):
         future.set_exception(e)
 
   def _submit_tasks(self, tasks: list[tuple[str, bytes]], task_futures: dict[str, list[MinirayFuture]]) -> None:
-    # Lost-task checks must only see futures whose Redis records already exist.
     self._submit_redis_master.hsetex(
       get_tasks_key(self.submit_queue_id), mapping=dict(tasks), ex=self.config.queue_timeout)
-    # Register futures before workers can consume tasks and return their results.
     self._futures.update({task_uuid: (task_futures[task_uuid], record) for task_uuid, record in tasks})
     try:
       uuids = [task_uuid for task_uuid, _ in tasks]
