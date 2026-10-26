@@ -3,7 +3,6 @@ import time
 from pathlib import Path
 from queue import Queue
 from threading import Event
-from typing import Callable
 import numpy as np
 import pytest
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -355,7 +354,7 @@ def test_more_jobs_than_cache_size_does_not_crash_worker():
       ex.shutdown(wait=False, cancel_futures=True)
 
 
-def test_submission_during_lost_task_check():
+def test_submission_during_lost_task_check(monkeypatch):
   executor = get_executor(job_name='miniray_test_submission_during_lost_task_check')
   redis = executor._submit_redis_master  # noqa: SLF001
   hsetex, hmget = redis.hsetex, redis.hmget
@@ -368,7 +367,7 @@ def test_submission_during_lost_task_check():
     assert resume.wait(5)
     return hsetex(*args, **kwargs)
 
-  redis.hsetex: Callable = write_records
+  monkeypatch.setattr(redis, 'hsetex', write_records)
   try:
     with ThreadPoolExecutor(max_workers=1) as pool:
       writer = pool.submit(lambda: executor._writer_loop(submitted, function, [[42]], 1))  # noqa: SLF001
@@ -379,7 +378,7 @@ def test_submission_during_lost_task_check():
         writer.result(timeout=5)
         return records  # Deliver the real pre-submission reply after submission finishes.
 
-      redis.hmget: Callable = read_records
+      monkeypatch.setattr(redis, 'hmget', read_records)
       try:
         assert writing.wait(5)
         executor._check_lost_tasks()  # noqa: SLF001
@@ -394,7 +393,7 @@ def test_submission_during_lost_task_check():
 
 
 @pytest.mark.parametrize('method', ['submit', 'fmap'])
-def test_result_during_submission(method):
+def test_result_during_submission(monkeypatch, method):
   executor = get_executor(job_name='miniray_test_result_during_submission')
   redis = executor._submit_redis_master  # noqa: SLF001
   lpush, resolve = redis.lpush, executor._resolve_futures  # noqa: SLF001
@@ -409,8 +408,8 @@ def test_result_during_submission(method):
     received.wait(60)  # Let the real worker's result arrive before submission returns.
     return result
 
-  executor._resolve_futures: Callable = finish  # noqa: SLF001
-  redis.lpush: Callable = enqueue
+  monkeypatch.setattr(executor, '_resolve_futures', finish)
+  monkeypatch.setattr(redis, 'lpush', enqueue)
   executor.__enter__()
   try:
     if method == 'submit':
