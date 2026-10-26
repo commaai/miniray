@@ -1,8 +1,8 @@
 # miniray
-Miniray is a library for distributed compute across a datacenter. Miniray is designed to dispatch tasks of arbitrary python code through redis. Miniray uses python's *concurrent.futures* API. 
+Miniray is a library for distributed compute across a datacenter. Miniray is designed to dispatch tasks of arbitrary python code through redis. Miniray uses python's *concurrent.futures* API.
 
 ### example
-```
+```py
 import miniray
 
 def is_even(n):
@@ -23,6 +23,6 @@ for a, b, c in zip(results_loop, results_map, results_submit):
 ```
 
 ### want to use?
-If you have tasks that you rant to parallelize across multiple machines, miniray might be right for you! Contact harald@comma.ai if miniray is missing something you would like.
+If you have tasks that you want to parallelize across multiple machines, miniray might be right for you! Contact harald@comma.ai if miniray is missing something you would like.
 
 
