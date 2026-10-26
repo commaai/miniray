@@ -376,7 +376,7 @@ def test_submission_during_lost_task_check(monkeypatch):
         records = hmget(*args)
         resume.set()
         writer.result(timeout=5)
-        return records  # Deliver the real pre-submission reply after submission finishes.
+        return records  # deliver the real pre-submission reply after submission finishes.
 
       monkeypatch.setattr(redis, 'hmget', read_records)
       try:
@@ -405,7 +405,7 @@ def test_result_during_submission(monkeypatch, method):
 
   def enqueue(*args):
     result = lpush(*args)
-    received.wait(60)  # Let the real worker's result arrive before submission returns.
+    received.wait(60)  # let the real worker's result arrive before submission returns.
     return result
 
   monkeypatch.setattr(executor, '_resolve_futures', finish)
